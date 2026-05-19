@@ -1,0 +1,6 @@
+dist/
+.DS_Store
+/.build
+/.vscode
+*.env
+.env.local
