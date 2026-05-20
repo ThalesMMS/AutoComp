@@ -23,7 +23,7 @@ final class PermissionService: ObservableObject {
         startRefreshing()
     }
 
-    deinit {
+    isolated deinit {
         refreshTimer?.invalidate()
     }
 
@@ -41,7 +41,7 @@ final class PermissionService: ObservableObject {
     }
 
     func requestAccessibility() {
-        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+        let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
         accessibilityTrusted = AXIsProcessTrustedWithOptions(options)
     }
 
@@ -105,25 +105,39 @@ final class PermissionService: ObservableObject {
         updateRuntimeIdentity()
     }
 
-    func openAccessibilitySettings() {
-        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") else {
-            return
+    var permissionPresentations: [PermissionPresentation] {
+        PermissionKind.allCases.map { presentation(for: $0) }
+    }
+
+    func presentation(for kind: PermissionKind) -> PermissionPresentation {
+        PermissionPresentationFactory.presentation(for: kind, state: stateSnapshot)
+    }
+
+    func request(_ kind: PermissionKind) {
+        switch kind {
+        case .accessibility:
+            requestAccessibility()
+        case .inputMonitoring:
+            requestInputMonitoring()
+        case .screenRecording:
+            requestScreenRecording()
         }
-        NSWorkspace.shared.open(url)
+    }
+
+    func openSettings(for kind: PermissionKind) {
+        NSWorkspace.shared.open(kind.settingsURL)
+    }
+
+    func openAccessibilitySettings() {
+        openSettings(for: .accessibility)
     }
 
     func openInputMonitoringSettings() {
-        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent") else {
-            return
-        }
-        NSWorkspace.shared.open(url)
+        openSettings(for: .inputMonitoring)
     }
 
     func openScreenRecordingSettings() {
-        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") else {
-            return
-        }
-        NSWorkspace.shared.open(url)
+        openSettings(for: .screenRecording)
     }
 
     private func startRefreshing() {
@@ -156,5 +170,16 @@ final class PermissionService: ObservableObject {
         } else {
             screenRecordingStatus = "Optional; improves visible context capture."
         }
+    }
+
+    private var stateSnapshot: PermissionStateSnapshot {
+        PermissionStateSnapshot(
+            accessibilityTrusted: accessibilityTrusted,
+            inputMonitoringAllowed: inputMonitoringAllowed,
+            inputMonitoringStatus: inputMonitoringStatus,
+            screenRecordingAllowed: screenRecordingAllowed,
+            screenRecordingNeedsRelaunch: screenRecordingNeedsRelaunch,
+            screenRecordingStatus: screenRecordingStatus
+        )
     }
 }

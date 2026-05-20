@@ -1,27 +1,23 @@
 import AppKit
 import Foundation
 
-final class KeyboardShortcutService {
+final class KeyboardShortcutService: @unchecked Sendable {
     private var eventTaps: [CFMachPort] = []
     private var runLoopSources: [CFRunLoopSource] = []
     private var onTab: (() -> Void)?
     private var onAcceptAll: (() -> Void)?
-    private var onSuggestionTriggerKey: (() -> Void)?
-    private let state = ShortcutActivationState()
-    private let consumptionLock = NSLock()
-    private var lastConsumedShortcutKeyCode: UInt16?
-    private var lastConsumedShortcutEventTimestamp: CGEventTimestamp?
-    private var suppressedKeyReleases: [UInt16: Date] = [:]
-    private let tabKeyCode: UInt16 = 48
-    private let spaceKeyCode: UInt16 = 49
-    private let rightShiftKeyCode: UInt16 = 60
-    private let shortcutGraceInterval: TimeInterval = 0.9
-    private let keyReleaseSuppressionInterval: TimeInterval = 1.2
+    private var onSuggestionTriggerKey: ((CapturedInputEvent) -> Void)?
+    private let inputEventAdapter = CapturedInputEventAdapter()
+    private let inputSuppressionController: InputSuppressionController
+
+    init(inputSuppressionController: InputSuppressionController = InputSuppressionController()) {
+        self.inputSuppressionController = inputSuppressionController
+    }
 
     func start(
         onTab: @escaping () -> Void,
         onAcceptAll: @escaping () -> Void,
-        onSuggestionTriggerKey: (() -> Void)? = nil
+        onSuggestionTriggerKey: ((CapturedInputEvent) -> Void)? = nil
     ) {
         stop()
         configureHandlers(
@@ -102,29 +98,30 @@ final class KeyboardShortcutService {
         onTab = nil
         onAcceptAll = nil
         onSuggestionTriggerKey = nil
-        lastConsumedShortcutKeyCode = nil
-        lastConsumedShortcutEventTimestamp = nil
-        suppressedKeyReleases = [:]
-        state.setSuggestionActive(false)
+        inputSuppressionController.reset()
     }
 
     func setSuggestionActive(_ active: Bool) {
-        state.setSuggestionActive(active)
-        GeometryDebug.log("shortcut-active active=\(active) armed=\(state.isShortcutArmed)")
+        inputSuppressionController.setSuggestionActive(active)
+        GeometryDebug.log("shortcut-active active=\(active) armed=\(inputSuppressionController.isShortcutArmed)")
     }
 
     func clearShortcutGrace() {
-        state.clearShortcutGrace()
+        inputSuppressionController.clearShortcutGrace()
     }
 
     func configureHandlers(
         onTab: @escaping () -> Void,
         onAcceptAll: @escaping () -> Void,
-        onSuggestionTriggerKey: (() -> Void)? = nil
+        onSuggestionTriggerKey: ((CapturedInputEvent) -> Void)? = nil
     ) {
         self.onTab = onTab
         self.onAcceptAll = onAcceptAll
         self.onSuggestionTriggerKey = onSuggestionTriggerKey
+    }
+
+    func capturedInputEvent(type: CGEventType, event: CGEvent) -> CapturedInputEvent? {
+        inputEventAdapter.event(for: type, event: event)
     }
 
     func handle(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
@@ -138,7 +135,7 @@ final class KeyboardShortcutService {
 
         if type == .keyUp {
             let keyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
-            if shouldSuppressKeyRelease(keyCode: keyCode) {
+            if inputSuppressionController.shouldSuppressKeyRelease(keyCode: keyCode) {
                 GeometryDebug.log("shortcut-keyup-suppressed keyCode=\(keyCode)")
                 return nil
             }
@@ -154,11 +151,16 @@ final class KeyboardShortcutService {
         }
 
         let keyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
-        let isShortcutKey = keyCode == tabKeyCode
-        let isArmed = state.isShortcutArmed
-        if isSuggestionTriggerSpace(event, keyCode: keyCode) {
-            DispatchQueue.main.async { [weak self] in
-                self?.onSuggestionTriggerKey?()
+        let inputEvent = capturedInputEvent(type: type, event: event)
+        let isShortcutKey = inputEvent == .tab
+        let isArmed = inputSuppressionController.isShortcutArmed
+        if let inputEvent, inputEvent.isSuggestionTrigger {
+            if inputSuppressionController.shouldSuppressSyntheticInput(inputEvent) {
+                GeometryDebug.log("suggestion-trigger-suppressed reason=synthetic-input kind=\(inputEvent.debugName)")
+            } else {
+                DispatchQueue.main.async { [weak self] in
+                    self?.onSuggestionTriggerKey?(inputEvent)
+                }
             }
         }
         if isShortcutKey {
@@ -170,15 +172,16 @@ final class KeyboardShortcutService {
             return Unmanaged.passUnretained(event)
         }
 
-        if keyCode == tabKeyCode {
+        if inputEvent == .tab {
             guard hasNoTabModifiers(event) else {
                 return Unmanaged.passUnretained(event)
             }
-            guard markShortcutConsumptionIfNeeded(keyCode: keyCode, event: event) else {
+            guard inputSuppressionController.consumeShortcutIfNeeded(
+                keyCode: keyCode,
+                eventTimestamp: event.timestamp
+            ) else {
                 return nil
             }
-            suppressKeyRelease(for: keyCode)
-            state.extendShortcutGrace(by: shortcutGraceInterval)
             GeometryDebug.log("shortcut-consumed action=tab")
             DispatchQueue.main.async { [weak self] in
                 self?.onTab?()
@@ -191,33 +194,35 @@ final class KeyboardShortcutService {
 
     private func handleFlagsChanged(_ event: CGEvent) -> Unmanaged<CGEvent>? {
         let keyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
-        guard keyCode == rightShiftKeyCode else {
+        let inputEvent = capturedInputEvent(type: .flagsChanged, event: event)
+        guard keyCode == CapturedInputEventAdapter.rightShiftKeyCode else {
             return Unmanaged.passUnretained(event)
         }
 
         let isRightShiftDown = event.flags.contains(.maskShift)
         if !isRightShiftDown {
-            if shouldSuppressKeyRelease(keyCode: keyCode) {
+            if inputSuppressionController.shouldSuppressKeyRelease(keyCode: keyCode) {
                 GeometryDebug.log("shortcut-flags-release-suppressed keyCode=\(keyCode)")
                 return nil
             }
             return Unmanaged.passUnretained(event)
         }
 
-        let isArmed = state.isShortcutArmed
-        let modifiersOK = hasNoAcceptAllModifiers(event)
+        let isArmed = inputSuppressionController.isShortcutArmed
+        let modifiersOK = inputEvent == .acceptAll
         GeometryDebug.log("shortcut-modifier keyCode=\(keyCode) armed=\(isArmed) modifiersOK=\(modifiersOK)")
 
         guard isArmed, modifiersOK else {
             return Unmanaged.passUnretained(event)
         }
 
-        guard markShortcutConsumptionIfNeeded(keyCode: keyCode, event: event) else {
+        guard inputSuppressionController.consumeShortcutIfNeeded(
+            keyCode: keyCode,
+            eventTimestamp: event.timestamp
+        ) else {
             return nil
         }
 
-        suppressKeyRelease(for: keyCode)
-        state.extendShortcutGrace(by: shortcutGraceInterval)
         GeometryDebug.log("shortcut-consumed action=acceptAll")
         DispatchQueue.main.async { [weak self] in
             self?.onAcceptAll?()
@@ -225,88 +230,8 @@ final class KeyboardShortcutService {
         return nil
     }
 
-    private func markShortcutConsumptionIfNeeded(keyCode: UInt16, event: CGEvent) -> Bool {
-        consumptionLock.lock()
-        defer { consumptionLock.unlock() }
-
-        if event.timestamp > 0,
-           lastConsumedShortcutKeyCode == keyCode,
-           lastConsumedShortcutEventTimestamp == event.timestamp {
-            GeometryDebug.log("shortcut-consumed duplicate-suppressed keyCode=\(keyCode)")
-            return false
-        }
-
-        lastConsumedShortcutKeyCode = keyCode
-        lastConsumedShortcutEventTimestamp = event.timestamp
-        return true
-    }
-
-    private func suppressKeyRelease(for keyCode: UInt16) {
-        consumptionLock.lock()
-        defer { consumptionLock.unlock() }
-
-        pruneExpiredSuppressedKeyReleases(now: Date())
-        suppressedKeyReleases[keyCode] = Date().addingTimeInterval(keyReleaseSuppressionInterval)
-    }
-
-    private func shouldSuppressKeyRelease(keyCode: UInt16) -> Bool {
-        consumptionLock.lock()
-        defer { consumptionLock.unlock() }
-
-        let now = Date()
-        pruneExpiredSuppressedKeyReleases(now: now)
-        guard let suppressUntil = suppressedKeyReleases[keyCode],
-              now <= suppressUntil else {
-            return false
-        }
-        return true
-    }
-
-    private func pruneExpiredSuppressedKeyReleases(now: Date) {
-        suppressedKeyReleases = suppressedKeyReleases.filter { $0.value >= now }
-    }
-
     private func hasNoTabModifiers(_ event: CGEvent) -> Bool {
         event.flags.intersection([.maskCommand, .maskAlternate, .maskControl, .maskShift]).isEmpty
     }
 
-    private func hasNoAcceptAllModifiers(_ event: CGEvent) -> Bool {
-        event.flags.intersection([.maskCommand, .maskAlternate, .maskControl]).isEmpty
-    }
-
-    private func isSuggestionTriggerSpace(_ event: CGEvent, keyCode: UInt16) -> Bool {
-        keyCode == spaceKeyCode
-            && event.flags.intersection([.maskCommand, .maskAlternate, .maskControl]).isEmpty
-    }
-
-}
-
-private final class ShortcutActivationState {
-    private let lock = NSLock()
-    private var active = false
-    private var shortcutGraceUntil: Date = .distantPast
-
-    var isShortcutArmed: Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return active || Date() <= shortcutGraceUntil
-    }
-
-    func setSuggestionActive(_ active: Bool) {
-        lock.lock()
-        self.active = active
-        lock.unlock()
-    }
-
-    func extendShortcutGrace(by interval: TimeInterval) {
-        lock.lock()
-        shortcutGraceUntil = Date().addingTimeInterval(interval)
-        lock.unlock()
-    }
-
-    func clearShortcutGrace() {
-        lock.lock()
-        shortcutGraceUntil = .distantPast
-        lock.unlock()
-    }
 }

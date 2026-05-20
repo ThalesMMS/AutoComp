@@ -98,10 +98,12 @@ final class PreviewCoordinatorTests: XCTestCase {
         let native = RecordingPreviewPresenter(canPresentResult: false)
         let visual = RecordingPreviewPresenter(canPresentResult: true)
         let mirror = RecordingPreviewPresenter(canPresentResult: true)
+        let indicator = RecordingActivationIndicatorPresenter()
         let coordinator = PreviewCoordinator(
             nativeInlinePresenter: native,
             visualInlinePresenter: visual,
-            mirrorWindowPresenter: mirror
+            mirrorWindowPresenter: mirror,
+            activationIndicator: indicator
         )
 
         coordinator.show(suggestion(), for: context(), mode: .inline)
@@ -110,6 +112,27 @@ final class PreviewCoordinatorTests: XCTestCase {
         XCTAssertEqual(coordinator.activeTier, .disabled)
         XCTAssertGreaterThanOrEqual(visual.hideCount, 1)
         XCTAssertEqual(mirror.showCount, 0)
+        XCTAssertEqual(indicator.hideCount, 1)
+    }
+
+    func testActivationIndicatorTracksResolvedPreviewActivity() {
+        let native = RecordingPreviewPresenter(canPresentResult: false)
+        let visual = RecordingPreviewPresenter(canPresentResult: true)
+        let mirror = RecordingPreviewPresenter(canPresentResult: true)
+        let indicator = RecordingActivationIndicatorPresenter()
+        let coordinator = PreviewCoordinator(
+            nativeInlinePresenter: native,
+            visualInlinePresenter: visual,
+            mirrorWindowPresenter: mirror,
+            activationIndicator: indicator
+        )
+
+        coordinator.show(suggestion(), for: context(), mode: .inline)
+        coordinator.update(suggestion(), for: context(), mode: .mirrorWindow)
+        coordinator.hide()
+
+        XCTAssertEqual(indicator.showModes, [.inline, .mirrorWindow])
+        XCTAssertEqual(indicator.hideCount, 1)
     }
 
     func testShortcutAwarePresenterMirrorsResolvedPreviewActivity() {
@@ -173,6 +196,20 @@ private final class RecordingPreviewPresenter: NativeInlineSuggestionPresenting,
 
     func update(_ suggestion: Suggestion, for context: TextContext) {
         updateCount += 1
+    }
+
+    func hide() {
+        hideCount += 1
+    }
+}
+
+@MainActor
+private final class RecordingActivationIndicatorPresenter: ActivationIndicatorPresenting {
+    private(set) var showModes: [SuggestionDisplayMode] = []
+    private(set) var hideCount = 0
+
+    func show(for context: TextContext, displayMode: SuggestionDisplayMode) {
+        showModes.append(displayMode)
     }
 
     func hide() {

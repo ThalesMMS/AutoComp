@@ -65,6 +65,8 @@ cat >"$INFO_PLIST" <<PLIST
   <string>$MIN_SYSTEM_VERSION</string>
   <key>NSAppleEventsUsageDescription</key>
   <string>AutoComp reads the active browser tab URL locally to apply per-domain compatibility and privacy rules.</string>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>AutoComp connects to your configured autocomplete backend on the local network when you use a LAN endpoint.</string>
   <key>NSAppTransportSecurity</key>
   <dict>
     <key>NSAllowsArbitraryLoads</key>

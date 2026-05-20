@@ -40,6 +40,27 @@ struct MenuBarContentView: View {
 
             Divider()
 
+            VStack(alignment: .leading, spacing: 5) {
+                Label("Diagnostics", systemImage: "stethoscope")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                ForEach(engine.diagnostics.menuRows) { row in
+                    HStack(alignment: .firstTextBaseline) {
+                        Text(row.title)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Text(row.value)
+                            .font(.caption2)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                }
+            }
+
+            Divider()
+
             Button {
                 controller.showOnboardingWindow()
             } label: {

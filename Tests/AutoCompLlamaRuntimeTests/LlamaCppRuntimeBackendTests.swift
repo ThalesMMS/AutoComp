@@ -1,0 +1,108 @@
+import AutoCompCore
+@testable import AutoCompLlamaRuntime
+import XCTest
+
+final class LlamaCppRuntimeBackendTests: XCTestCase {
+    func testMissingModelFileFailsClearly() async {
+        let missingPath = FileManager.default.temporaryDirectory
+            .appendingPathComponent("missing-\(UUID().uuidString).gguf")
+            .path
+        let backend = LlamaCppRuntimeBackend(loadVocabularyOnly: true)
+
+        do {
+            try await backend.loadModel(configuration: LocalLlamaConfiguration(modelPath: missingPath))
+            XCTFail("Expected missing model error")
+        } catch let error as LocalLlamaError {
+            XCTAssertEqual(error, .modelNotFound(missingPath))
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
+    func testGenerationWithoutLoadedModelFailsClearly() async {
+        let backend = LlamaCppRuntimeBackend(loadVocabularyOnly: true)
+
+        do {
+            _ = try await backend.generateCompletion(for: makeRequest())
+            XCTFail("Expected generation error")
+        } catch let error as LocalLlamaError {
+            XCTAssertEqual(error, .runtimeUnavailable)
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
+    func testPromptCacheCompatibilityHitsForSharedPrefix() {
+        let decision = LlamaPromptCacheCompatibility.evaluate(
+            cachedTokens: [10, 11, 12],
+            cachedMaxTokens: 12,
+            cachedTemperature: 0.2,
+            promptTokens: [10, 11, 15, 16],
+            maxTokens: 12,
+            temperature: 0.2
+        )
+
+        XCTAssertTrue(decision.canReuse)
+        XCTAssertEqual(decision.commonPrefixTokens, 2)
+    }
+
+    func testPromptCacheCompatibilityMissesWithoutSharedPrefix() {
+        let decision = LlamaPromptCacheCompatibility.evaluate(
+            cachedTokens: [10, 11, 12],
+            cachedMaxTokens: 12,
+            cachedTemperature: 0.2,
+            promptTokens: [20, 21, 22],
+            maxTokens: 12,
+            temperature: 0.2
+        )
+
+        XCTAssertFalse(decision.canReuse)
+        XCTAssertEqual(decision.commonPrefixTokens, 0)
+    }
+
+    func testPromptCacheCompatibilityMissesWhenSamplingChanges() {
+        let tokenDecision = LlamaPromptCacheCompatibility.evaluate(
+            cachedTokens: [10, 11, 12],
+            cachedMaxTokens: 12,
+            cachedTemperature: 0.2,
+            promptTokens: [10, 11, 12, 13],
+            maxTokens: 16,
+            temperature: 0.2
+        )
+        let temperatureDecision = LlamaPromptCacheCompatibility.evaluate(
+            cachedTokens: [10, 11, 12],
+            cachedMaxTokens: 12,
+            cachedTemperature: 0.2,
+            promptTokens: [10, 11, 12, 13],
+            maxTokens: 12,
+            temperature: 0.7
+        )
+
+        XCTAssertFalse(tokenDecision.canReuse)
+        XCTAssertFalse(temperatureDecision.canReuse)
+    }
+
+    func testPromptCacheStatsAreEmptyBeforeModelLoadAndAfterShutdown() async {
+        let backend = LlamaCppRuntimeBackend(loadVocabularyOnly: true)
+
+        XCTAssertEqual(backend.cacheStats(), .empty)
+        await backend.shutdown()
+        XCTAssertEqual(backend.cacheStats(), .empty)
+    }
+
+    private func makeRequest() -> CompletionRequest {
+        let context = TextContext(
+            app: AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1),
+            focusedElementID: "field",
+            textBeforeCursor: "Can you "
+        )
+        return CompletionRequestFactory().makeRequest(
+            for: context,
+            configuration: RemoteCompletionConfiguration(
+                baseURL: "local://in-process",
+                apiKey: "local",
+                model: "local-llama"
+            )
+        )
+    }
+}

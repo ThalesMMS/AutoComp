@@ -13,35 +13,17 @@ struct OnboardingView: View {
                     .foregroundStyle(.secondary)
             }
 
-            PermissionCard(
-                title: "Accessibility",
-                status: permissions.accessibilityTrusted ? "Enabled" : "Required",
-                systemImage: "lock.shield",
-                isComplete: permissions.accessibilityTrusted,
-                description: "AutoComp uses Accessibility to read the active text field and insert accepted completions.",
-                actionTitle: "Enable Accessibility",
-                action: permissions.requestAccessibility
-            )
-
-            PermissionCard(
-                title: "Input Monitoring",
-                status: permissions.inputMonitoringAllowed ? "Enabled" : "Required",
-                systemImage: "keyboard",
-                isComplete: permissions.inputMonitoringAllowed,
-                description: permissions.inputMonitoringStatus,
-                actionTitle: "Enable Input Monitoring",
-                action: permissions.requestInputMonitoring
-            )
-
-            PermissionCard(
-                title: "Screen Recording",
-                status: permissions.screenRecordingAllowed ? "Enabled" : (permissions.screenRecordingNeedsRelaunch ? "Relaunch Required" : "Optional"),
-                systemImage: "rectangle.dashed",
-                isComplete: permissions.screenRecordingAllowed,
-                description: permissions.screenRecordingStatus,
-                actionTitle: "Enable Screen Recording",
-                action: permissions.requestScreenRecording
-            )
+            ForEach(permissions.permissionPresentations) { permission in
+                PermissionCard(
+                    permission: permission,
+                    requestAction: {
+                        permissions.request(permission.kind)
+                    },
+                    openSettingsAction: {
+                        permissions.openSettings(for: permission.kind)
+                    }
+                )
+            }
 
             HStack {
                 Button {
@@ -52,7 +34,7 @@ struct OnboardingView: View {
                 }
 
                 Button {
-                    permissions.openAccessibilitySettings()
+                    permissions.openSettings(for: .accessibility)
                 } label: {
                     Label("Open Privacy Settings", systemImage: "gear")
                 }
@@ -89,38 +71,51 @@ struct OnboardingView: View {
 }
 
 private struct PermissionCard: View {
-    let title: String
-    let status: String
-    let systemImage: String
-    let isComplete: Bool
-    let description: String
-    let actionTitle: String
-    let action: () -> Void
+    let permission: PermissionPresentation
+    let requestAction: () -> Void
+    let openSettingsAction: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 10) {
-                Image(systemName: systemImage)
-                    .foregroundStyle(isComplete ? .green : .orange)
+                Image(systemName: permission.systemImage)
+                    .foregroundStyle(permission.isComplete ? .green : .orange)
                     .frame(width: 18)
 
-                Text(title)
+                Text(permission.title)
                     .font(.headline)
 
                 Spacer()
 
-                Text(status)
+                Text(permission.statusTitle)
                     .font(.caption.weight(.medium))
-                    .foregroundStyle(isComplete ? .green : .orange)
+                    .foregroundStyle(permission.isComplete ? .green : .orange)
             }
 
-            Text(description)
-                .font(.callout)
-                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Reason")
+                    .font(.caption.weight(.medium))
+                Text(permission.message)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
 
-            if !isComplete {
-                Button(action: action) {
-                    Label(actionTitle, systemImage: "arrow.up.forward.app")
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Next step")
+                    .font(.caption.weight(.medium))
+                Text(permission.nextActionTitle)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+
+            if !permission.isComplete {
+                HStack {
+                    Button(action: requestAction) {
+                        Label(permission.requestButtonTitle, systemImage: "arrow.up.forward.app")
+                    }
+                    Button(action: openSettingsAction) {
+                        Label(permission.openSettingsButtonTitle, systemImage: "gear")
+                    }
                 }
             }
         }

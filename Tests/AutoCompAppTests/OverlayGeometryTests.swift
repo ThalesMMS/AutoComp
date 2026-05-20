@@ -3,6 +3,185 @@ import AutoCompCore
 import XCTest
 
 final class OverlayGeometryTests: XCTestCase {
+    func testTextGeometryQualityPrefersDirectCaretOverGlyph() {
+        let quality = AXTextGeometryResolver.bestQuality(
+            caretRect: CGRect(x: 100, y: 20, width: 2, height: 20),
+            previousGlyphRect: CGRect(x: 92, y: 20, width: 8, height: 20),
+            lineReferenceRect: CGRect(x: 92, y: 20, width: 8, height: 20),
+            focusedElementRect: CGRect(x: 80, y: 10, width: 300, height: 40)
+        )
+
+        XCTAssertEqual(quality, .directCaret)
+    }
+
+    func testTextGeometryQualityFallsBackThroughGlyphLineMetricAndElementFrame() {
+        XCTAssertEqual(
+            AXTextGeometryResolver.bestQuality(
+                caretRect: nil,
+                previousGlyphRect: CGRect(x: 92, y: 20, width: 8, height: 20),
+                lineReferenceRect: CGRect(x: 80, y: 20, width: 80, height: 20),
+                focusedElementRect: CGRect(x: 80, y: 10, width: 300, height: 40)
+            ),
+            .glyph
+        )
+        XCTAssertEqual(
+            AXTextGeometryResolver.bestQuality(
+                caretRect: nil,
+                previousGlyphRect: nil,
+                lineReferenceRect: CGRect(x: 80, y: 20, width: 80, height: 20),
+                focusedElementRect: CGRect(x: 80, y: 10, width: 300, height: 40)
+            ),
+            .lineMetric
+        )
+        XCTAssertEqual(
+            AXTextGeometryResolver.bestQuality(
+                caretRect: nil,
+                previousGlyphRect: nil,
+                lineReferenceRect: nil,
+                focusedElementRect: CGRect(x: 80, y: 10, width: 300, height: 40)
+            ),
+            .elementFrame
+        )
+        XCTAssertEqual(
+            AXTextGeometryResolver.bestQuality(
+                caretRect: nil,
+                previousGlyphRect: nil,
+                lineReferenceRect: nil,
+                focusedElementRect: nil
+            ),
+            .unavailable
+        )
+    }
+
+    func testObservedCharacterWidthUsesGlyphMetrics() {
+        XCTAssertEqual(
+            AXTextGeometryResolver.observedCharacterWidth(
+                previousGlyphRect: CGRect(x: 92, y: 20, width: 8, height: 20),
+                nextGlyphRect: CGRect(x: 102, y: 20, width: 9, height: 20)
+            ),
+            8
+        )
+        XCTAssertEqual(
+            AXTextGeometryResolver.observedCharacterWidth(
+                previousGlyphRect: nil,
+                nextGlyphRect: CGRect(x: 102, y: 20, width: 9, height: 20)
+            ),
+            9
+        )
+        XCTAssertNil(
+            AXTextGeometryResolver.observedCharacterWidth(
+                previousGlyphRect: CGRect(x: 92, y: 20, width: 120, height: 20),
+                nextGlyphRect: nil
+            )
+        )
+    }
+
+    func testTextMarkerFallbackEligibilityIsLimitedToBrowsers() {
+        XCTAssertTrue(AXTextMarkerGeometryFallback.isEligibleBrowser(bundleID: "com.google.Chrome"))
+        XCTAssertTrue(AXTextMarkerGeometryFallback.isEligibleBrowser(bundleID: "com.apple.Safari"))
+        XCTAssertFalse(AXTextMarkerGeometryFallback.isEligibleBrowser(bundleID: "com.apple.TextEdit"))
+    }
+
+    func testTextMarkerFallbackGateRejectsWhenDisabled() {
+        let gate = AXTextMarkerGeometryFallback.gate(
+            bundleID: "com.google.Chrome",
+            geometry: weakGeometry(),
+            isEnabled: false
+        )
+
+        XCTAssertEqual(gate, .rejected(reason: "disabled"))
+    }
+
+    func testTextMarkerFallbackGateRejectsNativeAppsAndStrongGeometry() {
+        XCTAssertEqual(
+            AXTextMarkerGeometryFallback.gate(
+                bundleID: "com.apple.TextEdit",
+                geometry: weakGeometry(),
+                isEnabled: true
+            ),
+            .rejected(reason: "ineligible-bundle")
+        )
+        XCTAssertEqual(
+            AXTextMarkerGeometryFallback.gate(
+                bundleID: "com.google.Chrome",
+                geometry: strongGeometry(),
+                isEnabled: true
+            ),
+            .rejected(reason: "strong-geometry")
+        )
+    }
+
+    func testTextMarkerFallbackGateAttemptsOnlyForWeakBrowserGeometryWhenEnabled() {
+        XCTAssertEqual(
+            AXTextMarkerGeometryFallback.gate(
+                bundleID: "com.google.Chrome",
+                geometry: weakGeometry(),
+                isEnabled: true
+            ),
+            .attempt
+        )
+    }
+
+    func testCaretPredictionShiftsCaretByAcceptedChunkWidth() {
+        let predicted = CaretPrediction.predictedCaretRect(
+            acceptedChunk: "next ",
+            oldCaretRect: CGRect(x: 100, y: 20, width: 2, height: 20),
+            geometryQuality: .directCaret,
+            observedCharacterWidth: 8
+        )
+
+        XCTAssertEqual(predicted, CGRect(x: 140, y: 20, width: 2, height: 20))
+    }
+
+    func testCaretPredictionFallsBackWithoutObservedCharacterWidth() {
+        let predicted = CaretPrediction.predictedCaretRect(
+            acceptedChunk: "next ",
+            oldCaretRect: CGRect(x: 100, y: 20, width: 2, height: 20),
+            geometryQuality: .directCaret,
+            observedCharacterWidth: nil
+        )
+
+        XCTAssertNil(predicted)
+    }
+
+    func testCaretPredictionFallsBackForWeakGeometryQuality() {
+        let predicted = CaretPrediction.predictedCaretRect(
+            acceptedChunk: "next ",
+            oldCaretRect: CGRect(x: 100, y: 20, width: 2, height: 20),
+            geometryQuality: .elementFrame,
+            observedCharacterWidth: 8
+        )
+
+        XCTAssertNil(predicted)
+    }
+
+    func testPredictedContextUsesAcceptedTextUntilNextAccessibilityRefresh() {
+        let context = textContext(
+            textBeforeCursor: "Please ",
+            selectedRange: NSRange(location: 7, length: 0),
+            caretRect: CGRect(x: 100, y: 20, width: 2, height: 20),
+            focusedElementRect: CGRect(x: 0, y: 0, width: 500, height: 120),
+            previousGlyphRect: CGRect(x: 92, y: 20, width: 8, height: 20)
+        )
+
+        let predicted = CaretPrediction.predictedContext(
+            afterAccepting: "next ",
+            from: context
+        )
+
+        XCTAssertEqual(predicted?.textBeforeCursor, "Please next ")
+        XCTAssertEqual(predicted?.caretRect, CGRect(x: 140, y: 20, width: 2, height: 20))
+
+        let refreshed = textContext(
+            textBeforeCursor: "Please next ",
+            selectedRange: NSRange(location: 12, length: 0),
+            caretRect: CGRect(x: 141, y: 20, width: 2, height: 20),
+            focusedElementRect: CGRect(x: 0, y: 0, width: 500, height: 120),
+            previousGlyphRect: CGRect(x: 133, y: 20, width: 8, height: 20)
+        )
+        XCTAssertEqual(refreshed.caretRect, CGRect(x: 141, y: 20, width: 2, height: 20))
+    }
+
     func testFineCaretAnchorsInlinePreviewImmediatelyAfterCursor() {
         let layout = InlinePreviewGeometry.layout(
             context: textContext(
@@ -258,6 +437,30 @@ final class OverlayGeometryTests: XCTestCase {
             previousGlyphRect: previousGlyphRect,
             nextGlyphRect: nextGlyphRect,
             lineReferenceRect: lineReferenceRect
+        )
+    }
+
+    private func weakGeometry() -> AXTextGeometrySnapshot {
+        AXTextGeometrySnapshot(
+            focusedElementRect: CGRect(x: 80, y: 10, width: 300, height: 40),
+            caretRect: nil,
+            previousGlyphRect: nil,
+            nextGlyphRect: nil,
+            lineReferenceRect: nil,
+            caretGeometryQuality: .elementFrame,
+            observedCharacterWidth: nil
+        )
+    }
+
+    private func strongGeometry() -> AXTextGeometrySnapshot {
+        AXTextGeometrySnapshot(
+            focusedElementRect: CGRect(x: 80, y: 10, width: 300, height: 40),
+            caretRect: CGRect(x: 100, y: 20, width: 2, height: 20),
+            previousGlyphRect: CGRect(x: 92, y: 20, width: 8, height: 20),
+            nextGlyphRect: nil,
+            lineReferenceRect: CGRect(x: 92, y: 20, width: 8, height: 20),
+            caretGeometryQuality: .directCaret,
+            observedCharacterWidth: 8
         )
     }
 }

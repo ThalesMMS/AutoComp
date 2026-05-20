@@ -8,6 +8,14 @@ public protocol CompletionProvider: Sendable {
     func complete(context: TextContext) async throws -> Suggestion
 }
 
+public protocol VisualContextAwareCompletionProvider: CompletionProvider {
+    func complete(
+        context: TextContext,
+        privacySettings: PrivacySettings,
+        visualContext: VisualContextSnapshot?
+    ) async throws -> Suggestion
+}
+
 @MainActor
 public protocol SuggestionPresenter: AnyObject {
     func show(_ suggestion: Suggestion, for context: TextContext, mode: SuggestionDisplayMode)

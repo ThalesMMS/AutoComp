@@ -13,6 +13,7 @@ printf '' >/tmp/autocomp-inline-preview-smoke.txt
 /usr/bin/open -a TextEdit /tmp/autocomp-inline-preview-smoke.txt
 sleep 1
 osascript -e 'tell application "System Events" to keystroke "Vamos tentar ver se"'
+osascript -e 'tell application "System Events" to key code 49'
 sleep 2
 pkill -x TextEdit >/dev/null 2>&1 || true
 rm -f /tmp/autocomp-inline-preview-smoke.txt

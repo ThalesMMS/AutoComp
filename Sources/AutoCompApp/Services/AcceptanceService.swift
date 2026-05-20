@@ -16,6 +16,12 @@ protocol ShortcutLeakRepairing: AnyObject {
 
 @MainActor
 final class AcceptanceService: TextInserter, ShortcutLeakRepairing {
+    private let inputSuppressionController: InputSuppressionController?
+
+    init(inputSuppressionController: InputSuppressionController? = nil) {
+        self.inputSuppressionController = inputSuppressionController
+    }
+
     func acceptNextWord(from suggestion: inout Suggestion) async throws -> String? {
         guard let token = suggestion.acceptNextWord() else {
             return nil
@@ -71,7 +77,9 @@ final class AcceptanceService: TextInserter, ShortcutLeakRepairing {
               let keyUp = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: false) else {
             throw AcceptanceError.insertionFailed
         }
+        inputSuppressionController?.recordSyntheticInput()
         keyDown.post(tap: .cghidEventTap)
+        inputSuppressionController?.recordSyntheticInput()
         keyUp.post(tap: .cghidEventTap)
     }
 
@@ -84,7 +92,9 @@ final class AcceptanceService: TextInserter, ShortcutLeakRepairing {
             }
             keyDown.keyboardSetUnicodeString(stringLength: 1, unicodeString: &value)
             keyUp.keyboardSetUnicodeString(stringLength: 1, unicodeString: &value)
+            inputSuppressionController?.recordSyntheticInput()
             keyDown.post(tap: .cghidEventTap)
+            inputSuppressionController?.recordSyntheticInput()
             keyUp.post(tap: .cghidEventTap)
         }
     }
@@ -112,7 +122,9 @@ final class AcceptanceService: TextInserter, ShortcutLeakRepairing {
 
         commandDown.flags = .maskCommand
         commandUp.flags = .maskCommand
+        inputSuppressionController?.recordSyntheticInput()
         commandDown.post(tap: .cghidEventTap)
+        inputSuppressionController?.recordSyntheticInput()
         commandUp.post(tap: .cghidEventTap)
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {

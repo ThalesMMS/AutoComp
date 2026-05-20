@@ -37,43 +37,18 @@ struct PermissionSettingsView: View {
     var body: some View {
         Form {
             Section("Required") {
-                LabeledContent("Accessibility", value: permissions.accessibilityTrusted ? "Enabled" : "Missing")
-                Button("Request Accessibility Permission") {
-                    permissions.requestAccessibility()
-                }
-                Button("Open Privacy & Security") {
-                    permissions.openAccessibilitySettings()
-                }
-
-                LabeledContent("Input Monitoring", value: permissions.inputMonitoringAllowed ? "Enabled" : "Missing")
-                Text(permissions.inputMonitoringStatus)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Button("Request Input Monitoring Permission") {
-                    permissions.requestInputMonitoring()
-                }
-                Button("Open Input Monitoring Settings") {
-                    permissions.openInputMonitoringSettings()
+                ForEach(permissions.permissionPresentations.filter { $0.requirement == .required }) { permission in
+                    PermissionSettingsRow(permission: permission, permissions: permissions)
                 }
             }
 
             Section("Optional") {
-                LabeledContent(
-                    "Screen Recording",
-                    value: permissions.screenRecordingAllowed ? "Enabled" : (permissions.screenRecordingNeedsRelaunch ? "Relaunch Required" : "Disabled")
-                )
-                Text(permissions.screenRecordingStatus)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Button("Request Screen Recording Permission") {
-                    permissions.requestScreenRecording()
-                }
-                Button("Open Screen Recording Settings") {
-                    permissions.openScreenRecordingSettings()
-                }
-                if permissions.screenRecordingNeedsRelaunch {
-                    Button("Relaunch AutoComp") {
-                        controller.relaunch()
+                ForEach(permissions.permissionPresentations.filter { $0.requirement == .optional }) { permission in
+                    PermissionSettingsRow(permission: permission, permissions: permissions)
+                    if permission.needsRelaunch {
+                        Button("Relaunch AutoComp") {
+                            controller.relaunch()
+                        }
                     }
                 }
             }
@@ -89,6 +64,33 @@ struct PermissionSettingsView: View {
         .formStyle(.grouped)
         .padding()
         .navigationTitle("Permissions")
+    }
+}
+
+private struct PermissionSettingsRow: View {
+    let permission: PermissionPresentation
+    @ObservedObject var permissions: PermissionService
+
+    var body: some View {
+        LabeledContent(permission.title, value: permission.statusTitle)
+        Text("Reason")
+            .font(.caption.weight(.medium))
+        Text(permission.message)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        Text("Next step")
+            .font(.caption.weight(.medium))
+        Text(permission.nextActionTitle)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        if !permission.isComplete {
+            Button(permission.requestButtonTitle) {
+                permissions.request(permission.kind)
+            }
+            Button(permission.openSettingsButtonTitle) {
+                permissions.openSettings(for: permission.kind)
+            }
+        }
     }
 }
 
@@ -201,17 +203,41 @@ struct ModelSettingsView: View {
     var body: some View {
         Form {
             Section("Provider") {
-                LabeledContent("Backend", value: "Remote OpenAI-compatible")
+                Picker("Backend", selection: $draft.engineKind) {
+                    ForEach(CompletionEngineKind.allCases, id: \.self) { kind in
+                        Text(kind.displayName).tag(kind)
+                    }
+                }
                 TextField("Base URL", text: $draft.remoteBaseURL)
                 SecureField("API key", text: $draft.remoteAPIKey)
                 TextField("Model", text: $draft.remoteModel)
+                Toggle("Fallback to remote if Apple fails", isOn: $draft.fallbackToRemoteOnAppleIntelligenceFailure)
 
                 Button("Save and Use Backend") {
                     controller.saveCompletionBackendSettings(draft)
                 }
             }
 
-            Section("Active remote backend") {
+            Section("Local model") {
+                TextField("Model path", text: $draft.localModelPath)
+                TextField("Max RAM bytes", text: localMaxRAMBinding)
+                Toggle("Fallback to remote if local fails", isOn: $draft.fallbackToRemoteOnLocalFailure)
+            }
+
+            Section("Local diagnostics") {
+                let diagnostic = draft.localDiagnostic()
+                LabeledContent("Runtime", value: diagnostic.runtimeTitle)
+                LabeledContent("Model file", value: diagnostic.modelFileTitle)
+                LabeledContent("Load state", value: diagnostic.loadStateTitle)
+                LabeledContent("Last error", value: diagnostic.lastErrorTitle)
+                LabeledContent("Fallback", value: diagnostic.fallbackTitle)
+                LabeledContent("Memory limit", value: diagnostic.memoryLimitTitle)
+                Text("Local in-process completion is usable only when this build includes the runtime and the model file exists. Apple Intelligence requires FoundationModels on a supported macOS release.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Active backend") {
                 LabeledContent("Active backend", value: controller.completionBackendSummary)
                 Button("Reload Saved Backend") {
                     controller.refreshCompletionBackendSettings()
@@ -219,7 +245,7 @@ struct ModelSettingsView: View {
             }
 
             Section("Privacy") {
-                Text("Autocomplete text is sent to the configured remote OpenAI-compatible endpoint. This build does not include a local completion backend.")
+                Text("Autocomplete text is sent to the selected backend, and to the remote backend only when remote fallback is enabled after a local or Apple failure.")
                     .foregroundStyle(.secondary)
             }
         }
@@ -228,6 +254,17 @@ struct ModelSettingsView: View {
         .navigationTitle("Model")
         .onAppear {
             draft = controller.completionBackendSettings
+        }
+    }
+
+    private var localMaxRAMBinding: Binding<String> {
+        Binding {
+            String(draft.localMaxRAMBytes)
+        } set: { value in
+            let digits = value.filter(\.isNumber)
+            if let bytes = UInt64(digits) {
+                draft.localMaxRAMBytes = bytes
+            }
         }
     }
 }

@@ -51,6 +51,7 @@ final class PreviewCoordinator: SuggestionPresenter {
     private let nativeInlinePresenter: NativeInlineSuggestionPresenting
     private let visualInlinePresenter: VisualInlineSuggestionPresenting
     private let mirrorWindowPresenter: SuggestionTierPresenting
+    private let activationIndicator: ActivationIndicatorPresenting
 
     private(set) var activeTier: PreviewPresentationTier = .disabled
 
@@ -58,16 +59,19 @@ final class PreviewCoordinator: SuggestionPresenter {
         self.nativeInlinePresenter = UnavailableNativeInlinePresenter()
         self.visualInlinePresenter = VisualInlineOverlayPresenter()
         self.mirrorWindowPresenter = MirrorWindowSuggestionPresenter()
+        self.activationIndicator = ActivationIndicatorController()
     }
 
     init(
         nativeInlinePresenter: NativeInlineSuggestionPresenting,
         visualInlinePresenter: VisualInlineSuggestionPresenting,
-        mirrorWindowPresenter: SuggestionTierPresenting
+        mirrorWindowPresenter: SuggestionTierPresenting,
+        activationIndicator: ActivationIndicatorPresenting? = nil
     ) {
         self.nativeInlinePresenter = nativeInlinePresenter
         self.visualInlinePresenter = visualInlinePresenter
         self.mirrorWindowPresenter = mirrorWindowPresenter
+        self.activationIndicator = activationIndicator ?? ActivationIndicatorController()
     }
 
     func show(_ suggestion: Suggestion, for context: TextContext, mode: SuggestionDisplayMode) {
@@ -83,6 +87,7 @@ final class PreviewCoordinator: SuggestionPresenter {
         nativeInlinePresenter.hide()
         visualInlinePresenter.hide()
         mirrorWindowPresenter.hide()
+        activationIndicator.hide()
     }
 
     func resolveTier(for suggestion: Suggestion, context: TextContext, mode: SuggestionDisplayMode) -> PreviewPresentationTier {
@@ -112,6 +117,11 @@ final class PreviewCoordinator: SuggestionPresenter {
         let shouldUpdateExistingTier = isUpdate && activeTier == nextTier
         hidePresenters(except: nextTier)
         activeTier = nextTier
+        if nextTier == .disabled {
+            activationIndicator.hide()
+        } else {
+            activationIndicator.show(for: context, displayMode: mode)
+        }
 
         switch nextTier {
         case .nativeInline:
@@ -779,7 +789,9 @@ extension TextContext {
             "caretRect=\(String(describing: caretRect))",
             "previousGlyphRect=\(String(describing: previousGlyphRect))",
             "nextGlyphRect=\(String(describing: nextGlyphRect))",
-            "lineReferenceRect=\(String(describing: lineReferenceRect))"
+            "lineReferenceRect=\(String(describing: lineReferenceRect))",
+            "caretGeometryQuality=\(caretGeometryQuality.rawValue)",
+            "observedCharacterWidth=\(String(describing: observedCharacterWidth))"
         ].joined(separator: " ")
     }
 }

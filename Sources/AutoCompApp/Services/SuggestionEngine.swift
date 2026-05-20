@@ -8,43 +8,53 @@ final class SuggestionEngine: ObservableObject {
     @Published private(set) var currentSuggestion: Suggestion?
     @Published private(set) var statusMessage: String = "Idle"
     @Published private(set) var lastLatencyMs: Int?
+    @Published private(set) var diagnostics = SuggestionDiagnostics()
 
-    private let contextProvider: TextContextProvider
-    private var completionProvider: CompletionProvider
+    private let focusProvider: TextContextProvider
+    private var generationProvider: CompletionProvider
+    private let visualContextProvider: VisualContextProvider?
     private let presenter: SuggestionPresenter
+    private let inputController: SuggestionInputStateTracking
     private let compatibilityCatalog: CompatibilityCatalog
     private let compatibilitySettings: CompatibilitySettingsStore
     private let privacyStore: PrivacySettingsStore
+    private let eligibilityEvaluator: SuggestionEligibilityEvaluator
+    private let publicationController: SuggestionPublicationController
+    private let acceptanceSessionController: AcceptanceSessionController
     private let shortcutLeakRepairInserter: ShortcutLeakRepairing?
     private let emojiService = EmojiSuggestionService()
+    private let workController = SuggestionWorkController()
+    private let contextGenerationTracker = ContextGenerationTracker()
 
-    private var completionTask: Task<Void, Never>?
     private var timer: Timer?
-    private var acceptanceState: AcceptanceState?
-    private var completedAcceptAllState: CompletedAcceptAllState?
-    private var lastSuggestionTriggerKeyAt: Date = .distantPast
     private var lastTextChangeTime: Date = .distantPast
-    private var debounceTask: Task<Void, Never>?
     private let debounceInterval: TimeInterval = 0.25
-    private let acceptanceEchoGraceInterval: TimeInterval = 3.0
-    private let completedAcceptAllLeakGraceInterval: TimeInterval = 8.0
-    private let suggestionTriggerKeyGraceInterval: TimeInterval = 1.2
 
     init(
         contextProvider: TextContextProvider,
         completionProvider: CompletionProvider,
+        visualContextProvider: VisualContextProvider? = nil,
         presenter: SuggestionPresenter,
         compatibilityCatalog: CompatibilityCatalog = CompatibilityCatalog(),
         compatibilitySettings: CompatibilitySettingsStore = CompatibilitySettingsStore(),
         privacyStore: PrivacySettingsStore = PrivacySettingsStore(),
+        eligibilityEvaluator: SuggestionEligibilityEvaluator = SuggestionEligibilityEvaluator(),
+        publicationController: SuggestionPublicationController? = nil,
+        acceptanceSessionController: AcceptanceSessionController = AcceptanceSessionController(),
+        inputController: SuggestionInputStateTracking = SemanticInputController(),
         shortcutLeakRepairInserter: ShortcutLeakRepairing? = nil
     ) {
-        self.contextProvider = contextProvider
-        self.completionProvider = completionProvider
+        self.focusProvider = contextProvider
+        self.generationProvider = completionProvider
+        self.visualContextProvider = visualContextProvider
         self.presenter = presenter
+        self.inputController = inputController
         self.compatibilityCatalog = compatibilityCatalog
         self.compatibilitySettings = compatibilitySettings
         self.privacyStore = privacyStore
+        self.eligibilityEvaluator = eligibilityEvaluator
+        self.publicationController = publicationController ?? SuggestionPublicationController(presenter: presenter)
+        self.acceptanceSessionController = acceptanceSessionController
         self.shortcutLeakRepairInserter = shortcutLeakRepairInserter
     }
 
@@ -60,35 +70,28 @@ final class SuggestionEngine: ObservableObject {
     func stop() {
         timer?.invalidate()
         timer = nil
-        completionTask?.cancel()
-        completionTask = nil
-        debounceTask?.cancel()
-        debounceTask = nil
-        acceptanceState = nil
-        completedAcceptAllState = nil
-        lastSuggestionTriggerKeyAt = .distantPast
+        workController.cancelAll()
+        acceptanceSessionController.clearAll()
+        inputController.reset()
         presenter.hide()
     }
 
     func hideSuggestion() {
         currentSuggestion = nil
-        acceptanceState = nil
-        completedAcceptAllState = nil
+        acceptanceSessionController.clearAll()
         presenter.hide()
     }
 
-    func recordSuggestionTriggerKey() {
-        lastSuggestionTriggerKeyAt = Date()
-        GeometryDebug.log("suggestion-trigger-key kind=space")
+    func recordSuggestionTriggerKey(_ event: CapturedInputEvent) {
+        inputController.record(event)
     }
 
     func updateCompletionProvider(_ completionProvider: CompletionProvider, status: String) {
-        completionTask?.cancel()
-        debounceTask?.cancel()
-        self.completionProvider = completionProvider
+        workController.cancelAll()
+        self.generationProvider = completionProvider
         currentSuggestion = nil
-        acceptanceState = nil
-        completedAcceptAllState = nil
+        acceptanceSessionController.clearAll()
+        inputController.reset()
         statusMessage = status
         presenter.hide()
     }
@@ -104,15 +107,24 @@ final class SuggestionEngine: ObservableObject {
             guard let acceptedText = try await inserter.acceptNextWord(from: &suggestion) else {
                 return
             }
-            updateAcceptanceState(
+            acceptanceSessionController.recordAcceptance(
                 previousContext: previousContext,
                 previousSuggestion: previousSuggestion,
+                updatedSuggestion: suggestion,
                 acceptedText: acceptedText
             )
             currentSuggestion = suggestion.isExhausted ? nil : suggestion
 
             if let context = currentContext, let currentSuggestion {
-                presenter.update(currentSuggestion, for: context, mode: displayMode(for: context))
+                let presentationContext = predictedPresentationContext(
+                    afterAccepting: acceptedText,
+                    from: context
+                ) ?? context
+                presenter.update(
+                    currentSuggestion,
+                    for: presentationContext,
+                    mode: displayMode(for: presentationContext)
+                )
             } else {
                 presenter.hide()
             }
@@ -132,24 +144,14 @@ final class SuggestionEngine: ObservableObject {
             guard let acceptedText = try await inserter.acceptAll(from: &suggestion) else {
                 return
             }
-            updateAcceptanceState(
+            acceptanceSessionController.recordAcceptance(
                 previousContext: previousContext,
                 previousSuggestion: previousSuggestion,
+                updatedSuggestion: suggestion,
                 acceptedText: acceptedText
             )
-            completedAcceptAllState = acceptanceState.map {
-                CompletedAcceptAllState(
-                    focusedElementID: $0.focusedElementID,
-                    focusedElementRect: $0.focusedElementRect,
-                    app: $0.app,
-                    domain: $0.domain,
-                    baseTextBeforeCursor: $0.baseTextBeforeCursor,
-                    expectedTextBeforeCursor: $0.expectedTextBeforeCursor,
-                    lastAcceptedAt: $0.lastAcceptedAt
-                )
-            }
-            GeometryDebug.log("completed-accept-all state=\(completedAcceptAllState == nil ? "nil" : "armed") acceptedLength=\((acceptedText as NSString).length)")
-            acceptanceState = nil
+            let acceptAllStateArmed = acceptanceSessionController.armCompletedAcceptAll()
+            GeometryDebug.log("completed-accept-all state=\(acceptAllStateArmed ? "armed" : "nil") acceptedLength=\((acceptedText as NSString).length)")
             currentSuggestion = nil
             presenter.hide()
         } catch {
@@ -159,15 +161,14 @@ final class SuggestionEngine: ObservableObject {
 
     private func refresh() async {
         do {
-            let context = try await contextProvider.currentContext()
+            let context = try await focusProvider.currentContext()
+            diagnostics.recordFocus(context: context)
 
             if context.textBeforeCursor.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                currentContext = context
-                completionTask?.cancel()
-                debounceTask?.cancel()
-                hideSuggestion()
-                statusMessage = "Waiting for text"
-                GeometryDebug.log("suggestion-skip reason=empty-context app=\(context.app.displayName) bundle=\(context.app.bundleID)")
+                let decision = eligibilityDecision(for: context, previousObservedContext: currentContext)
+                diagnostics.recordEligibility(decision)
+                logEligibilityDecision(decision)
+                applyIneligibleDecision(decision, context: context)
                 return
             }
 
@@ -175,7 +176,19 @@ final class SuggestionEngine: ObservableObject {
                 return
             }
 
-            if await repairCompletedAcceptAllLeakIfNeeded(context) {
+            if repairCompletedAcceptAllLeakIfNeeded(context) {
+                return
+            }
+
+            if let suggestion = currentSuggestion,
+               !suggestion.isExhausted,
+               let previousContext = currentContext,
+               isWebWhitespaceNormalizationDrift(context: context, previousContext: previousContext) {
+                let presentationContext = context.replacingTextBeforeCursor(previousContext.textBeforeCursor)
+                currentContext = presentationContext
+                workController.cancelAll()
+                GeometryDebug.log("suggestion-keep reason=web-whitespace-normalization app=\(context.app.displayName) bundle=\(context.app.bundleID)")
+                presenter.update(suggestion, for: presentationContext, mode: displayMode(for: presentationContext))
                 return
             }
 
@@ -192,18 +205,6 @@ final class SuggestionEngine: ObservableObject {
                 return
             }
 
-            if let suggestion = currentSuggestion,
-               !suggestion.isExhausted,
-               let previousContext = currentContext,
-               isWebWhitespaceNormalizationDrift(context: context, previousContext: previousContext) {
-                let presentationContext = context.replacingTextBeforeCursor(previousContext.textBeforeCursor)
-                currentContext = presentationContext
-                completionTask?.cancel()
-                GeometryDebug.log("suggestion-keep reason=web-whitespace-normalization app=\(context.app.displayName) bundle=\(context.app.bundleID)")
-                presenter.update(suggestion, for: presentationContext, mode: displayMode(for: presentationContext))
-                return
-            }
-
             // If we have a non-exhausted suggestion whose accepted prefix is
             // consistent with the current text, keep showing it.
             if let suggestion = currentSuggestion,
@@ -216,26 +217,20 @@ final class SuggestionEngine: ObservableObject {
             }
 
             let previousObservedContext = currentContext
-            guard shouldRequestSuggestion(for: context) else {
-                return
-            }
-
-            guard shouldTriggerSuggestionAfterWhitespace(for: context, previousContext: previousObservedContext) else {
-                GeometryDebug.log("suggestion-skip reason=awaiting-space-trigger app=\(context.app.displayName) bundle=\(context.app.bundleID)")
-                currentContext = context
-                completionTask?.cancel()
-                debounceTask?.cancel()
-                acceptanceState = nil
-                currentSuggestion = nil
-                statusMessage = "Waiting for space"
-                presenter.hide()
+            let eligibilityDecision = eligibilityDecision(
+                for: context,
+                previousObservedContext: previousObservedContext
+            )
+            diagnostics.recordEligibility(eligibilityDecision)
+            logEligibilityDecision(eligibilityDecision)
+            guard eligibilityDecision.isEligible else {
+                applyIneligibleDecision(eligibilityDecision, context: context)
                 return
             }
 
             currentContext = context
-            completionTask?.cancel()
-            acceptanceState = nil
-            completedAcceptAllState = nil
+            workController.cancelAll()
+            acceptanceSessionController.clearAll()
 
             if let emojiSuggestion = emojiService.suggestion(for: context.textBeforeCursor, contextID: context.id) {
                 publish(emojiSuggestion, context: context)
@@ -246,12 +241,15 @@ final class SuggestionEngine: ObservableObject {
             // stop typing before requesting a new completion.
             hideSuggestion()
             lastTextChangeTime = Date()
-            debounceTask?.cancel()
-            debounceTask = Task { [weak self, debounceInterval] in
+            workController.replaceDebouncedWork { [weak self, debounceInterval] workID in
                 try? await Task.sleep(nanoseconds: UInt64(debounceInterval * 1_000_000_000))
                 guard !Task.isCancelled else { return }
+                guard let engine = self else { return }
                 await MainActor.run {
-                    self?.requestCompletion(for: context)
+                    guard engine.workController.isCurrent(workID) else {
+                        return
+                    }
+                    engine.requestCompletion(for: context)
                 }
             }
         } catch {
@@ -263,268 +261,182 @@ final class SuggestionEngine: ObservableObject {
         }
     }
 
+    private func eligibilityDecision(
+        for context: TextContext,
+        previousObservedContext: TextContext?
+    ) -> SuggestionEligibilityDecision {
+        eligibilityEvaluator.evaluate(
+            context: context,
+            previousContext: previousObservedContext,
+            compatibilityDecision: compatibilityCatalog.decision(
+                bundleID: context.app.bundleID,
+                domain: context.domain,
+                userEnabledOverrides: compatibilitySettings.loadOverrides()
+            ),
+            lastSuggestionTriggerKeyAt: inputController.lastSuggestionTriggerKeyAt
+        )
+    }
+
+    private func applyIneligibleDecision(
+        _ decision: SuggestionEligibilityDecision,
+        context: TextContext
+    ) {
+        if let statusMessage = decision.statusMessage {
+            self.statusMessage = statusMessage
+        }
+
+        switch decision.skipReason {
+        case .emptyContext:
+            currentContext = context
+            workController.cancelAll()
+            hideSuggestion()
+        case .compatibility, .sentenceComplete:
+            hideSuggestion()
+        case .unchangedContext:
+            break
+        case .awaitingSpaceTrigger:
+            currentContext = context
+            workController.cancelAll()
+            acceptanceSessionController.clearAcceptance()
+            currentSuggestion = nil
+            presenter.hide()
+        case nil:
+            break
+        }
+    }
+
+    private func logEligibilityDecision(_ decision: SuggestionEligibilityDecision) {
+        decision.logs.forEach(logEligibility)
+    }
+
+    private func logEligibility(_ log: SuggestionEligibilityLogData) {
+        switch log.kind {
+        case .eligible:
+            GeometryDebug.log("suggestion-eligible app=\(log.appDisplayName) bundle=\(log.bundleID)")
+        case .skip(let reason):
+            switch reason {
+            case .compatibility:
+                let enabled = log.compatibilityEnabled.map(String.init) ?? "nil"
+                GeometryDebug.log("suggestion-skip reason=\(reason.rawValue) app=\(log.appDisplayName) bundle=\(log.bundleID) enabled=\(enabled) mode=\(log.displayMode?.rawValue ?? "nil") status=\(log.compatibilityStatus?.rawValue ?? "nil")")
+            default:
+                GeometryDebug.log("suggestion-skip reason=\(reason.rawValue) app=\(log.appDisplayName) bundle=\(log.bundleID)")
+            }
+        case .trigger(let reason):
+            GeometryDebug.log("suggestion-trigger reason=\(reason.rawValue) app=\(log.appDisplayName) bundle=\(log.bundleID)")
+        }
+    }
+
     private func requestCompletion(for context: TextContext) {
-        lastSuggestionTriggerKeyAt = .distantPast
+        inputController.clearSuggestionTrigger()
+        diagnostics.recordBackendRequest()
+        let requestedSignature = contextGenerationTracker.signature(for: context)
         GeometryDebug.log("completion-request app=\(context.app.displayName) bundle=\(context.app.bundleID) context=\(context.geometryDebugDescription)")
-        completionTask?.cancel()
-        completionTask = Task { [weak self] in
+        workController.replaceGenerationWork { [weak self] workID in
             guard !Task.isCancelled else { return }
+            guard let engine = self else { return }
             do {
-                guard let self else { return }
-                let suggestion = try await self.completionProvider.complete(context: context)
+                let privacySettings = engine.privacyStore.load()
+                let visualContext = await engine.visualContextProvider?.currentVisualContext()
+                let suggestion = try await engine.complete(
+                    context: context,
+                    privacySettings: privacySettings,
+                    visualContext: visualContext
+                )
+                let liveContext: TextContext
+                do {
+                    liveContext = try await engine.focusProvider.currentContext()
+                } catch {
+                    await MainActor.run {
+                        guard engine.workController.isCurrent(workID) else {
+                            return
+                        }
+                        GeometryDebug.log("completion-discarded reason=missing-live-context app=\(context.app.displayName) bundle=\(context.app.bundleID)")
+                        engine.diagnostics.recordStaleDiscard(reason: "missing-live-context")
+                        engine.hideSuggestion()
+                    }
+                    return
+                }
                 await MainActor.run {
-                    GeometryDebug.log("completion-success app=\(context.app.displayName) bundle=\(context.app.bundleID) visibleLength=\((suggestion.visibleText as NSString).length)")
-                    self.publish(suggestion, context: context)
+                    guard engine.workController.isCurrent(workID) else {
+                        GeometryDebug.log("completion-discarded reason=stale-work app=\(context.app.displayName) bundle=\(context.app.bundleID)")
+                        engine.diagnostics.recordStaleDiscard(reason: "stale-work")
+                        return
+                    }
+
+                    guard engine.contextGenerationTracker.matches(liveContext, signature: requestedSignature) else {
+                        GeometryDebug.log("completion-discarded reason=stale-context app=\(context.app.displayName) bundle=\(context.app.bundleID)")
+                        engine.diagnostics.recordStaleDiscard(reason: "stale-context")
+                        return
+                    }
+
+                    GeometryDebug.log("completion-success app=\(liveContext.app.displayName) bundle=\(liveContext.app.bundleID) visibleLength=\((suggestion.visibleText as NSString).length)")
+                    engine.publish(suggestion, context: liveContext)
                 }
             } catch {
                 await MainActor.run {
+                    guard engine.workController.isCurrent(workID) else {
+                        return
+                    }
                     GeometryDebug.log("completion-failed app=\(context.app.displayName) bundle=\(context.app.bundleID)")
-                    self?.statusMessage = "Completion unavailable"
-                    self?.hideSuggestion()
+                    engine.diagnostics.recordBackendFailure(error)
+                    engine.statusMessage = SuggestionDiagnostics.message(for: error)
+                    engine.hideSuggestion()
                 }
             }
         }
     }
 
+    private func complete(
+        context: TextContext,
+        privacySettings: PrivacySettings,
+        visualContext: VisualContextSnapshot?
+    ) async throws -> Suggestion {
+        if let provider = generationProvider as? VisualContextAwareCompletionProvider {
+            return try await provider.complete(
+                context: context,
+                privacySettings: privacySettings,
+                visualContext: visualContext
+            )
+        }
+        return try await generationProvider.complete(context: context)
+    }
+
     private func repairLeakedShortcutIfNeeded(_ context: TextContext) async -> Bool {
-        guard let shortcutLeakRepairInserter,
-              let previousContext = currentContext,
-              var suggestion = currentSuggestion,
-              !suggestion.isExhausted,
-              isSameInteractionTarget(context, as: previousContext),
-              let leakedShortcut = leakedShortcut(
-                in: context.textBeforeCursor,
-                previousText: previousContext.textBeforeCursor,
-                appBundleID: context.app.bundleID
-              ) else {
+        guard let result = await acceptanceSessionController.repairLeakedShortcutIfNeeded(
+            context: context,
+            previousContext: currentContext,
+            currentSuggestion: currentSuggestion,
+            repairInserter: shortcutLeakRepairInserter
+        ) else {
             return false
         }
-        let suffixScalars = leakedShortcut.suffix.unicodeScalars.map { String($0.value) }.joined(separator: ",")
-        GeometryDebug.log("shortcut-repair detected suffixScalars=\(suffixScalars)")
 
-        do {
-            let previousSuggestion = suggestion
-            let leakedLength = (leakedShortcut.suffix as NSString).length
-            let acceptedText = try await shortcutLeakRepairInserter.replaceLeakedShortcutSuffix(
-                length: leakedLength,
-                withNextWordsFrom: &suggestion
-            )
-
-            guard let acceptedText else {
-                return false
-            }
-
-            updateAcceptanceState(
-                previousContext: previousContext,
-                previousSuggestion: previousSuggestion,
-                acceptedText: acceptedText
-            )
-            currentSuggestion = suggestion.isExhausted ? nil : suggestion
-
-            let repairedContext = context.replacingTextBeforeCursor(
-                previousContext.textBeforeCursor + acceptedText
-            )
+        switch result {
+        case .repaired(let repairedContext, let updatedSuggestion, let statusMessage):
+            currentSuggestion = updatedSuggestion
             currentContext = repairedContext
-            completionTask?.cancel()
-            statusMessage = leakedShortcut.action.statusMessage
-            GeometryDebug.log("shortcut-repair action=\(leakedShortcut.action.debugName)")
+            workController.cancelAll()
+            self.statusMessage = statusMessage
 
             if let currentSuggestion {
                 presenter.update(currentSuggestion, for: repairedContext, mode: displayMode(for: repairedContext))
             } else {
                 presenter.hide()
             }
-            return true
-        } catch {
-            statusMessage = "Insertion failed"
-            return true
+        case .failed(let statusMessage):
+            self.statusMessage = statusMessage
         }
-    }
-
-    private func repairCompletedAcceptAllLeakIfNeeded(_ context: TextContext) async -> Bool {
-        guard let state = completedAcceptAllState else {
-            return false
-        }
-
-        GeometryDebug.log("completed-accept-all check observedLength=\((context.textBeforeCursor as NSString).length) expectedLength=\((state.expectedTextBeforeCursor as NSString).length)")
-
-        guard context.app == state.app,
-              context.domain == state.domain else {
-            GeometryDebug.log("completed-accept-all cleared reason=target-app-domain")
-            completedAcceptAllState = nil
-            return false
-        }
-
-        let sameFocusedElement = context.focusedElementID == state.focusedElementID
-            || approximatelySameRect(context.focusedElementRect, state.focusedElementRect)
-            || isSameGoogleDocsBrailleLineTarget(
-                app: context.app,
-                domain: context.domain,
-                context.focusedElementRect,
-                state.focusedElementRect
-            )
-        guard sameFocusedElement else {
-            GeometryDebug.log("completed-accept-all cleared reason=focused-target")
-            completedAcceptAllState = nil
-            return false
-        }
-
-        if completedAcceptAllTextMatchesExpected(context.textBeforeCursor, state: state) {
-            currentContext = context
-            GeometryDebug.log("completed-accept-all settled")
-            if Date().timeIntervalSince(state.lastAcceptedAt) > completedAcceptAllLeakGraceInterval {
-                completedAcceptAllState = nil
-            }
-            return true
-        }
-
-        let isPotentialDelayedEcho = isCompletedAcceptAllPotentialDelayedEcho(
-            context.textBeforeCursor,
-            state: state
-        )
-        if isPotentialDelayedEcho,
-           Date().timeIntervalSince(state.lastAcceptedAt) <= completedAcceptAllLeakGraceInterval {
-            currentContext = context
-            return true
-        }
-
-        completedAcceptAllState = nil
-        GeometryDebug.log("completed-accept-all cleared reason=diverged")
-        return false
-    }
-
-    private func completedAcceptAllTextMatchesExpected(
-        _ observedText: String,
-        state: CompletedAcceptAllState
-    ) -> Bool {
-        textMatchesExpectedOrOnlyAddsTrailingWhitespace(
-            observedText,
-            expectedText: state.expectedTextBeforeCursor
-        ) || textMatchesExpectedOrOnlyAddsTrailingWhitespace(
-            normalizedAcceptanceWhitespace(in: observedText),
-            expectedText: normalizedAcceptanceWhitespace(in: state.expectedTextBeforeCursor)
-        )
-    }
-
-    private func textMatchesExpectedOrOnlyAddsTrailingWhitespace(
-        _ observedText: String,
-        expectedText: String
-    ) -> Bool {
-        if observedText == expectedText {
-            return true
-        }
-
-        guard observedText.hasPrefix(expectedText) else {
-            return false
-        }
-
-        let suffix = observedText.dropFirst(expectedText.count)
-        return suffix.unicodeScalars.allSatisfy {
-            CharacterSet.whitespacesAndNewlines.contains($0)
-        }
-    }
-
-    private func isCompletedAcceptAllPotentialDelayedEcho(
-        _ observedText: String,
-        state: CompletedAcceptAllState
-    ) -> Bool {
-        if state.expectedTextBeforeCursor.hasPrefix(observedText),
-           observedText.hasPrefix(state.baseTextBeforeCursor) {
-            return true
-        }
-
-        let normalizedObservedText = normalizedAcceptanceWhitespace(in: observedText)
-        let normalizedExpectedText = normalizedAcceptanceWhitespace(in: state.expectedTextBeforeCursor)
-        let normalizedBaseText = normalizedAcceptanceWhitespace(in: state.baseTextBeforeCursor)
-        return normalizedExpectedText.hasPrefix(normalizedObservedText)
-            && normalizedObservedText.hasPrefix(normalizedBaseText)
-    }
-
-    private func leakedShortcut(in observedText: String, previousText: String, appBundleID: String) -> LeakedShortcut? {
-        guard observedText.hasPrefix(previousText) else {
-            return nil
-        }
-
-        let suffix = String(observedText.dropFirst(previousText.count))
-        guard !suffix.isEmpty else {
-            return nil
-        }
-
-        if suffix.allSatisfy({ $0 == "\t" }) {
-            return LeakedShortcut(suffix: suffix, action: .acceptNextWords)
-        }
-
-        // Notes can expose leaked Tab acceptance as a mix of plain spaces and
-        // tab characters in its AX text stream. Limit this repair to Notes,
-        // where Tab has no text-entry meaning while a completion is visible.
-        if appBundleID == "com.apple.Notes", suffix.allSatisfy({ $0 == " " || $0 == "\t" }) {
-            return LeakedShortcut(suffix: suffix, action: .acceptNextWords)
-        }
-
-        return nil
-    }
-
-    private func shouldRequestSuggestion(for context: TextContext) -> Bool {
-        let decision = compatibilityCatalog.decision(
-            bundleID: context.app.bundleID,
-            domain: context.domain,
-            userEnabledOverrides: compatibilitySettings.loadOverrides()
-        )
-
-        guard decision.enabled, decision.mode != .disabled, decision.profile.status != .unsupported else {
-            GeometryDebug.log("suggestion-skip reason=compatibility app=\(context.app.displayName) bundle=\(context.app.bundleID) enabled=\(decision.enabled) mode=\(decision.mode.rawValue) status=\(decision.profile.status.rawValue)")
-            statusMessage = decision.profile.notes.isEmpty ? "Disabled for \(context.app.displayName)" : decision.profile.notes
-            hideSuggestion()
-            return false
-        }
-
-        let trimmed = context.textBeforeCursor.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            GeometryDebug.log("suggestion-skip reason=empty-context app=\(context.app.displayName) bundle=\(context.app.bundleID)")
-            hideSuggestion()
-            return false
-        }
-
-        guard !TextContinuationHeuristics.shouldSuppressAutocomplete(after: context.textBeforeCursor) else {
-            GeometryDebug.log("suggestion-skip reason=sentence-complete app=\(context.app.displayName) bundle=\(context.app.bundleID)")
-            statusMessage = "Sentence complete"
-            hideSuggestion()
-            return false
-        }
-
-        if let previousContext = currentContext,
-           previousContext.textBeforeCursor == context.textBeforeCursor,
-           previousContext.app == context.app,
-           previousContext.domain == context.domain {
-            GeometryDebug.log("suggestion-skip reason=unchanged-context app=\(context.app.displayName) bundle=\(context.app.bundleID)")
-            return false
-        }
-
-        GeometryDebug.log("suggestion-eligible app=\(context.app.displayName) bundle=\(context.app.bundleID)")
         return true
     }
 
-    private func shouldTriggerSuggestionAfterWhitespace(
-        for context: TextContext,
-        previousContext: TextContext?
-    ) -> Bool {
-        guard textEndsWithSuggestionTriggerWhitespace(context.textBeforeCursor) else {
+    private func repairCompletedAcceptAllLeakIfNeeded(_ context: TextContext) -> Bool {
+        switch acceptanceSessionController.repairCompletedAcceptAllLeakIfNeeded(context: context) {
+        case .notActive, .cleared:
             return false
-        }
-
-        if let previousContext,
-           isSameInteractionTarget(context, as: previousContext),
-           previousContext.textBeforeCursor != context.textBeforeCursor {
+        case .handled:
+            currentContext = context
             return true
         }
-
-        let hasRecentTriggerKey = Date().timeIntervalSince(lastSuggestionTriggerKeyAt) <= suggestionTriggerKeyGraceInterval
-        if hasRecentTriggerKey {
-            GeometryDebug.log("suggestion-trigger reason=recent-space-key app=\(context.app.displayName) bundle=\(context.app.bundleID)")
-            return true
-        }
-
-        return false
     }
 
     private func textEndsWithSuggestionTriggerWhitespace(_ text: String) -> Bool {
@@ -632,46 +544,34 @@ final class SuggestionEngine: ObservableObject {
     }
 
     private func publish(_ suggestion: Suggestion, context: TextContext) {
-        let suggestion = normalizedSuggestion(suggestion, for: context)
-        guard !suggestion.visibleText.isEmpty else {
-            hideSuggestion()
-            return
-        }
-
-        acceptanceState = nil
-        completedAcceptAllState = nil
-        currentSuggestion = suggestion
-        lastLatencyMs = suggestion.latencyMs
-        statusMessage = "Suggesting in \(context.app.displayName)"
-
         let mode = displayMode(for: context)
-        presenter.show(suggestion, for: context, mode: mode)
-
         let privacy = privacyStore.load()
-        if privacy.allowsCollection(appBundleID: context.app.bundleID, domain: context.domain) {
-            statusMessage = "Suggesting in \(context.app.displayName); collection enabled"
-        }
-    }
+        let collectionAllowed = privacy.allowsCollection(appBundleID: context.app.bundleID, domain: context.domain)
+        let result = publicationController.publish(
+            suggestion,
+            context: context,
+            displayMode: mode,
+            collectionAllowed: collectionAllowed
+        )
+        logPublicationResult(result)
 
-    private func normalizedSuggestion(_ suggestion: Suggestion, for context: TextContext) -> Suggestion {
-        guard textEndsWithSuggestionTriggerWhitespace(context.textBeforeCursor) else {
-            return suggestion
+        switch result.outcome {
+        case .published(let suggestion):
+            diagnostics.recordBackendSuccess(
+                rawText: suggestion.rawText,
+                normalizedText: suggestion.visibleText,
+                collectionAllowed: collectionAllowed
+            )
+            currentSuggestion = suggestion
+            acceptanceSessionController.recordPublication(context: context, suggestion: suggestion)
+            lastLatencyMs = result.lastLatencyMs
+            if let statusMessage = result.statusMessage {
+                self.statusMessage = statusMessage
+            }
+        case .rejected:
+            acceptanceSessionController.clearAll()
+            currentSuggestion = nil
         }
-
-        var normalized = suggestion
-        normalized.visibleText = droppingLeadingWhitespace(from: normalized.visibleText)
-        normalized.remainingText = droppingLeadingWhitespace(from: normalized.remainingText)
-        return normalized
-    }
-
-    private func droppingLeadingWhitespace(from text: String) -> String {
-        let firstNonWhitespace = text.unicodeScalars.firstIndex {
-            !CharacterSet.whitespacesAndNewlines.contains($0)
-        }
-        guard let firstNonWhitespace else {
-            return ""
-        }
-        return String(text.unicodeScalars[firstNonWhitespace...])
     }
 
     private func displayMode(for context: TextContext) -> SuggestionDisplayMode {
@@ -682,29 +582,30 @@ final class SuggestionEngine: ObservableObject {
         ).mode
     }
 
-    private func updateAcceptanceState(
-        previousContext: TextContext?,
-        previousSuggestion: Suggestion,
-        acceptedText: String
-    ) {
-        guard let previousContext else {
-            return
+    private func logPublicationResult(_ result: SuggestionPublicationResult) {
+        result.logs.forEach { log in
+            switch log.kind {
+            case .published:
+                GeometryDebug.log("suggestion-publication result=published app=\(log.appDisplayName) bundle=\(log.bundleID) mode=\(log.displayMode.rawValue) visibleLength=\(log.visibleLength)")
+            case .rejected(let reason):
+                GeometryDebug.log("suggestion-publication result=rejected reason=\(reason.rawValue) app=\(log.appDisplayName) bundle=\(log.bundleID) mode=\(log.displayMode.rawValue)")
+            }
+        }
+    }
+
+    private func predictedPresentationContext(
+        afterAccepting acceptedText: String,
+        from context: TextContext
+    ) -> TextContext? {
+        guard let predictedContext = CaretPrediction.predictedContext(
+            afterAccepting: acceptedText,
+            from: context
+        ) else {
+            return nil
         }
 
-        let baseText = acceptanceState?.baseTextBeforeCursor ?? previousContext.textBeforeCursor
-        let acceptedPrefix = (acceptanceState?.acceptedPrefix ?? previousSuggestion.acceptedPrefix) + acceptedText
-        let expectedText = baseText + acceptedPrefix
-
-        acceptanceState = AcceptanceState(
-            focusedElementID: previousContext.focusedElementID,
-            focusedElementRect: previousContext.focusedElementRect,
-            app: previousContext.app,
-            domain: previousContext.domain,
-            baseTextBeforeCursor: baseText,
-            acceptedPrefix: acceptedPrefix,
-            expectedTextBeforeCursor: expectedText,
-            lastAcceptedAt: Date()
-        )
+        GeometryDebug.log("caret-prediction acceptedLength=\((acceptedText as NSString).length) oldCaretRect=\(String(describing: context.caretRect)) predictedCaretRect=\(String(describing: predictedContext.caretRect))")
+        return predictedContext
     }
 
     private func isTextConsistentWithAcceptedSuggestion(
@@ -712,222 +613,39 @@ final class SuggestionEngine: ObservableObject {
         previousContext: TextContext,
         suggestion: Suggestion
     ) -> Bool {
-        guard context.app == previousContext.app,
-              context.domain == previousContext.domain,
-              isSameInteractionTarget(context, as: previousContext) else {
-            return false
-        }
-
-        guard !suggestion.acceptedPrefix.isEmpty else {
-            return false
-        }
-
-        let baseText = acceptanceState?.baseTextBeforeCursor ?? previousContext.textBeforeCursor
-        let expectedText = baseText + suggestion.acceptedPrefix
-
-        if context.textBeforeCursor == expectedText {
-            return true
-        }
-
-        if context.textBeforeCursor.hasPrefix(expectedText) {
-            let suffix = context.textBeforeCursor.dropFirst(expectedText.count)
-            return suffix.unicodeScalars.allSatisfy { CharacterSet.whitespacesAndNewlines.contains($0) }
-        }
-
-        return false
+        acceptanceSessionController.isTextConsistentWithAcceptedSuggestion(
+            context: context,
+            previousContext: previousContext,
+            suggestion: suggestion
+        )
     }
 
     private func handleAcceptedSuggestionSession(_ context: TextContext) -> Bool {
-        guard let state = acceptanceState else {
-            return false
-        }
+        let result = acceptanceSessionController.handleAcceptedSuggestionSession(
+            context: context,
+            currentSuggestion: currentSuggestion
+        )
 
-        guard context.app == state.app,
-              context.domain == state.domain else {
-            acceptanceState = nil
-            currentSuggestion = nil
-            presenter.hide()
+        switch result {
+        case .notActive:
             return false
-        }
-
-        let sameFocusedElement = context.focusedElementID == state.focusedElementID
-            || approximatelySameRect(context.focusedElementRect, state.focusedElementRect)
-            || isSameGoogleDocsBrailleLineTarget(
-                app: context.app,
-                domain: context.domain,
-                context.focusedElementRect,
-                state.focusedElementRect
-            )
-        guard sameFocusedElement else {
-            acceptanceState = nil
-            currentSuggestion = nil
-            presenter.hide()
-            return false
-        }
-
-        switch acceptanceRelation(for: context.textBeforeCursor, state: state) {
-        case .settled, .pendingEcho:
+        case .handled(let handledResult):
             currentContext = context
-            completionTask?.cancel()
+            workController.cancelAll()
+            currentSuggestion = handledResult.currentSuggestion
 
-            if let currentSuggestion, !currentSuggestion.isExhausted {
+            if let currentSuggestion {
                 presenter.update(currentSuggestion, for: context, mode: displayMode(for: context))
             } else {
                 presenter.hide()
             }
 
-            statusMessage = "Continuing accepted suggestion"
+            statusMessage = handledResult.statusMessage
             return true
-        case .trailingWhitespace:
-            currentContext = context
-            completionTask?.cancel()
-            statusMessage = "Ignoring accepted suggestion echo"
-            return true
-        case .diverged:
-            acceptanceState = nil
+        case .cleared:
             currentSuggestion = nil
             presenter.hide()
             return false
         }
-    }
-
-    private func acceptanceRelation(for observedText: String, state: AcceptanceState) -> AcceptanceRelation {
-        if let relation = exactAcceptanceRelation(
-            observedText: observedText,
-            expectedText: state.expectedTextBeforeCursor,
-            baseText: state.baseTextBeforeCursor,
-            lastAcceptedAt: state.lastAcceptedAt
-        ) {
-            return relation
-        }
-
-        let normalizedObservedText = normalizedAcceptanceWhitespace(in: observedText)
-        let normalizedExpectedText = normalizedAcceptanceWhitespace(in: state.expectedTextBeforeCursor)
-        let normalizedBaseText = normalizedAcceptanceWhitespace(in: state.baseTextBeforeCursor)
-        if normalizedObservedText != observedText
-            || normalizedExpectedText != state.expectedTextBeforeCursor
-            || normalizedBaseText != state.baseTextBeforeCursor,
-            let relation = exactAcceptanceRelation(
-                observedText: normalizedObservedText,
-                expectedText: normalizedExpectedText,
-                baseText: normalizedBaseText,
-                lastAcceptedAt: state.lastAcceptedAt
-            ) {
-            return relation
-        }
-
-        return .diverged
-    }
-
-    private func exactAcceptanceRelation(
-        observedText: String,
-        expectedText: String,
-        baseText: String,
-        lastAcceptedAt: Date
-    ) -> AcceptanceRelation? {
-        if observedText == expectedText {
-            return .settled
-        }
-
-        if observedText.hasPrefix(expectedText) {
-            let suffix = observedText.dropFirst(expectedText.count)
-            return suffix.unicodeScalars.allSatisfy { CharacterSet.whitespacesAndNewlines.contains($0) }
-                ? .trailingWhitespace
-                : .diverged
-        }
-
-        let isPotentialDelayedEcho = expectedText.hasPrefix(observedText)
-            && observedText.hasPrefix(baseText)
-        if isPotentialDelayedEcho,
-           Date().timeIntervalSince(lastAcceptedAt) <= acceptanceEchoGraceInterval {
-            return .pendingEcho
-        }
-
-        return nil
-    }
-
-    private func normalizedAcceptanceWhitespace(in text: String) -> String {
-        var result = String.UnicodeScalarView()
-        var previousWasWhitespace = false
-
-        for scalar in text.unicodeScalars {
-            if CharacterSet.whitespacesAndNewlines.contains(scalar) {
-                if !previousWasWhitespace {
-                    result.append(" ")
-                    previousWasWhitespace = true
-                }
-            } else {
-                result.append(scalar)
-                previousWasWhitespace = false
-            }
-        }
-
-        return String(result)
-    }
-}
-
-private struct AcceptanceState {
-    let focusedElementID: String
-    let focusedElementRect: CGRect?
-    let app: AppIdentity
-    let domain: String?
-    let baseTextBeforeCursor: String
-    let acceptedPrefix: String
-    let expectedTextBeforeCursor: String
-    let lastAcceptedAt: Date
-}
-
-private struct CompletedAcceptAllState {
-    let focusedElementID: String
-    let focusedElementRect: CGRect?
-    let app: AppIdentity
-    let domain: String?
-    let baseTextBeforeCursor: String
-    let expectedTextBeforeCursor: String
-    let lastAcceptedAt: Date
-}
-
-private struct LeakedShortcut {
-    let suffix: String
-    let action: LeakedShortcutAction
-}
-
-private enum LeakedShortcutAction {
-    case acceptNextWords
-
-    var debugName: String {
-        "replace-leaked-tab"
-    }
-
-    var statusMessage: String {
-        "Accepted leaked Tab"
-    }
-}
-
-private enum AcceptanceRelation {
-    case settled
-    case pendingEcho
-    case trailingWhitespace
-    case diverged
-}
-
-private extension TextContext {
-    func replacingTextBeforeCursor(_ textBeforeCursor: String) -> TextContext {
-        TextContext(
-            id: id,
-            app: app,
-            domain: domain,
-            focusedElementID: focusedElementID,
-            textBeforeCursor: textBeforeCursor,
-            selectedRange: selectedRange,
-            caretRect: caretRect,
-            focusedElementRect: focusedElementRect,
-            previousGlyphRect: previousGlyphRect,
-            nextGlyphRect: nextGlyphRect,
-            lineReferenceRect: lineReferenceRect,
-            languageHint: languageHint,
-            captureSources: captureSources,
-            createdAt: createdAt
-        )
     }
 }

@@ -1,6 +1,6 @@
 # AutoComp
 
-AutoComp is a macOS 14+ menu bar autocomplete app for Apple Silicon Macs. It watches the active accessible text field, requests a short completion from a configured remote OpenAI-compatible endpoint, displays it inline or in a mirror window, and lets the user accept text with Tab.
+AutoComp is a macOS 14+ menu bar autocomplete app for Apple Silicon Macs. It watches the active accessible text field, requests a short completion from a configured completion backend, displays it inline or in a mirror window, and lets the user accept text with Tab.
 
 ## Run
 
@@ -20,16 +20,28 @@ The script builds the SwiftPM package, stages `dist/AutoComp.app`, launches it a
 - Compatibility catalog for browsers, writing apps, terminals, code editors, and unsupported apps.
 - Google Docs setup detection and Sheets/Slides unsupported handling.
 - Remote OpenAI-compatible completion backend configurable from Settings > Model.
+- Apple Intelligence completion backend support when FoundationModels is available on the current macOS release.
+- Local in-process llama.cpp runtime support when an app build links the optional runtime and a GGUF model file is configured.
 - Emoji suggestions after `:`.
 - Privacy controls with collection off by default.
 - Encrypted local personalization storage with Keychain-managed keys and delete-all support.
 
-## Remote model integration
+## Completion backends
 
-The app always uses the remote OpenAI-compatible backend configured in Settings > Model. For local development, `.env.local` can provide initial defaults:
+The app defaults to the remote OpenAI-compatible backend configured in Settings > Model. For local development, `.env.local` can provide initial defaults:
 
 - `AUTOCOMP_REMOTE_BASE_URL`
 - `AUTOCOMP_REMOTE_API_KEY`
 - `AUTOCOMP_REMOTE_MODEL`
+- `AUTOCOMP_LOCAL_MODEL_PATH`
+- `AUTOCOMP_LOCAL_MAX_RAM_BYTES`
 
-Current development defaults point at `http://127.0.0.1:8000` with `Qwen/Qwen3.6-35B-A3B`. Autocomplete text is sent to the configured endpoint.
+Current development defaults point at `http://127.0.0.1:8000` with `Qwen/Qwen3.6-35B-A3B`.
+
+Backend modes:
+
+- Remote OpenAI-compatible sends autocomplete text to the configured endpoint.
+- Apple Intelligence uses FoundationModels only when the framework is available and the OS supports it; otherwise the app reports the backend as unavailable and can use remote fallback when enabled.
+- Local in-process is available only in app builds that link the optional llama.cpp runtime and have a configured GGUF model file. The package builds the optional runtime and harness targets when Homebrew llama.cpp headers/libraries are present. Settings > Model shows the local runtime state, model path, load state, last local error, memory limit, and remote fallback state.
+
+AutoComp's baseline is macOS 14+. Apple Intelligence remains conditional and may require a newer macOS release such as macOS 26. Local in-process completion is also conditional; the app should not be treated as local-capable unless Settings reports both runtime and model file availability.

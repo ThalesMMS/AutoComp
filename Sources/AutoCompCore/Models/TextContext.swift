@@ -19,6 +19,8 @@ public struct TextContext: Identifiable, Codable, Equatable, Sendable {
     public let previousGlyphRect: CGRect?
     public let nextGlyphRect: CGRect?
     public let lineReferenceRect: CGRect?
+    public let caretGeometryQuality: CaretGeometryQuality
+    public let observedCharacterWidth: CGFloat?
     public let languageHint: String?
     public let captureSources: Set<TextCaptureSource>
     public let createdAt: Date
@@ -35,6 +37,8 @@ public struct TextContext: Identifiable, Codable, Equatable, Sendable {
         previousGlyphRect: CGRect? = nil,
         nextGlyphRect: CGRect? = nil,
         lineReferenceRect: CGRect? = nil,
+        caretGeometryQuality: CaretGeometryQuality = .unavailable,
+        observedCharacterWidth: CGFloat? = nil,
         languageHint: String? = nil,
         captureSources: Set<TextCaptureSource> = [.accessibility],
         createdAt: Date = Date()
@@ -50,6 +54,8 @@ public struct TextContext: Identifiable, Codable, Equatable, Sendable {
         self.previousGlyphRect = previousGlyphRect
         self.nextGlyphRect = nextGlyphRect
         self.lineReferenceRect = lineReferenceRect
+        self.caretGeometryQuality = caretGeometryQuality
+        self.observedCharacterWidth = observedCharacterWidth
         self.languageHint = languageHint
         self.captureSources = captureSources
         self.createdAt = createdAt

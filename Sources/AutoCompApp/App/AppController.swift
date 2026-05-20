@@ -15,8 +15,10 @@ final class AppController: ObservableObject {
     let compatibilitySettings: CompatibilitySettingsStore
     let privacySettingsStore: PrivacySettingsStore
     let personalizationStore: SecurePersonalizationStore
+    let focusTrackingModel: FocusTrackingModel
     let suggestionEngine: SuggestionEngine
 
+    private let environment: AutoCompAppEnvironment
     private let acceptanceService: AcceptanceService
     private let keyboardShortcuts: KeyboardShortcutService
     private let completionBackendConfigurationService: CompletionBackendConfigurationService
@@ -25,55 +27,25 @@ final class AppController: ObservableObject {
     private var settingsWindow: NSWindow?
     private var cancellables: Set<AnyCancellable> = []
 
-    init() {
-        let arguments = ProcessInfo.processInfo.arguments
-        let usesInlinePreviewTestProvider = arguments.contains("--ui-test-inline-preview")
-        let completionBackendConfigurationService = CompletionBackendConfigurationService()
-        let backendSettings = usesInlinePreviewTestProvider
-            ? CompletionBackendSettings()
-            : completionBackendConfigurationService.load()
-        let permissionService = PermissionService()
-        let compatibilityCatalog = CompatibilityCatalog()
-        let compatibilitySettings = CompatibilitySettingsStore()
-        let privacySettingsStore = PrivacySettingsStore()
-        let keyboardShortcuts = KeyboardShortcutService()
-        let acceptanceService = AcceptanceService()
-        let supportDirectory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("AutoComp", isDirectory: true)
-        let personalizationStore = SecurePersonalizationStore(directory: supportDirectory.appendingPathComponent("Personalization", isDirectory: true))
-        let previewCoordinator = PreviewCoordinator()
-        let presenter = ShortcutAwareSuggestionPresenter(
-            previewCoordinator: previewCoordinator,
-            setSuggestionActive: { active in
-                keyboardShortcuts.setSuggestionActive(active)
-            }
-        )
-        let completionProvider: CompletionProvider = usesInlinePreviewTestProvider
-            ? InlinePreviewTestCompletionProvider()
-            : RemoteCompletionProvider(configuration: backendSettings.remoteConfiguration)
-        let suggestionEngine = SuggestionEngine(
-            contextProvider: AXTextContextService(),
-            completionProvider: completionProvider,
-            presenter: presenter,
-            compatibilityCatalog: compatibilityCatalog,
-            compatibilitySettings: compatibilitySettings,
-            privacyStore: privacySettingsStore,
-            shortcutLeakRepairInserter: acceptanceService
-        )
+    convenience init() {
+        self.init(environment: AutoCompAppEnvironment())
+    }
 
-        self.permissionService = permissionService
-        self.compatibilityCatalog = compatibilityCatalog
-        self.compatibilitySettings = compatibilitySettings
-        self.privacySettingsStore = privacySettingsStore
-        self.personalizationStore = personalizationStore
-        self.suggestionEngine = suggestionEngine
-        self.acceptanceService = acceptanceService
-        self.keyboardShortcuts = keyboardShortcuts
-        self.completionBackendConfigurationService = completionBackendConfigurationService
-        self.usesInlinePreviewTestProvider = usesInlinePreviewTestProvider
-        self.completionBackendSettings = backendSettings
-        self.completionBackendSummary = backendSettings.summary
-        self.keyboardShortcuts.setSuggestionActive(false)
+    init(environment: AutoCompAppEnvironment) {
+        self.environment = environment
+        self.permissionService = environment.permissionService
+        self.compatibilityCatalog = environment.compatibilityCatalog
+        self.compatibilitySettings = environment.compatibilitySettings
+        self.privacySettingsStore = environment.privacySettingsStore
+        self.personalizationStore = environment.personalizationStore
+        self.focusTrackingModel = environment.focusTrackingModel
+        self.suggestionEngine = environment.suggestionEngine
+        self.acceptanceService = environment.acceptanceService
+        self.keyboardShortcuts = environment.keyboardShortcuts
+        self.completionBackendConfigurationService = environment.completionBackendConfigurationService
+        self.usesInlinePreviewTestProvider = environment.usesInlinePreviewTestProvider
+        self.completionBackendSettings = environment.initialCompletionBackendSettings
+        self.completionBackendSummary = environment.initialCompletionBackendSettings.summary
 
         permissionService.$inputMonitoringAllowed
             .removeDuplicates()
@@ -112,9 +84,9 @@ final class AppController: ObservableObject {
                     self.syncShortcutStateAfterAcceptance()
                 }
             },
-            onSuggestionTriggerKey: { [weak self] in
+            onSuggestionTriggerKey: { [weak self] event in
                 Task { @MainActor in
-                    self?.suggestionEngine.recordSuggestionTriggerKey()
+                    self?.suggestionEngine.recordSuggestionTriggerKey(event)
                 }
             }
         )
@@ -137,7 +109,9 @@ final class AppController: ObservableObject {
         let configuration = NSWorkspace.OpenConfiguration()
         NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: configuration) { _, error in
             guard error == nil else { return }
-            NSApp.terminate(nil)
+            Task { @MainActor in
+                NSApp.terminate(nil)
+            }
         }
     }
 
@@ -158,7 +132,7 @@ final class AppController: ObservableObject {
         completionBackendSettings = settings
         completionBackendSummary = settings.summary
         suggestionEngine.updateCompletionProvider(
-            RemoteCompletionProvider(configuration: settings.remoteConfiguration),
+            environment.completionProvider(for: settings),
             status: "Completion backend updated"
         )
     }
@@ -216,16 +190,6 @@ final class AppController: ObservableObject {
         } else if arguments.contains("--ui-test-onboarding") {
             showOnboardingWindow()
         }
-    }
-}
-
-private actor InlinePreviewTestCompletionProvider: CompletionProvider {
-    func complete(context: TextContext) async throws -> Suggestion {
-        Suggestion(
-            baseContextID: context.id,
-            visibleText: " consegue me ajudar com isso.",
-            latencyMs: 0
-        )
     }
 }
 

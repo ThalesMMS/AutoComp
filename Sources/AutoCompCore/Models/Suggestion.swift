@@ -6,6 +6,7 @@ public struct Suggestion: Identifiable, Codable, Equatable, Sendable {
     public var visibleText: String
     public var remainingText: String
     public var acceptedPrefix: String
+    public var rawText: String?
     public let createdAt: Date
     public let latencyMs: Int
 
@@ -15,6 +16,7 @@ public struct Suggestion: Identifiable, Codable, Equatable, Sendable {
         visibleText: String,
         remainingText: String? = nil,
         acceptedPrefix: String = "",
+        rawText: String? = nil,
         createdAt: Date = Date(),
         latencyMs: Int
     ) {
@@ -23,6 +25,7 @@ public struct Suggestion: Identifiable, Codable, Equatable, Sendable {
         self.visibleText = visibleText
         self.remainingText = remainingText ?? visibleText
         self.acceptedPrefix = acceptedPrefix
+        self.rawText = rawText
         self.createdAt = createdAt
         self.latencyMs = latencyMs
     }
