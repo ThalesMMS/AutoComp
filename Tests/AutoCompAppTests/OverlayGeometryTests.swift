@@ -1,3 +1,4 @@
+import ApplicationServices
 import AutoCompCore
 @testable import AutoCompApp
 import XCTest
@@ -111,6 +112,17 @@ final class OverlayGeometryTests: XCTestCase {
         )
     }
 
+    func testTextMarkerFallbackGateAttemptsForOffscreenBrowserCaret() {
+        XCTAssertEqual(
+            AXTextMarkerGeometryFallback.gate(
+                bundleID: "com.apple.Safari",
+                geometry: offscreenBrowserGeometry(),
+                isEnabled: true
+            ),
+            .attempt
+        )
+    }
+
     func testTextMarkerFallbackGateAttemptsOnlyForWeakBrowserGeometryWhenEnabled() {
         XCTAssertEqual(
             AXTextMarkerGeometryFallback.gate(
@@ -119,6 +131,36 @@ final class OverlayGeometryTests: XCTestCase {
                 isEnabled: true
             ),
             .attempt
+        )
+    }
+
+    func testGoogleDocsSafariOffscreenMetricsUseScreenOCRFallback() {
+        let resolver = AXTextGeometryResolver()
+
+        XCTAssertTrue(
+            resolver.shouldUseScreenOCRFallback(
+                snapshot: googleDocsSnapshot(
+                    bundleID: "com.apple.Safari",
+                    displayName: "Safari",
+                    textBeforeCursor: "Baço de dimensões usuais"
+                ),
+                geometry: offscreenBrowserGeometry()
+            )
+        )
+    }
+
+    func testGoogleDocsUsableMetricsSkipScreenOCRFallback() {
+        let resolver = AXTextGeometryResolver()
+
+        XCTAssertFalse(
+            resolver.shouldUseScreenOCRFallback(
+                snapshot: googleDocsSnapshot(
+                    bundleID: "com.apple.Safari",
+                    displayName: "Safari",
+                    textBeforeCursor: "Baço de dimensões usuais"
+                ),
+                geometry: strongGeometry()
+            )
         )
     }
 
@@ -196,6 +238,25 @@ final class OverlayGeometryTests: XCTestCase {
 
         XCTAssertEqual(layout?.origin.x, 103)
         XCTAssertGreaterThan(layout?.origin.y ?? 0, 950)
+    }
+
+    func testCollapsedGoogleDocsCaretStillAnchorsInlinePreview() {
+        let layout = InlinePreviewGeometry.layout(
+            context: textContext(
+                app: AppIdentity(bundleID: "com.google.Chrome", displayName: "Google Chrome", processID: 42),
+                textBeforeCursor: "Vamos validar se teste novo agora ",
+                selectedRange: NSRange(location: 36, length: 0),
+                caretRect: CGRect(x: 768, y: 378, width: 0, height: 17),
+                focusedElementRect: CGRect(x: 768, y: 378, width: 625, height: 2)
+            ),
+            contentSize: NSSize(width: 180, height: 18),
+            screenFrame: CGRect(x: 0, y: 0, width: 1_000, height: 1_000),
+            visibleFrame: CGRect(x: 0, y: 0, width: 1_000, height: 1_000)
+        )
+
+        XCTAssertEqual(layout?.source, .exactAX)
+        XCTAssertEqual(layout?.origin.x, 770)
+        XCTAssertEqual(layout?.origin.y, 604)
     }
 
     func testWideAccessibilityCaretUsesPreviousGlyphInsertionPoint() {
@@ -461,6 +522,39 @@ final class OverlayGeometryTests: XCTestCase {
             lineReferenceRect: CGRect(x: 92, y: 20, width: 8, height: 20),
             caretGeometryQuality: .directCaret,
             observedCharacterWidth: 8
+        )
+    }
+
+    private func offscreenBrowserGeometry() -> AXTextGeometrySnapshot {
+        AXTextGeometrySnapshot(
+            focusedElementRect: CGRect(x: 0, y: -9847, width: 3000, height: 444),
+            caretRect: CGRect(x: 57, y: -9709, width: 2, height: 15),
+            previousGlyphRect: CGRect(x: 53, y: -9709, width: 6, height: 15),
+            nextGlyphRect: CGRect(x: 0, y: -9694, width: 2, height: 15),
+            lineReferenceRect: CGRect(x: 53, y: -9709, width: 6, height: 15),
+            caretGeometryQuality: .directCaret,
+            observedCharacterWidth: 6
+        )
+    }
+
+    private func googleDocsSnapshot(
+        bundleID: String,
+        displayName: String,
+        textBeforeCursor: String
+    ) -> AXFocusSnapshot {
+        AXFocusSnapshot(
+            app: AppIdentity(bundleID: bundleID, displayName: displayName, processID: 1),
+            bundleID: bundleID,
+            displayName: displayName,
+            focusedElement: AXUIElementCreateSystemWide(),
+            focusedElementID: "docs-field",
+            domain: "docs.google.com",
+            isGoogleDocsElement: true,
+            isCodexComposerElement: false,
+            selectedRange: NSRange(location: (textBeforeCursor as NSString).length, length: 0),
+            fullText: textBeforeCursor,
+            textLength: (textBeforeCursor as NSString).length,
+            textBeforeCursor: textBeforeCursor
         )
     }
 }

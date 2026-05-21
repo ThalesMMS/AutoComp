@@ -45,16 +45,26 @@ struct FocusSnapshotResolver {
             throw AXTextContextError.noFocusedElement
         }
 
-        let focusedElement = axHelper.resolvedFocusedElement(from: focused)
+        let displayName = app.localizedName ?? bundleID
+        let activeDomain = browserResolver.activeDomain(for: bundleID)
+        let focusedElement = resolvedTextElement(
+            from: axHelper.resolvedFocusedElement(from: focused),
+            appElement: appElement,
+            bundleID: bundleID,
+            activeDomain: activeDomain
+        )
         guard !axHelper.isSecureField(focusedElement) else {
             throw AXTextContextError.secureOrUnsupportedField
         }
 
-        let displayName = app.localizedName ?? bundleID
         let isGoogleDocsElement = isGoogleDocsEditingElement(focusedElement)
             || hasGoogleDocsDocumentAncestor(focusedElement)
         let isCodexComposerElement = isCodexComposerElement(focusedElement, bundleID: bundleID)
-        let domain = resolvedDomain(bundleID: bundleID, isGoogleDocsElement: isGoogleDocsElement)
+        let domain = resolvedDomain(
+            bundleID: bundleID,
+            activeDomain: activeDomain,
+            isGoogleDocsElement: isGoogleDocsElement
+        )
         let selectedRange = axHelper.selectedRange(from: focusedElement)
         let fullText = axHelper.readableText(from: focusedElement)
         let textLength = axHelper.numberOfCharacters(from: focusedElement)
@@ -87,14 +97,42 @@ struct FocusSnapshotResolver {
         )
     }
 
-    private func resolvedDomain(bundleID: String, isGoogleDocsElement: Bool) -> String? {
-        var domain = browserResolver.activeDomain(for: bundleID)
+    private func resolvedTextElement(
+        from focusedElement: AXUIElement,
+        appElement: AXUIElement,
+        bundleID: String,
+        activeDomain: String?
+    ) -> AXUIElement {
+        guard bundleID == "com.google.Chrome",
+              !isTextReadable(from: focusedElement) else {
+            return focusedElement
+        }
+
+        if let descendant = axHelper.firstDescendant(of: focusedElement, matching: isGoogleDocsReadableTextElement)
+            ?? axHelper.firstDescendant(of: appElement, matching: isGoogleDocsReadableTextElement) {
+            GeometryDebug.log("ax-fallback source=google-docs-descendant domain=\(activeDomain ?? "nil")")
+            return descendant
+        }
+
+        return focusedElement
+    }
+
+    private func resolvedDomain(
+        bundleID: String,
+        activeDomain: String?,
+        isGoogleDocsElement: Bool
+    ) -> String? {
+        var domain = activeDomain
         if domain == nil,
            bundleID == "com.google.Chrome",
            isGoogleDocsElement {
             domain = "docs.google.com"
         }
         return domain
+    }
+
+    private func isGoogleDocsDomain(_ domain: String?) -> Bool {
+        domain == "docs.google.com"
     }
 
     private func isCodexComposerElement(_ element: AXUIElement, bundleID: String) -> Bool {
@@ -115,6 +153,25 @@ struct FocusSnapshotResolver {
             && (description.localizedCaseInsensitiveContains("document")
                 || description.localizedCaseInsensitiveContains("documento")
             )
+    }
+
+    private func isGoogleDocsReadableTextElement(_ element: AXUIElement) -> Bool {
+        guard isGoogleDocsEditingElement(element),
+              isTextReadable(from: element) else {
+            return false
+        }
+        return true
+    }
+
+    private func isTextReadable(from element: AXUIElement) -> Bool {
+        if axHelper.readableText(from: element) != nil {
+            return true
+        }
+        if let numberOfCharacters = axHelper.numberOfCharacters(from: element),
+           numberOfCharacters > 0 {
+            return true
+        }
+        return axHelper.selectedRange(from: element) != nil
     }
 
     private func hasGoogleDocsDocumentAncestor(_ element: AXUIElement) -> Bool {

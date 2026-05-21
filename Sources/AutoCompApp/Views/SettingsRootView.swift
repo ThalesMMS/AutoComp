@@ -149,19 +149,16 @@ struct PrivacySettingsView: View {
     var body: some View {
         Form {
             Section("Collection") {
-                Toggle("Enable optional local input collection", isOn: $settings.collectionEnabled)
-                Toggle("Use clipboard as local context", isOn: $settings.clipboardContextEnabled)
-                Toggle("Use visible screen text as local context", isOn: $settings.screenContextEnabled)
-                Slider(value: $settings.personalizationStrength, in: 0...1) {
+                Toggle("Enable optional local input collection", isOn: privacyBinding(\.collectionEnabled))
+                Toggle("Use clipboard as local context", isOn: privacyBinding(\.clipboardContextEnabled))
+                Toggle("Use visible screen text as local context", isOn: privacyBinding(\.screenContextEnabled))
+                Slider(value: personalizationStrengthBinding, in: 0...1) {
                     Text("Personalization strength")
                 }
             }
 
             Section("Local data") {
                 LabeledContent("Encrypted records", value: "\(recordCount)")
-                Button("Save Privacy Settings") {
-                    try? controller.privacySettingsStore.save(settings)
-                }
                 Button("Delete Local Personalization Data", role: .destructive) {
                     controller.deletePersonalizationData()
                     recordCount = controller.personalizationStore.recordCount()
@@ -175,6 +172,31 @@ struct PrivacySettingsView: View {
             settings = controller.privacySettingsStore.load()
             recordCount = controller.personalizationStore.recordCount()
         }
+    }
+
+    private func privacyBinding(_ keyPath: WritableKeyPath<PrivacySettings, Bool>) -> Binding<Bool> {
+        Binding {
+            settings[keyPath: keyPath]
+        } set: { value in
+            var updatedSettings = settings
+            updatedSettings[keyPath: keyPath] = value
+            save(updatedSettings)
+        }
+    }
+
+    private var personalizationStrengthBinding: Binding<Double> {
+        Binding {
+            settings.personalizationStrength
+        } set: { value in
+            var updatedSettings = settings
+            updatedSettings.personalizationStrength = value
+            save(updatedSettings)
+        }
+    }
+
+    private func save(_ updatedSettings: PrivacySettings) {
+        settings = updatedSettings
+        try? controller.privacySettingsStore.save(updatedSettings)
     }
 }
 

@@ -18,4 +18,25 @@ final class PrivacySettingsTests: XCTestCase {
         XCTAssertFalse(settings.allowsCollection(appBundleID: "com.google.Chrome", domain: "example.com"))
         XCTAssertTrue(settings.allowsCollection(appBundleID: "com.google.Chrome", domain: "other.example"))
     }
+
+    func testStoreRoundTripsAllPrivacyControlsAndRules() throws {
+        let suiteName = "AutoCompPrivacySettings-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+        let store = PrivacySettingsStore(defaults: defaults, key: "privacy")
+        let settings = PrivacySettings(
+            collectionEnabled: true,
+            clipboardContextEnabled: true,
+            screenContextEnabled: true,
+            personalizationStrength: 0.82,
+            perAppRules: ["com.apple.TextEdit": true],
+            perDomainRules: ["example.com": false]
+        )
+
+        try store.save(settings)
+
+        XCTAssertEqual(store.load(), settings)
+    }
 }

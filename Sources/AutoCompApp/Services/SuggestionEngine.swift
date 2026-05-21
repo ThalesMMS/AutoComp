@@ -29,6 +29,8 @@ final class SuggestionEngine: ObservableObject {
     private var timer: Timer?
     private var lastTextChangeTime: Date = .distantPast
     private let debounceInterval: TimeInterval = 0.25
+    private var transientFocusFailureStartedAt: Date?
+    private let transientFocusFailureGraceInterval: TimeInterval = 1.5
 
     init(
         contextProvider: TextContextProvider,
@@ -162,6 +164,7 @@ final class SuggestionEngine: ObservableObject {
     private func refresh() async {
         do {
             let context = try await focusProvider.currentContext()
+            transientFocusFailureStartedAt = nil
             diagnostics.recordFocus(context: context)
 
             if context.textBeforeCursor.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -253,6 +256,10 @@ final class SuggestionEngine: ObservableObject {
                 }
             }
         } catch {
+            if preserveSuggestionAcrossTransientFocusFailure(error) {
+                return
+            }
+
             currentContext = nil
             currentSuggestion = nil
             statusMessage = (error as? LocalizedError)?.errorDescription ?? "No compatible text field"
@@ -468,6 +475,7 @@ final class SuggestionEngine: ObservableObject {
     private func isWebLikeApp(_ bundleID: String) -> Bool {
         [
             "com.openai.codex",
+            "com.apple.Safari",
             "com.google.Chrome",
             "com.brave.Browser",
             "com.microsoft.edgemac",
@@ -475,6 +483,46 @@ final class SuggestionEngine: ObservableObject {
             "company.thebrowser.dia",
             "com.todesktop.230313mzl4w4u92"
         ].contains(bundleID)
+    }
+
+    private func preserveSuggestionAcrossTransientFocusFailure(_ error: Error, now: Date = Date()) -> Bool {
+        guard isTransientFocusReadError(error),
+              let suggestion = currentSuggestion,
+              !suggestion.isExhausted,
+              let context = currentContext,
+              isGoogleDocsContext(context) else {
+            transientFocusFailureStartedAt = nil
+            return false
+        }
+
+        let startedAt = transientFocusFailureStartedAt ?? now
+        transientFocusFailureStartedAt = startedAt
+        guard now.timeIntervalSince(startedAt) <= transientFocusFailureGraceInterval else {
+            transientFocusFailureStartedAt = nil
+            return false
+        }
+
+        GeometryDebug.log("suggestion-keep reason=transient-focus-read-failure app=\(context.app.displayName) bundle=\(context.app.bundleID)")
+        presenter.update(suggestion, for: context, mode: displayMode(for: context))
+        return true
+    }
+
+    private func isTransientFocusReadError(_ error: Error) -> Bool {
+        guard let contextError = error as? AXTextContextError else {
+            return false
+        }
+
+        switch contextError {
+        case .noReadableText, .noFocusedElement:
+            return true
+        case .accessibilityNotTrusted, .noFrontmostApplication, .secureOrUnsupportedField:
+            return false
+        }
+    }
+
+    private func isGoogleDocsContext(_ context: TextContext) -> Bool {
+        isWebLikeApp(context.app.bundleID)
+            && context.domain?.contains("docs.google.com") == true
     }
 
     private func isSameFocusedText(_ context: TextContext, as previousContext: TextContext) -> Bool {
@@ -489,6 +537,10 @@ final class SuggestionEngine: ObservableObject {
         }
 
         if context.focusedElementID == previousContext.focusedElementID {
+            return true
+        }
+
+        if FocusIdentity(context: previousContext).matches(FocusIdentity(context: context)) {
             return true
         }
 

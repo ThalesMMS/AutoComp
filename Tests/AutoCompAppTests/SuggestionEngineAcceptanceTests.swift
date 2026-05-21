@@ -625,6 +625,121 @@ final class SuggestionEngineAcceptanceTests: XCTestCase {
         engine.stop()
     }
 
+    func testGoogleDocsScreenOCRJitterKeepsPublishedSuggestionVisible() async throws {
+        let app = AppIdentity(bundleID: "com.google.Chrome", displayName: "Google Chrome", processID: 1)
+        let initialContext = TextContext(
+            app: app,
+            domain: "docs.google.com",
+            focusedElementID: "docs-field-a",
+            textBeforeCursor: "Testando uma ferramenta de",
+            caretRect: CGRect(x: 1218.3, y: 518.8, width: 1, height: 14.9),
+            focusedElementRect: CGRect(x: 1033.4, y: 510.8, width: 512.9, height: 40),
+            caretGeometryQuality: .screenOCR,
+            captureSources: [.accessibility, .screenOCR]
+        )
+        let triggeredContext = TextContext(
+            app: app,
+            domain: "docs.google.com",
+            focusedElementID: "docs-field-a",
+            textBeforeCursor: "Testando uma ferramenta de ",
+            caretRect: CGRect(x: 1225.3, y: 518.8, width: 1, height: 14.9),
+            focusedElementRect: CGRect(x: 1033.4, y: 510.8, width: 512.9, height: 40),
+            caretGeometryQuality: .screenOCR,
+            captureSources: [.accessibility, .screenOCR]
+        )
+        let jitterContext = TextContext(
+            app: app,
+            domain: "docs.google.com",
+            focusedElementID: "docs-field-b",
+            textBeforeCursor: "Testando uma ferramenta de ",
+            caretRect: CGRect(x: 1215.4, y: 518.8, width: 1, height: 14.9),
+            focusedElementRect: CGRect(x: 1033.4, y: 510.8, width: 503.0, height: 40),
+            caretGeometryQuality: .screenOCR,
+            captureSources: [.accessibility, .screenOCR]
+        )
+        let contextProvider = MutableContextProvider(context: initialContext)
+        let completionProvider = CountingCompletionProvider(
+            suggestion: Suggestion(
+                baseContextID: initialContext.id,
+                visibleText: "continuar agora",
+                latencyMs: 25
+            )
+        )
+        let presenter = RecordingSuggestionPresenter()
+        let engine = SuggestionEngine(
+            contextProvider: contextProvider,
+            completionProvider: completionProvider,
+            presenter: presenter
+        )
+
+        engine.start()
+        try await Task.sleep(nanoseconds: 350_000_000)
+        await contextProvider.updateContext(triggeredContext)
+        try await Task.sleep(nanoseconds: 700_000_000)
+        XCTAssertEqual(presenter.lastSuggestion?.visibleText, "continuar agora")
+
+        await contextProvider.updateContext(jitterContext)
+        try await Task.sleep(nanoseconds: 500_000_000)
+
+        XCTAssertEqual(engine.currentSuggestion?.visibleText, "continuar agora")
+        XCTAssertEqual(presenter.lastSuggestion?.visibleText, "continuar agora")
+        XCTAssertEqual(presenter.lastContext?.focusedElementID, "docs-field-b")
+        let callCount = await completionProvider.getCallCount()
+        XCTAssertEqual(callCount, 1)
+        engine.stop()
+    }
+
+    func testGoogleDocsTransientFocusFailureKeepsPublishedSuggestionVisible() async throws {
+        let app = AppIdentity(bundleID: "com.google.Chrome", displayName: "Google Chrome", processID: 1)
+        let initialContext = TextContext(
+            app: app,
+            domain: "docs.google.com",
+            focusedElementID: "docs-field-a",
+            textBeforeCursor: "Docs",
+            selectedRange: NSRange(location: 4, length: 0),
+            caretRect: CGRect(x: 450, y: 381, width: 1, height: 16),
+            focusedElementRect: CGRect(x: 450, y: 381, width: 626, height: 1)
+        )
+        let triggeredContext = TextContext(
+            app: app,
+            domain: "docs.google.com",
+            focusedElementID: "docs-field-b",
+            textBeforeCursor: "Docs ",
+            selectedRange: NSRange(location: 5, length: 0),
+            caretRect: CGRect(x: 462, y: 381, width: 1, height: 16),
+            focusedElementRect: CGRect(x: 462, y: 381, width: 626, height: 1)
+        )
+        let contextProvider = MutableFailingContextProvider(context: initialContext)
+        let completionProvider = CountingCompletionProvider(
+            suggestion: Suggestion(
+                baseContextID: initialContext.id,
+                visibleText: "continue this",
+                latencyMs: 25
+            )
+        )
+        let presenter = RecordingSuggestionPresenter()
+        let engine = SuggestionEngine(
+            contextProvider: contextProvider,
+            completionProvider: completionProvider,
+            presenter: presenter
+        )
+
+        engine.start()
+        try await Task.sleep(nanoseconds: 350_000_000)
+        await contextProvider.updateContext(triggeredContext)
+        try await Task.sleep(nanoseconds: 700_000_000)
+        XCTAssertEqual(presenter.lastSuggestion?.visibleText, "continue this")
+
+        await contextProvider.fail(with: .noReadableText)
+        try await Task.sleep(nanoseconds: 500_000_000)
+
+        XCTAssertEqual(engine.currentSuggestion?.visibleText, "continue this")
+        XCTAssertEqual(presenter.lastSuggestion?.visibleText, "continue this")
+        let callCount = await completionProvider.getCallCount()
+        XCTAssertEqual(callCount, 1)
+        engine.stop()
+    }
+
     func testGoogleDocsBrailleMovingLineMetricStillTriggersAfterSpace() async throws {
         let app = AppIdentity(bundleID: "com.google.Chrome", displayName: "Google Chrome", processID: 1)
         let initialContext = TextContext(
@@ -1220,6 +1335,31 @@ private actor MutableContextProvider: TextContextProvider {
 
     func currentContext() async throws -> TextContext {
         context
+    }
+}
+
+private actor MutableFailingContextProvider: TextContextProvider {
+    private var context: TextContext
+    private var error: AXTextContextError?
+
+    init(context: TextContext) {
+        self.context = context
+    }
+
+    func updateContext(_ context: TextContext) {
+        self.context = context
+        error = nil
+    }
+
+    func fail(with error: AXTextContextError) {
+        self.error = error
+    }
+
+    func currentContext() async throws -> TextContext {
+        if let error {
+            throw error
+        }
+        return context
     }
 }
 

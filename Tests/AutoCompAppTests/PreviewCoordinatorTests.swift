@@ -1,3 +1,4 @@
+import AppKit
 import AutoCompCore
 @testable import AutoCompApp
 import XCTest
@@ -154,6 +155,25 @@ final class PreviewCoordinatorTests: XCTestCase {
         presenter.update(suggestion(), for: context(), mode: .disabled)
 
         XCTAssertEqual(activeStates, [true, false])
+    }
+
+    func testFloatingSuggestionPanelDoesNotStealFocusOrAutoHideWhenAppIsInactive() {
+        let panel = FloatingSuggestionPanelFactory.makePanel(
+            contentRect: CGRect(x: 0, y: 0, width: 120, height: 18)
+        )
+
+        XCTAssertFalse(panel.canBecomeKey)
+        XCTAssertFalse(panel.canBecomeMain)
+        XCTAssertFalse(panel.hidesOnDeactivate)
+        XCTAssertFalse(panel.isReleasedWhenClosed)
+        XCTAssertTrue(panel.ignoresMouseEvents)
+        XCTAssertEqual(panel.animationBehavior, .none)
+        XCTAssertEqual(panel.level, NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 2))
+        XCTAssertTrue(panel.collectionBehavior.contains(.canJoinAllSpaces))
+        XCTAssertTrue(panel.collectionBehavior.contains(.stationary))
+        XCTAssertTrue(panel.collectionBehavior.contains(.fullScreenAuxiliary))
+        XCTAssertTrue(panel.collectionBehavior.contains(.ignoresCycle))
+        XCTAssertFalse(panel.collectionBehavior.contains(.transient))
     }
 
     private func suggestion() -> Suggestion {

@@ -16,6 +16,62 @@ struct AXHelper {
         return (focusedRef as! AXUIElement)
     }
 
+    func childElements(for element: AXUIElement) -> [AXUIElement] {
+        var childrenRef: CFTypeRef?
+        let status = AXUIElementCopyAttributeValue(
+            element,
+            kAXChildrenAttribute as CFString,
+            &childrenRef
+        )
+        guard status == .success,
+              let childrenRef else {
+            return []
+        }
+
+        if let children = childrenRef as? [AXUIElement] {
+            return children
+        }
+
+        guard let values = childrenRef as? [Any] else {
+            return []
+        }
+        return values.map { $0 as! AXUIElement }
+    }
+
+    func firstDescendant(
+        of element: AXUIElement,
+        maxDepth: Int = 10,
+        maxVisited: Int = 700,
+        matching predicate: (AXUIElement) -> Bool
+    ) -> AXUIElement? {
+        var queue: [(element: AXUIElement, depth: Int)] = [(element, 0)]
+        var seen = Set<UInt>()
+        var visited = 0
+
+        while !queue.isEmpty, visited < maxVisited {
+            let next = queue.removeFirst()
+            let opaque = Unmanaged.passUnretained(next.element).toOpaque()
+            let key = UInt(bitPattern: opaque)
+            guard seen.insert(key).inserted else {
+                continue
+            }
+
+            visited += 1
+            if predicate(next.element) {
+                return next.element
+            }
+
+            guard next.depth < maxDepth else {
+                continue
+            }
+
+            for child in childElements(for: next.element) {
+                queue.append((child, next.depth + 1))
+            }
+        }
+        return nil
+    }
+
     func resolvedFocusedElement(from element: AXUIElement) -> AXUIElement {
         var current = element
         for _ in 0..<6 {

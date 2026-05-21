@@ -16,8 +16,7 @@ struct AXTextMarkerGeometryFallback {
     }
 
     static var defaultEnabled: Bool {
-        ProcessInfo.processInfo.arguments.contains("--enable-ax-text-marker-fallback")
-            || ProcessInfo.processInfo.environment["AUTOCOMP_AX_TEXT_MARKER_FALLBACK"] == "1"
+        ProcessInfo.processInfo.environment["AUTOCOMP_AX_TEXT_MARKER_FALLBACK"] != "0"
     }
 
     static func isEligibleBrowser(bundleID: String) -> Bool {
@@ -52,8 +51,25 @@ struct AXTextMarkerGeometryFallback {
     }
 
     static func hasWeakGeometry(_ geometry: AXTextGeometrySnapshot) -> Bool {
-        geometry.caretRect == nil
-            || geometry.caretGeometryQuality != .directCaret
+        guard geometry.caretGeometryQuality == .directCaret,
+              let caretRect = geometry.caretRect else {
+            return true
+        }
+
+        return !isPlausibleBrowserTextMetric(caretRect)
+    }
+
+    private static func isPlausibleBrowserTextMetric(_ rect: CGRect) -> Bool {
+        rect.minX.isFinite
+            && rect.minY.isFinite
+            && rect.width.isFinite
+            && rect.height.isFinite
+            && rect.minX >= 0
+            && rect.minY >= 0
+            && rect.width > 0
+            && rect.width <= 160
+            && rect.height >= 8
+            && rect.height <= 120
     }
 
     func resolve(snapshot: AXFocusSnapshot, geometry: AXTextGeometrySnapshot) -> CGRect? {

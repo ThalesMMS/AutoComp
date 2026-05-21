@@ -44,6 +44,34 @@ final class ContextGenerationTrackerTests: XCTestCase {
         XCTAssertFalse(tracker.matches(liveContext, signature: tracker.signature(for: requestedContext)))
     }
 
+    func testScreenOCRGeometryJitterKeepsGenerationFresh() {
+        let tracker = ContextGenerationTracker()
+        let requestedContext = textContext(
+            app: AppIdentity(bundleID: "com.apple.Safari", displayName: "Safari", processID: 1),
+            domain: "docs.google.com",
+            focusedElementID: "docs-field-a",
+            textBeforeCursor: "Testando uma ferramenta de ",
+            selectedRange: NSRange(location: 27, length: 0),
+            focusedElementRect: CGRect(x: 1033.4, y: 510.8, width: 512.9, height: 40),
+            caretRect: CGRect(x: 1225.3, y: 518.8, width: 1, height: 14.9),
+            caretGeometryQuality: .screenOCR,
+            captureSources: [.accessibility, .screenOCR]
+        )
+        let liveContext = textContext(
+            app: AppIdentity(bundleID: "com.apple.Safari", displayName: "Safari", processID: 1),
+            domain: "docs.google.com",
+            focusedElementID: "docs-field-b",
+            textBeforeCursor: "Testando uma ferramenta de ",
+            selectedRange: NSRange(location: 27, length: 0),
+            focusedElementRect: CGRect(x: 1033.4, y: 510.8, width: 503.0, height: 40),
+            caretRect: CGRect(x: 1215.4, y: 518.8, width: 1, height: 14.9),
+            caretGeometryQuality: .screenOCR,
+            captureSources: [.accessibility, .screenOCR]
+        )
+
+        XCTAssertTrue(tracker.matches(liveContext, signature: tracker.signature(for: requestedContext)))
+    }
+
     func testRejectsAppDomainTextAndSelectionChanges() {
         let tracker = ContextGenerationTracker()
         let requestedContext = textContext(
@@ -116,7 +144,9 @@ final class ContextGenerationTrackerTests: XCTestCase {
         textBeforeCursor: String,
         selectedRange: NSRange?,
         focusedElementRect: CGRect?,
-        caretRect: CGRect?
+        caretRect: CGRect?,
+        caretGeometryQuality: CaretGeometryQuality = .unavailable,
+        captureSources: Set<TextCaptureSource> = [.accessibility]
     ) -> TextContext {
         TextContext(
             app: app,
@@ -125,7 +155,9 @@ final class ContextGenerationTrackerTests: XCTestCase {
             textBeforeCursor: textBeforeCursor,
             selectedRange: selectedRange,
             caretRect: caretRect,
-            focusedElementRect: focusedElementRect
+            focusedElementRect: focusedElementRect,
+            caretGeometryQuality: caretGeometryQuality,
+            captureSources: captureSources
         )
     }
 }

@@ -29,6 +29,10 @@ final class ScreenOCRGeometryFallbackResolver: @unchecked Sendable {
         }
 
         let screenFrame = screen.frame
+        let effectiveSearchRect = validatedSearchRect(searchRect, screenFrame: screenFrame)
+        if let searchRect, effectiveSearchRect == nil {
+            GeometryDebug.log("ax-fallback source=screenOCR ignored-search-rect raw=\(searchRect)")
+        }
         let candidates = (request.results ?? []).compactMap { observation -> ScreenOCRLine? in
             guard let candidate = observation.topCandidates(1).first else {
                 return nil
@@ -39,8 +43,8 @@ final class ScreenOCRGeometryFallbackResolver: @unchecked Sendable {
             }
 
             let rect = accessibilityRect(fromVisionBoundingBox: observation.boundingBox, screenFrame: screenFrame)
-            if let searchRect,
-               !searchRect.insetBy(dx: -24, dy: -24).contains(CGPoint(x: rect.midX, y: rect.midY)) {
+            if let effectiveSearchRect,
+               !effectiveSearchRect.insetBy(dx: -24, dy: -24).contains(CGPoint(x: rect.midX, y: rect.midY)) {
                 return nil
             }
 
@@ -55,12 +59,10 @@ final class ScreenOCRGeometryFallbackResolver: @unchecked Sendable {
             return ScreenOCRLine(text: text, rect: rect)
         }
 
-        guard let line = mergedOCRLines(from: candidates).sorted(by: { lhs, rhs in
-            if abs(lhs.rect.minY - rhs.rect.minY) > 8 {
-                return lhs.rect.minY < rhs.rect.minY
-            }
-            return lhs.rect.minX < rhs.rect.minX
-        }).last else {
+        guard let line = selectedLine(
+            from: mergedOCRLines(from: candidates),
+            authoritativeText: authoritativeText
+        ) else {
             return nil
         }
 
@@ -74,7 +76,7 @@ final class ScreenOCRGeometryFallbackResolver: @unchecked Sendable {
             near: line.rect,
             in: image,
             screenFrame: screenFrame,
-            searchRect: searchRect
+            searchRect: effectiveSearchRect
         ) ?? defaultCaretRect
         let focusedElementRect = line.rect.insetBy(dx: -8, dy: -8).union(
             CGRect(
@@ -92,6 +94,31 @@ final class ScreenOCRGeometryFallbackResolver: @unchecked Sendable {
             previousGlyphRect: line.rect
         )
         return stabilizedContext(rawContext)
+    }
+
+    private func validatedSearchRect(_ searchRect: CGRect?, screenFrame: CGRect) -> CGRect? {
+        guard let searchRect,
+              searchRect.minX.isFinite,
+              searchRect.minY.isFinite,
+              searchRect.width.isFinite,
+              searchRect.height.isFinite,
+              searchRect.width >= 80,
+              searchRect.height >= 32 else {
+            return nil
+        }
+
+        let screenAccessibilityFrame = CGRect(
+            x: screenFrame.minX,
+            y: screenFrame.minY,
+            width: screenFrame.width,
+            height: screenFrame.height
+        )
+        let clippedSearchRect = searchRect.intersection(screenAccessibilityFrame)
+        guard clippedSearchRect.width >= 80,
+              clippedSearchRect.height >= 32 else {
+            return nil
+        }
+        return clippedSearchRect
     }
 
     private func mergedOCRLines(from candidates: [ScreenOCRLine]) -> [ScreenOCRLine] {
@@ -124,6 +151,78 @@ final class ScreenOCRGeometryFallbackResolver: @unchecked Sendable {
             let rect = ordered.dropFirst().reduce(first.rect) { $0.union($1.rect) }
             return ScreenOCRLine(text: text, rect: rect)
         }
+    }
+
+    private func selectedLine(from lines: [ScreenOCRLine], authoritativeText: String) -> ScreenOCRLine? {
+        let sortedLines = lines.sorted(by: screenReadingOrder)
+        guard !sortedLines.isEmpty else {
+            return nil
+        }
+
+        let target = normalizedOCRMatchText(lastNonEmptyLine(in: authoritativeText))
+        guard !target.isEmpty else {
+            return sortedLines.last
+        }
+
+        let scoredLines = sortedLines.map { line in
+            (line: line, score: ocrMatchScore(candidate: line.text, target: target))
+        }
+        if let best = scoredLines.max(by: { lhs, rhs in
+            if lhs.score != rhs.score {
+                return lhs.score < rhs.score
+            }
+            return screenReadingOrder(lhs.line, rhs.line)
+        }), best.score > 0 {
+            return best.line
+        }
+
+        return sortedLines.last
+    }
+
+    private func screenReadingOrder(_ lhs: ScreenOCRLine, _ rhs: ScreenOCRLine) -> Bool {
+        if abs(lhs.rect.minY - rhs.rect.minY) > 8 {
+            return lhs.rect.minY < rhs.rect.minY
+        }
+        return lhs.rect.minX < rhs.rect.minX
+    }
+
+    private func ocrMatchScore(candidate: String, target: String) -> Int {
+        let normalizedCandidate = normalizedOCRMatchText(candidate)
+        guard !normalizedCandidate.isEmpty else {
+            return 0
+        }
+
+        if normalizedCandidate == target {
+            return 1_000 + normalizedCandidate.count
+        }
+        if target.hasSuffix(normalizedCandidate) {
+            return 800 + normalizedCandidate.count
+        }
+        if normalizedCandidate.hasPrefix(target) {
+            return 700 + target.count
+        }
+        if normalizedCandidate.contains(target) {
+            return 600 + target.count
+        }
+        if target.contains(normalizedCandidate) {
+            return 500 + normalizedCandidate.count
+        }
+        return 0
+    }
+
+    private func normalizedOCRMatchText(_ text: String) -> String {
+        text.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+    }
+
+    private func lastNonEmptyLine(in text: String) -> String {
+        text.split(whereSeparator: { $0 == "\n" || $0 == "\r" })
+            .reversed()
+            .first { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .map(String.init)
+            ?? text
     }
 
     private func stabilizedContext(_ rawContext: ScreenOCRGeometryFallback) -> ScreenOCRGeometryFallback {

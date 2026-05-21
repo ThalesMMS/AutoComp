@@ -7,19 +7,24 @@ struct FocusIdentity: Equatable, Sendable {
     let focusedElementRect: CGRect?
     let caretRect: CGRect?
     let lineReferenceRect: CGRect?
+    let isScreenOCR: Bool
 
     init(context: TextContext) {
         focusedElementID = context.focusedElementID
         focusedElementRect = context.focusedElementRect
         caretRect = context.caretRect
         lineReferenceRect = context.lineReferenceRect
+        isScreenOCR = context.caretGeometryQuality == .screenOCR
+            || context.captureSources.contains(.screenOCR)
     }
 
     func matches(_ other: FocusIdentity) -> Bool {
-        focusedElementID == other.focusedElementID
-            || approximatelySameRect(focusedElementRect, other.focusedElementRect, tolerance: 8)
-            || approximatelySameRect(caretRect, other.caretRect, tolerance: 4)
-            || approximatelySameRect(lineReferenceRect, other.lineReferenceRect, tolerance: 4)
+        let metricTolerance: CGFloat = isScreenOCR || other.isScreenOCR ? 16 : 4
+        let elementTolerance: CGFloat = isScreenOCR || other.isScreenOCR ? 16 : 8
+        return focusedElementID == other.focusedElementID
+            || approximatelySameRect(focusedElementRect, other.focusedElementRect, tolerance: elementTolerance)
+            || approximatelySameRect(caretRect, other.caretRect, tolerance: metricTolerance)
+            || approximatelySameRect(lineReferenceRect, other.lineReferenceRect, tolerance: metricTolerance)
     }
 
     private func approximatelySameRect(_ lhs: CGRect?, _ rhs: CGRect?, tolerance: CGFloat) -> Bool {

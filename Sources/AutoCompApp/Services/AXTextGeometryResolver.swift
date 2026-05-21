@@ -134,7 +134,7 @@ struct AXTextGeometryResolver {
         snapshot: AXFocusSnapshot,
         geometry: AXTextGeometrySnapshot
     ) -> Bool {
-        guard snapshot.bundleID == "com.google.Chrome",
+        guard AXTextMarkerGeometryFallback.isEligibleBrowser(bundleID: snapshot.bundleID),
               snapshot.domain?.contains("docs.google.com") == true else {
             return false
         }
@@ -255,6 +255,8 @@ struct AXTextGeometryResolver {
     private func isUsableGoogleDocsMetricRect(_ rect: CGRect) -> Bool {
         rect.width.isFinite
             && rect.height.isFinite
+            && rect.minX > 1
+            && rect.minY > 1
             && rect.height >= 8
             && rect.height <= 80
             && !(abs(rect.minX) < 0.5 && abs(rect.minY) < 0.5)

@@ -47,6 +47,33 @@ protocol VisualInlineSuggestionPresenting: SuggestionTierPresenting {
 }
 
 @MainActor
+enum FloatingSuggestionPanelFactory {
+    static func makePanel(contentRect: NSRect) -> NSPanel {
+        let panel = FloatingSuggestionPanel(
+            contentRect: contentRect,
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: true
+        )
+        panel.isReleasedWhenClosed = false
+        panel.level = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 2)
+        panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
+        panel.backgroundColor = .clear
+        panel.isOpaque = false
+        panel.hasShadow = false
+        panel.ignoresMouseEvents = true
+        panel.hidesOnDeactivate = false
+        panel.animationBehavior = .none
+        return panel
+    }
+}
+
+private final class FloatingSuggestionPanel: NSPanel {
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
+}
+
+@MainActor
 final class PreviewCoordinator: SuggestionPresenter {
     private let nativeInlinePresenter: NativeInlineSuggestionPresenting
     private let visualInlinePresenter: VisualInlineSuggestionPresenting
@@ -253,19 +280,9 @@ final class VisualInlineOverlayPresenter: VisualInlineSuggestionPresenting {
     }
 
     private func makePanel() -> NSPanel {
-        let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 120, height: 18),
-            styleMask: [.borderless, .nonactivatingPanel],
-            backing: .buffered,
-            defer: false
+        FloatingSuggestionPanelFactory.makePanel(
+            contentRect: NSRect(x: 0, y: 0, width: 120, height: 18)
         )
-        panel.level = .init(Int(CGWindowLevelForKey(.screenSaverWindow)) + 1)
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
-        panel.backgroundColor = .clear
-        panel.isOpaque = false
-        panel.hasShadow = false
-        panel.ignoresMouseEvents = true
-        return panel
     }
 
     private func makeContentView(for panel: NSPanel) -> InlineGhostTextView {
@@ -301,19 +318,9 @@ final class MirrorWindowSuggestionPresenter: SuggestionTierPresenting {
     }
 
     private func makePanel() -> NSPanel {
-        let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 420, height: 42),
-            styleMask: [.borderless, .nonactivatingPanel],
-            backing: .buffered,
-            defer: false
+        FloatingSuggestionPanelFactory.makePanel(
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 42)
         )
-        panel.level = .init(Int(CGWindowLevelForKey(.screenSaverWindow)) + 1)
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
-        panel.backgroundColor = .clear
-        panel.isOpaque = false
-        panel.hasShadow = false
-        panel.ignoresMouseEvents = true
-        return panel
     }
 
     private func makeContentView(for panel: NSPanel) -> MirrorSuggestionOverlayContentView {
@@ -695,7 +702,7 @@ enum InlinePreviewGeometry {
             return nil
         }
 
-        guard rawRect.isFiniteAndNonEmpty else {
+        guard rawRect.isFiniteAndNonEmpty || isCollapsedCaretMetric(rawRect, metricName: name) else {
             GeometryDebug.log("metric=\(name) rejected reason=non-finite-or-empty raw=\(rawRect)")
             return nil
         }
@@ -705,13 +712,14 @@ enum InlinePreviewGeometry {
             return nil
         }
 
-        guard rawRect.width <= screenFrame.width,
-              rawRect.height <= max(120, screenFrame.height * 0.25) else {
+        let normalizedRawRect = normalizedMetricRect(rawRect, metricName: name)
+        guard normalizedRawRect.width <= screenFrame.width,
+              normalizedRawRect.height <= max(120, screenFrame.height * 0.25) else {
             GeometryDebug.log("metric=\(name) rejected reason=absurd-size raw=\(rawRect)")
             return nil
         }
 
-        let converted = OverlayGeometry.appKitRect(accessibilityRect: rawRect, screenFrame: screenFrame)
+        let converted = OverlayGeometry.appKitRect(accessibilityRect: normalizedRawRect, screenFrame: screenFrame)
         guard converted.isFiniteAndNonEmpty,
               screenFrame.insetBy(dx: -screenTolerance, dy: -screenTolerance).intersects(converted) else {
             GeometryDebug.log("metric=\(name) rejected reason=outside-screen raw=\(rawRect) converted=\(converted)")
@@ -727,6 +735,25 @@ enum InlinePreviewGeometry {
         }
 
         return converted
+    }
+
+    private static func isCollapsedCaretMetric(_ rect: CGRect, metricName: String) -> Bool {
+        guard metricName == "caret" || metricName == "previous-glyph" else {
+            return false
+        }
+        return rect.minX.isFinite
+            && rect.minY.isFinite
+            && rect.width.isFinite
+            && rect.height.isFinite
+            && rect.width == 0
+            && rect.height > 0
+    }
+
+    private static func normalizedMetricRect(_ rect: CGRect, metricName: String) -> CGRect {
+        guard isCollapsedCaretMetric(rect, metricName: metricName) else {
+            return rect
+        }
+        return CGRect(x: rect.minX, y: rect.minY, width: 1, height: rect.height)
     }
 }
 

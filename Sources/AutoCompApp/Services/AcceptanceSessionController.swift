@@ -67,8 +67,7 @@ final class AcceptanceSessionController {
         )
 
         acceptanceState = AcceptanceState(
-            focusedElementID: context.focusedElementID,
-            focusedElementRect: context.focusedElementRect,
+            focusIdentity: FocusIdentity(context: context),
             session: session
         )
         completedAcceptAllState = nil
@@ -99,8 +98,7 @@ final class AcceptanceSessionController {
         )
 
         acceptanceState = AcceptanceState(
-            focusedElementID: previousContext.focusedElementID,
-            focusedElementRect: previousContext.focusedElementRect,
+            focusIdentity: FocusIdentity(context: previousContext),
             session: session
         )
     }
@@ -108,8 +106,7 @@ final class AcceptanceSessionController {
     func armCompletedAcceptAll() -> Bool {
         completedAcceptAllState = acceptanceState.map {
             CompletedAcceptAllState(
-                focusedElementID: $0.focusedElementID,
-                focusedElementRect: $0.focusedElementRect,
+                focusIdentity: $0.focusIdentity,
                 app: $0.session.target.app,
                 domain: $0.session.target.domain,
                 baseTextBeforeCursor: $0.session.baseTextBeforeCursor,
@@ -193,14 +190,7 @@ final class AcceptanceSessionController {
             return .cleared
         }
 
-        guard sameFocusedElement(
-            contextFocusedElementID: context.focusedElementID,
-            contextFocusedElementRect: context.focusedElementRect,
-            stateFocusedElementID: state.focusedElementID,
-            stateFocusedElementRect: state.focusedElementRect,
-            app: context.app,
-            domain: context.domain
-        ) else {
+        guard sameFocusedElement(context: context, stateFocusIdentity: state.focusIdentity) else {
             GeometryDebug.log("completed-accept-all cleared reason=focused-target")
             completedAcceptAllState = nil
             return .cleared
@@ -273,14 +263,7 @@ final class AcceptanceSessionController {
             return .cleared
         }
 
-        let sameFocusedElement = sameFocusedElement(
-            contextFocusedElementID: context.focusedElementID,
-            contextFocusedElementRect: context.focusedElementRect,
-            stateFocusedElementID: state.focusedElementID,
-            stateFocusedElementRect: state.focusedElementRect,
-            app: context.app,
-            domain: context.domain
-        )
+        let sameFocusedElement = sameFocusedElement(context: context, stateFocusIdentity: state.focusIdentity)
         guard sameFocusedElement else {
             acceptanceState = nil
             return .cleared
@@ -318,8 +301,7 @@ final class AcceptanceSessionController {
             )
         case .typedThrough(let session, let typedText):
             acceptanceState = session.isExhausted ? nil : AcceptanceState(
-                focusedElementID: context.focusedElementID,
-                focusedElementRect: context.focusedElementRect,
+                focusIdentity: FocusIdentity(context: context),
                 session: session
             )
 
@@ -414,30 +396,19 @@ final class AcceptanceSessionController {
         }
 
         return sameFocusedElement(
-            contextFocusedElementID: context.focusedElementID,
-            contextFocusedElementRect: context.focusedElementRect,
-            stateFocusedElementID: previousContext.focusedElementID,
-            stateFocusedElementRect: previousContext.focusedElementRect,
-            app: context.app,
-            domain: context.domain
+            context: context,
+            stateFocusIdentity: FocusIdentity(context: previousContext)
         )
     }
 
-    private func sameFocusedElement(
-        contextFocusedElementID: String,
-        contextFocusedElementRect: CGRect?,
-        stateFocusedElementID: String,
-        stateFocusedElementRect: CGRect?,
-        app: AppIdentity,
-        domain: String?
-    ) -> Bool {
-        contextFocusedElementID == stateFocusedElementID
-            || approximatelySameRect(contextFocusedElementRect, stateFocusedElementRect)
+    private func sameFocusedElement(context: TextContext, stateFocusIdentity: FocusIdentity) -> Bool {
+        FocusIdentity(context: context).matches(stateFocusIdentity)
+            || approximatelySameRect(context.focusedElementRect, stateFocusIdentity.focusedElementRect)
             || isSameGoogleDocsBrailleLineTarget(
-                app: app,
-                domain: domain,
-                contextFocusedElementRect,
-                stateFocusedElementRect
+                app: context.app,
+                domain: context.domain,
+                context.focusedElementRect,
+                stateFocusIdentity.focusedElementRect
             )
     }
 
@@ -482,14 +453,12 @@ final class AcceptanceSessionController {
 }
 
 private struct AcceptanceState {
-    let focusedElementID: String
-    let focusedElementRect: CGRect?
+    let focusIdentity: FocusIdentity
     let session: ActiveSuggestionSession
 }
 
 private struct CompletedAcceptAllState {
-    let focusedElementID: String
-    let focusedElementRect: CGRect?
+    let focusIdentity: FocusIdentity
     let app: AppIdentity
     let domain: String?
     let baseTextBeforeCursor: String
