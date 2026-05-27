@@ -11,6 +11,9 @@ final class CompletionProviderRouterTests: XCTestCase {
         let suggestion = try await router.complete(context: makeContext())
 
         XCTAssertEqual(suggestion.visibleText, "review this")
+        XCTAssertEqual(suggestion.completionRoute?.requestedKind, .remote)
+        XCTAssertEqual(suggestion.completionRoute?.deliveredKind, .remote)
+        XCTAssertNil(suggestion.completionRoute?.fallbackErrorDescription)
     }
 
     func testUnavailableModeFailsClearly() async {
@@ -43,6 +46,9 @@ final class CompletionProviderRouterTests: XCTestCase {
         let suggestion = try await router.complete(context: makeContext())
 
         XCTAssertEqual(suggestion.visibleText, "remote fallback")
+        XCTAssertEqual(suggestion.completionRoute?.requestedKind, .localLlama)
+        XCTAssertEqual(suggestion.completionRoute?.deliveredKind, .remote)
+        XCTAssertTrue(suggestion.completionRoute?.fallbackErrorDescription?.contains("Local model was not found") == true)
     }
 
     func testFallsBackFromAppleIntelligenceWhenConfigured() async throws {
@@ -60,6 +66,35 @@ final class CompletionProviderRouterTests: XCTestCase {
         let suggestion = try await router.complete(context: makeContext())
 
         XCTAssertEqual(suggestion.visibleText, "remote fallback")
+        XCTAssertEqual(suggestion.completionRoute?.requestedKind, .appleIntelligence)
+        XCTAssertEqual(suggestion.completionRoute?.deliveredKind, .remote)
+        XCTAssertEqual(
+            suggestion.completionRoute?.fallbackErrorDescription,
+            "Apple Intelligence completion is unavailable: not enabled"
+        )
+    }
+
+    func testAppleIntelligenceUnavailableWithoutFallbackFailsClearly() async {
+        let router = CompletionProviderRouter(
+            activeKind: .appleIntelligence,
+            providers: [
+                .appleIntelligence: ThrowingCompletionProvider(
+                    error: AppleFoundationModelError.unavailable("FoundationModels requires macOS 26.0 or newer.")
+                )
+            ]
+        )
+
+        do {
+            _ = try await router.complete(context: makeContext())
+            XCTFail("Expected unavailable Apple Intelligence error")
+        } catch let error as AppleFoundationModelError {
+            XCTAssertEqual(
+                error.errorDescription,
+                "Apple Intelligence completion is unavailable: FoundationModels requires macOS 26.0 or newer."
+            )
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
     }
 
     func testForwardsVisualContextToAwareProvider() async throws {
@@ -81,6 +116,23 @@ final class CompletionProviderRouterTests: XCTestCase {
         XCTAssertEqual(recordedVisualContext, visualContext)
     }
 
+    func testPrepareForRuntimeSwitchForwardsToLifecycleProviders() async {
+        let localProvider = LifecycleRecordingCompletionProvider(text: "local")
+        let remoteProvider = StaticCompletionProvider(text: "remote")
+        let router = CompletionProviderRouter(
+            activeKind: .remote,
+            providers: [
+                .remote: remoteProvider,
+                .localLlama: localProvider
+            ]
+        )
+
+        await router.prepareForRuntimeSwitch()
+
+        let prepareCount = await localProvider.prepareCount()
+        XCTAssertEqual(prepareCount, 1)
+    }
+
     private func makeContext() -> TextContext {
         TextContext(
             app: AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1),
@@ -95,6 +147,27 @@ private actor StaticCompletionProvider: CompletionProvider {
 
     init(text: String) {
         self.text = text
+    }
+
+    func complete(context: TextContext) async throws -> Suggestion {
+        Suggestion(baseContextID: context.id, visibleText: text, latencyMs: 1)
+    }
+}
+
+private actor LifecycleRecordingCompletionProvider: CompletionProvider, RuntimeSwitchPreparingCompletionProvider {
+    let text: String
+    private var storedPrepareCount = 0
+
+    init(text: String) {
+        self.text = text
+    }
+
+    func prepareCount() -> Int {
+        storedPrepareCount
+    }
+
+    func prepareForRuntimeSwitch() async {
+        storedPrepareCount += 1
     }
 
     func complete(context: TextContext) async throws -> Suggestion {

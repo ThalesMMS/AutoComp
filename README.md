@@ -23,8 +23,8 @@ The script builds the SwiftPM package, stages `dist/AutoComp.app`, launches it a
 - Apple Intelligence completion backend support when FoundationModels is available on the current macOS release.
 - Local in-process llama.cpp runtime support when an app build links the optional runtime and a GGUF model file is configured.
 - Emoji suggestions after `:`.
-- Privacy controls with collection off by default.
-- Encrypted local personalization storage with Keychain-managed keys and delete-all support.
+- Privacy controls with optional collection off by default, source-specific limits, and browser domain collection rules.
+- Encrypted local personalization storage with Keychain-managed keys and local privacy delete-all support.
 
 ## Completion backends
 
@@ -36,12 +36,58 @@ The app defaults to the remote OpenAI-compatible backend configured in Settings 
 - `AUTOCOMP_LOCAL_MODEL_PATH`
 - `AUTOCOMP_LOCAL_MAX_RAM_BYTES`
 
-Current development defaults point at `http://127.0.0.1:8000` with `Qwen/Qwen3.6-35B-A3B`.
+Current development defaults point at `http://100.98.1.45:8000` with `default`.
 
 Backend modes:
 
 - Remote OpenAI-compatible sends autocomplete text to the configured endpoint.
-- Apple Intelligence uses FoundationModels only when the framework is available and the OS supports it; otherwise the app reports the backend as unavailable and can use remote fallback when enabled.
-- Local in-process is available only in app builds that link the optional llama.cpp runtime and have a configured GGUF model file. The package builds the optional runtime and harness targets when Homebrew llama.cpp headers/libraries are present. Settings > Model shows the local runtime state, model path, load state, last local error, memory limit, and remote fallback state.
+- Apple Intelligence uses FoundationModels only when the framework is available and the OS supports it; otherwise the app reports the backend as unavailable. Remote fallback is opt-in. Settings > Model shows Apple availability, OS/SDK requirement text, fallback state, and the last Apple error.
+- Local in-process is available only in app builds that link the optional llama.cpp runtime and have a configured GGUF model file. The package builds the optional runtime and harness targets when Homebrew llama.cpp headers/libraries are present. Remote fallback is opt-in. Settings > Model shows the local runtime state, model path, load state, last local error, memory limit, and remote fallback state.
 
 AutoComp's baseline is macOS 14+. Apple Intelligence remains conditional and may require a newer macOS release such as macOS 26. Local in-process completion is also conditional; the app should not be treated as local-capable unless Settings reports both runtime and model file availability.
+
+Settings > Model shows the selected engine, request destination, whether autocomplete text leaves this Mac, whether remote fallback is enabled, the last backend used for a completion, and the last local, Apple, or remote error. Settings > Privacy repeats the active backend privacy summary, and the Model Playground labels the destination before revealing the sensitive prompt preview. Enabling remote fallback displays an inline warning because a failed local or Apple request can be retried against the configured remote endpoint.
+
+Settings > Privacy includes a source policy table for AX text, clipboard context, Screen OCR, debug logs, and local productivity metrics. The same policy, including remote-backend exposure and retention limits, is documented in `Docs/PrivacyPolicy.md`.
+
+## Architecture Policy
+
+AutoComp implementation and review work must follow the clean-room policy in `Docs/CleanRoomPolicy.md` when behavior is informed by external autocomplete applications. The policy requires AutoComp-owned code, names, tests, UI text, prompts, and assets.
+
+The app pipeline, composition root, capture flow, prediction flow, overlay tiers, insertion path, privacy boundaries, and testing entry points are mapped in `Docs/Architecture.md`.
+
+## Safe debug
+
+Normal debug logging must not include user text, prompts, raw OCR, or clipboard content. Use hashes, sizes, states, and reasons when recording completion or geometry behavior.
+
+Sensitive prompt previews and local debug artifacts require explicit opt-in in Settings > Privacy. When enabled, artifacts are written under Application Support with a warning header and may contain prompts, OCR, clipboard context, or typed text. Use Settings > Privacy > Debug > Export Debug Logs to save a local debug bundle, Delete Debug Artifacts to remove them, or Delete All Local Privacy Data to clear personalization, writing preferences, productivity metrics, and sensitive debug artifacts together.
+
+`./script/qa_real_app_matrix.sh` redacts command logs before they are attached to QA notes. Keep sensitive local debug artifacts out of reports unless the opt-in was intentional and the contents were reviewed.
+
+## Release
+
+Release planning, signing, notarization, DMG packaging, Sparkle update checks, and appcast generation are documented in `Docs/ReleasePipeline.md`. The release build fetches the pinned Sparkle archive, embeds `Sparkle.framework`, injects `SUFeedURL` and `SUPublicEDKey`, notarizes and staples the DMG, then signs the final DMG bytes into `appcast.xml`.
+
+Run a release dry run before using signing credentials:
+
+```sh
+./script/release_build.sh --dry-run --version 0.0.0 --build 0 \
+  --download-url https://example.invalid/AutoComp.dmg \
+  --release-notes-url https://example.invalid/releases/v0.0.0
+```
+
+Real releases require `AUTOCOMP_RELEASE_SIGNING_IDENTITY`, `AUTOCOMP_NOTARY_PROFILE`, `AUTOCOMP_SPARKLE_FEED_URL`, `AUTOCOMP_SPARKLE_PUBLIC_KEY`, and a Sparkle private key available through `AUTOCOMP_SPARKLE_PRIVATE_KEY_FILE` or the local Keychain. Keep release secrets out of the repository. After publishing the DMG and appcast, verify an older installed app detects the update with `Check for Updates...`.
+
+## Uninstall
+
+Run a dry run before removing local state:
+
+```sh
+./script/uninstall.sh --dry-run
+```
+
+The uninstall script removes installed AutoComp app bundles, preferences, caches, logs, Keychain items, and `~/Library/Application Support/AutoComp`, including optional local models and debug artifacts. It is idempotent. It does not modify macOS TCC permissions; revoke Accessibility, Input Monitoring, Screen Recording, Local Network, and Apple Events manually in System Settings > Privacy & Security when a full reset is required.
+
+## QA
+
+Real-app validation coverage is documented in `Docs/AppQAMatrix.md`. Use `./script/qa_real_app_matrix.sh` to run and record the automated smoke coverage, or to record skipped UI smoke checks with an explicit host-environment reason.

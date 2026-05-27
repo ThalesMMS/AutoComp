@@ -5,6 +5,17 @@ import Foundation
 struct AcceptanceSessionHandledResult: Equatable {
     let currentSuggestion: Suggestion?
     let statusMessage: String
+    let shouldSchedulePrediction: Bool
+
+    init(
+        currentSuggestion: Suggestion?,
+        statusMessage: String,
+        shouldSchedulePrediction: Bool = false
+    ) {
+        self.currentSuggestion = currentSuggestion
+        self.statusMessage = statusMessage
+        self.shouldSchedulePrediction = shouldSchedulePrediction
+    }
 }
 
 enum AcceptanceSessionObservationResult: Equatable {
@@ -26,6 +37,19 @@ enum LeakedShortcutRepairResult: Equatable {
         statusMessage: String
     )
     case failed(statusMessage: String)
+}
+
+enum AcceptanceSessionValidationResult: Equatable {
+    case valid
+    case passedThrough(AcceptanceSessionPassThroughReason)
+}
+
+enum AcceptanceSessionPassThroughReason: String {
+    case noSuggestion = "no-suggestion"
+    case staleContext = "stale-context"
+    case staleSuggestion = "stale-suggestion"
+    case targetChanged = "target-changed"
+    case unexpectedSelection = "unexpected-selection"
 }
 
 @MainActor
@@ -68,7 +92,8 @@ final class AcceptanceSessionController {
 
         acceptanceState = AcceptanceState(
             focusIdentity: FocusIdentity(context: context),
-            session: session
+            session: session,
+            source: .publication
         )
         completedAcceptAllState = nil
     }
@@ -99,7 +124,8 @@ final class AcceptanceSessionController {
 
         acceptanceState = AcceptanceState(
             focusIdentity: FocusIdentity(context: previousContext),
-            session: session
+            session: session,
+            source: .acceptance
         )
     }
 
@@ -116,6 +142,85 @@ final class AcceptanceSessionController {
         }
         acceptanceState = nil
         return completedAcceptAllState != nil
+    }
+
+    func validateAcceptance(
+        context: TextContext,
+        currentSuggestion: Suggestion?,
+        now: Date = Date()
+    ) -> AcceptanceSessionValidationResult {
+        guard let currentSuggestion else {
+            clearAll()
+            return .passedThrough(.noSuggestion)
+        }
+
+        guard let state = acceptanceState else {
+            return .passedThrough(.staleContext)
+        }
+
+        guard context.app == state.session.target.app,
+              context.domain == state.session.target.domain else {
+            clearAll()
+            return .passedThrough(.targetChanged)
+        }
+
+        let sameFocusedElement = sameFocusedElement(context: context, stateFocusIdentity: state.focusIdentity)
+        guard sameFocusedElement else {
+            clearAll()
+            return .passedThrough(.targetChanged)
+        }
+
+        if hasActiveSelection(context) {
+            guard isOriginalReplacementSelection(context: context, state: state) else {
+                clearAll()
+                return .passedThrough(.unexpectedSelection)
+            }
+            return .valid
+        }
+
+        guard currentSuggestion.acceptedPrefix == state.session.acceptedText,
+              currentSuggestion.remainingText == state.session.remainingText else {
+            clearAll()
+            return .passedThrough(.staleSuggestion)
+        }
+
+        let relation = suggestionSessionReconciler.reconcile(
+            context: context,
+            session: state.session,
+            now: now,
+            targetMatches: sameFocusedElement
+        )
+
+        switch relation {
+        case .settled, .pendingEcho, .trailingWhitespace:
+            return .valid
+        case .targetChanged:
+            clearAll()
+            return .passedThrough(.targetChanged)
+        case .typedThrough, .diverged, .exhausted:
+            clearAll()
+            return .passedThrough(.staleContext)
+        }
+    }
+
+    private func hasActiveSelection(_ context: TextContext) -> Bool {
+        (context.selectedRange?.length ?? 0) > 0
+            || context.selectedText?.isEmpty == false
+    }
+
+    private func isOriginalReplacementSelection(
+        context: TextContext,
+        state: AcceptanceState
+    ) -> Bool {
+        guard state.source == .publication,
+              context.textBeforeCursor == state.session.baseTextBeforeCursor,
+              context.selectedRange == state.session.target.selectedRange,
+              context.selectedText == state.session.target.selectedText else {
+            return false
+        }
+
+        return (state.session.target.selectedRange?.length ?? 0) > 0
+            || state.session.target.selectedText?.isEmpty == false
     }
 
     func repairLeakedShortcutIfNeeded(
@@ -198,9 +303,6 @@ final class AcceptanceSessionController {
 
         if completedAcceptAllTextMatchesExpected(context.textBeforeCursor, state: state) {
             GeometryDebug.log("completed-accept-all settled")
-            if now.timeIntervalSince(state.lastAcceptedAt) > completedAcceptAllLeakGraceInterval {
-                completedAcceptAllState = nil
-            }
             return .handled
         }
 
@@ -263,6 +365,11 @@ final class AcceptanceSessionController {
             return .cleared
         }
 
+        if state.source == .publication,
+           context.textBeforeCursor == state.session.baseTextBeforeCursor {
+            return .notActive
+        }
+
         let sameFocusedElement = sameFocusedElement(context: context, stateFocusIdentity: state.focusIdentity)
         guard sameFocusedElement else {
             acceptanceState = nil
@@ -278,6 +385,10 @@ final class AcceptanceSessionController {
 
         switch relation {
         case .settled, .pendingEcho:
+            guard state.source == .acceptance else {
+                return .notActive
+            }
+
             return .handled(
                 AcceptanceSessionHandledResult(
                     currentSuggestion: currentSuggestion?.isExhausted == false ? currentSuggestion : nil,
@@ -285,6 +396,11 @@ final class AcceptanceSessionController {
                 )
             )
         case .exhausted:
+            guard state.source == .acceptance else {
+                acceptanceState = nil
+                return .cleared
+            }
+
             acceptanceState = nil
             return .handled(
                 AcceptanceSessionHandledResult(
@@ -293,6 +409,10 @@ final class AcceptanceSessionController {
                 )
             )
         case .trailingWhitespace:
+            guard state.source == .acceptance else {
+                return .notActive
+            }
+
             return .handled(
                 AcceptanceSessionHandledResult(
                     currentSuggestion: currentSuggestion?.isExhausted == false ? currentSuggestion : nil,
@@ -300,9 +420,11 @@ final class AcceptanceSessionController {
                 )
             )
         case .typedThrough(let session, let typedText):
+            let sessionIsExhausted = session.isExhausted
             acceptanceState = session.isExhausted ? nil : AcceptanceState(
                 focusIdentity: FocusIdentity(context: context),
-                session: session
+                session: session,
+                source: state.source
             )
 
             let updatedSuggestion = suggestionAfterTypingThrough(
@@ -312,7 +434,8 @@ final class AcceptanceSessionController {
             return .handled(
                 AcceptanceSessionHandledResult(
                     currentSuggestion: updatedSuggestion,
-                    statusMessage: "Continuing accepted suggestion"
+                    statusMessage: "Continuing accepted suggestion",
+                    shouldSchedulePrediction: sessionIsExhausted
                 )
             )
         case .diverged, .targetChanged:
@@ -333,6 +456,7 @@ final class AcceptanceSessionController {
         currentSuggestion.acceptedPrefix += typedText
         currentSuggestion.remainingText.removeFirst(typedText.count)
         currentSuggestion.visibleText = currentSuggestion.remainingText
+        currentSuggestion.collapseAlternativesToCurrentText()
         return currentSuggestion.isExhausted ? nil : currentSuggestion
     }
 
@@ -402,7 +526,9 @@ final class AcceptanceSessionController {
     }
 
     private func sameFocusedElement(context: TextContext, stateFocusIdentity: FocusIdentity) -> Bool {
-        FocusIdentity(context: context).matches(stateFocusIdentity)
+        let contextFocusIdentity = FocusIdentity(context: context)
+        return contextFocusIdentity.matchesStableField(stateFocusIdentity)
+            || contextFocusIdentity.matches(stateFocusIdentity)
             || approximatelySameRect(context.focusedElementRect, stateFocusIdentity.focusedElementRect)
             || isSameGoogleDocsBrailleLineTarget(
                 app: context.app,
@@ -455,6 +581,12 @@ final class AcceptanceSessionController {
 private struct AcceptanceState {
     let focusIdentity: FocusIdentity
     let session: ActiveSuggestionSession
+    let source: AcceptanceSessionSource
+}
+
+private enum AcceptanceSessionSource {
+    case publication
+    case acceptance
 }
 
 private struct CompletedAcceptAllState {
@@ -490,7 +622,11 @@ extension TextContext {
             app: app,
             domain: domain,
             focusedElementID: focusedElementID,
+            stableFieldIdentity: stableFieldIdentity,
             textBeforeCursor: textBeforeCursor,
+            textAfterCursor: textAfterCursor,
+            selectedText: selectedText,
+            fullTextWindow: fullTextWindow,
             selectedRange: selectedRange,
             caretRect: caretRect,
             focusedElementRect: focusedElementRect,

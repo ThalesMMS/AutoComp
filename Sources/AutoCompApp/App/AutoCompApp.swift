@@ -4,14 +4,21 @@ import SwiftUI
 struct AutoCompApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var controller = AppController()
+    @StateObject private var updateService = SparkleUpdaterService()
     @Environment(\.openWindow) private var openWindow
 
     var body: some Scene {
         MenuBarExtra("AutoComp", systemImage: "text.cursor") {
-            MenuBarContentView()
+            MenuBarContentView(
+                canCheckForUpdates: updateService.canCheckForUpdates,
+                checkForUpdates: {
+                    updateService.checkForUpdates()
+                }
+            )
                 .environmentObject(controller)
                 .environmentObject(controller.permissionService)
                 .environmentObject(controller.suggestionEngine)
+                .environmentObject(controller.installationLocationService)
         }
         .menuBarExtraStyle(.window)
 

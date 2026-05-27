@@ -2,6 +2,13 @@ import AutoCompCore
 import XCTest
 
 final class AppleFoundationCompletionProviderTests: XCTestCase {
+    func testSystemAvailabilityReportsReadableState() {
+        let availability = SystemAppleFoundationModelBackend.availability()
+
+        XCTAssertFalse(availability.statusTitle.isEmpty)
+        XCTAssertFalse(availability.detail.isEmpty)
+    }
+
     func testSystemBackendReportsUnavailableOnUnsupportedBuildPath() async throws {
         #if canImport(FoundationModels)
         if #available(macOS 26.0, *) {
@@ -49,11 +56,32 @@ final class AppleFoundationCompletionProviderTests: XCTestCase {
         XCTAssertEqual(suggestion.visibleText, "review this today")
     }
 
-    private func makeContext() -> TextContext {
+    func testGeneratedFillInMiddleTextIsNormalizedWithSuffix() async throws {
+        let provider = AppleFoundationCompletionProvider(
+            backend: FakeAppleFoundationModelBackend(
+                rawText: "Here is the completion:\nadiada para sexta-feira porque o prazo mudou."
+            )
+        )
+
+        let suggestion = try await provider.complete(
+            context: makeContext(
+                textBeforeCursor: "A reuniao foi ",
+                textAfterCursor: " porque o prazo mudou."
+            )
+        )
+
+        XCTAssertEqual(suggestion.visibleText, "adiada para sexta-feira")
+    }
+
+    private func makeContext(
+        textBeforeCursor: String = "Can you ",
+        textAfterCursor: String? = nil
+    ) -> TextContext {
         TextContext(
             app: AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1),
             focusedElementID: "field",
-            textBeforeCursor: "Can you "
+            textBeforeCursor: textBeforeCursor,
+            textAfterCursor: textAfterCursor
         )
     }
 }

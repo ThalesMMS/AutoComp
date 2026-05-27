@@ -6,6 +6,140 @@ enum AcceptanceError: Error {
     case insertionFailed
 }
 
+enum AcceptanceInsertionStrategy: Equatable {
+    case singleUnicodeEvent
+    case perCharacterEvents
+    case clipboard
+}
+
+struct AcceptanceInsertionPolicy: Equatable {
+    var singleUnicodeFastPathEnabled = true
+    var keyboardEventUTF16Limit = 64
+    var singleUnicodeIncompatibleBundleIDs: Set<String> = []
+    var clipboardPreferredBundleIDs: Set<String> = []
+
+    static var productionDefault: AcceptanceInsertionPolicy {
+        AcceptanceInsertionPolicy(
+            singleUnicodeFastPathEnabled: ProcessInfo.processInfo.environment["AUTOCOMP_DISABLE_SINGLE_UNICODE_INSERTION"] != "1"
+        )
+    }
+
+    func strategy(for text: String, bundleID: String?) -> AcceptanceInsertionStrategy {
+        if text.utf16.count > keyboardEventUTF16Limit {
+            return .clipboard
+        }
+
+        if let bundleID, clipboardPreferredBundleIDs.contains(bundleID) {
+            return .clipboard
+        }
+
+        guard singleUnicodeFastPathEnabled else {
+            return .perCharacterEvents
+        }
+
+        if let bundleID, singleUnicodeIncompatibleBundleIDs.contains(bundleID) {
+            return .perCharacterEvents
+        }
+
+        return .singleUnicodeEvent
+    }
+}
+
+struct AcceptanceUnicodePayload {
+    static func utf16Units(for text: String) -> [UniChar] {
+        Array(text.utf16)
+    }
+}
+
+protocol AcceptanceKeyboardEventPosting: AnyObject {
+    func postUnicodeString(_ units: [UniChar]) -> Bool
+    func postKey(_ keyCode: CGKeyCode, flags: CGEventFlags) -> Bool
+}
+
+final class CGEventAcceptanceKeyboardEventPoster: AcceptanceKeyboardEventPosting {
+    func postUnicodeString(_ units: [UniChar]) -> Bool {
+        guard !units.isEmpty,
+              let keyDown = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true),
+              let keyUp = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false) else {
+            return false
+        }
+
+        units.withUnsafeBufferPointer { buffer in
+            guard let baseAddress = buffer.baseAddress else {
+                return
+            }
+            keyDown.keyboardSetUnicodeString(stringLength: units.count, unicodeString: baseAddress)
+            keyUp.keyboardSetUnicodeString(stringLength: units.count, unicodeString: baseAddress)
+        }
+        keyDown.post(tap: .cghidEventTap)
+        keyUp.post(tap: .cghidEventTap)
+        return true
+    }
+
+    func postKey(_ keyCode: CGKeyCode, flags: CGEventFlags = []) -> Bool {
+        guard let keyDown = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: true),
+              let keyUp = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: false) else {
+            return false
+        }
+
+        keyDown.flags = flags
+        keyUp.flags = flags
+        keyDown.post(tap: .cghidEventTap)
+        keyUp.post(tap: .cghidEventTap)
+        return true
+    }
+}
+
+struct PreservedPasteboardItem: Equatable {
+    let dataByType: [NSPasteboard.PasteboardType: Data]
+}
+
+protocol AcceptancePasteboard: AnyObject {
+    func preservedItems() -> [PreservedPasteboardItem]?
+    func clearContents()
+    func setString(_ text: String)
+    func writeItems(_ items: [PreservedPasteboardItem])
+}
+
+final class SystemAcceptancePasteboard: AcceptancePasteboard {
+    private let pasteboard: NSPasteboard
+
+    init(pasteboard: NSPasteboard = .general) {
+        self.pasteboard = pasteboard
+    }
+
+    func preservedItems() -> [PreservedPasteboardItem]? {
+        pasteboard.pasteboardItems?.map { item in
+            var dataByType: [NSPasteboard.PasteboardType: Data] = [:]
+            for type in item.types {
+                if let data = item.data(forType: type) {
+                    dataByType[type] = data
+                }
+            }
+            return PreservedPasteboardItem(dataByType: dataByType)
+        }
+    }
+
+    func clearContents() {
+        pasteboard.clearContents()
+    }
+
+    func setString(_ text: String) {
+        pasteboard.setString(text, forType: .string)
+    }
+
+    func writeItems(_ items: [PreservedPasteboardItem]) {
+        let pasteboardItems = items.map { preservedItem -> NSPasteboardItem in
+            let item = NSPasteboardItem()
+            for (type, data) in preservedItem.dataByType {
+                item.setData(data, forType: type)
+            }
+            return item
+        }
+        pasteboard.writeObjects(pasteboardItems)
+    }
+}
+
 @MainActor
 protocol ShortcutLeakRepairing: AnyObject {
     func replaceLeakedShortcutSuffix(
@@ -17,9 +151,28 @@ protocol ShortcutLeakRepairing: AnyObject {
 @MainActor
 final class AcceptanceService: TextInserter, ShortcutLeakRepairing {
     private let inputSuppressionController: InputSuppressionController?
+    private let insertionPolicy: AcceptanceInsertionPolicy
+    private let keyboardEventPoster: AcceptanceKeyboardEventPosting
+    private let pasteboard: AcceptancePasteboard
+    private let frontmostBundleIDProvider: () -> String?
+    private let clipboardRestoreDelay: TimeInterval
 
-    init(inputSuppressionController: InputSuppressionController? = nil) {
+    init(
+        inputSuppressionController: InputSuppressionController? = nil,
+        insertionPolicy: AcceptanceInsertionPolicy = .productionDefault,
+        keyboardEventPoster: AcceptanceKeyboardEventPosting = CGEventAcceptanceKeyboardEventPoster(),
+        pasteboard: AcceptancePasteboard = SystemAcceptancePasteboard(),
+        frontmostBundleIDProvider: @escaping () -> String? = {
+            NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        },
+        clipboardRestoreDelay: TimeInterval = 0.2
+    ) {
         self.inputSuppressionController = inputSuppressionController
+        self.insertionPolicy = insertionPolicy
+        self.keyboardEventPoster = keyboardEventPoster
+        self.pasteboard = pasteboard
+        self.frontmostBundleIDProvider = frontmostBundleIDProvider
+        self.clipboardRestoreDelay = clipboardRestoreDelay
     }
 
     func acceptNextWord(from suggestion: inout Suggestion) async throws -> String? {
@@ -34,7 +187,7 @@ final class AcceptanceService: TextInserter, ShortcutLeakRepairing {
         guard let token = suggestion.acceptAll() else {
             return nil
         }
-        try insertByClipboard(token)
+        try insert(token)
         return token
     }
 
@@ -65,77 +218,88 @@ final class AcceptanceService: TextInserter, ShortcutLeakRepairing {
     }
 
     private func insert(_ text: String) throws {
-        if text.count <= 64 {
+        guard !text.isEmpty else {
+            return
+        }
+
+        switch insertionPolicy.strategy(for: text, bundleID: frontmostBundleIDProvider()) {
+        case .singleUnicodeEvent:
+            if insertBySingleUnicodeCGEvent(text) {
+                return
+            }
+            GeometryDebug.log("insertion-strategy fallback=per-character reason=single-unicode-failed utf16Length=\(text.utf16.count)")
             try insertByKeyboardEvents(text)
-        } else {
+        case .perCharacterEvents:
+            try insertByKeyboardEvents(text)
+        case .clipboard:
             try insertByClipboard(text)
         }
     }
 
     private func pressKey(_ keyCode: CGKeyCode) throws {
-        guard let keyDown = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: true),
-              let keyUp = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: false) else {
+        guard keyboardEventPoster.postKey(keyCode, flags: []) else {
             throw AcceptanceError.insertionFailed
         }
-        inputSuppressionController?.recordSyntheticInput()
-        keyDown.post(tap: .cghidEventTap)
-        inputSuppressionController?.recordSyntheticInput()
-        keyUp.post(tap: .cghidEventTap)
+        registerSyntheticKeyboardPairs(1)
+    }
+
+    private func insertBySingleUnicodeCGEvent(_ text: String) -> Bool {
+        let units = AcceptanceUnicodePayload.utf16Units(for: text)
+        guard keyboardEventPoster.postUnicodeString(units) else {
+            return false
+        }
+        registerSyntheticKeyboardPairs(1)
+        GeometryDebug.log("insertion-strategy strategy=single-unicode utf16Length=\(units.count)")
+        return true
     }
 
     private func insertByKeyboardEvents(_ text: String) throws {
-        for scalar in text.utf16 {
-            var value = scalar
-            guard let keyDown = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true),
-                  let keyUp = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false) else {
+        let units = AcceptanceUnicodePayload.utf16Units(for: text)
+        var postedPairCount = 0
+        for unit in units {
+            guard keyboardEventPoster.postUnicodeString([unit]) else {
+                registerSyntheticKeyboardPairs(postedPairCount)
                 throw AcceptanceError.insertionFailed
             }
-            keyDown.keyboardSetUnicodeString(stringLength: 1, unicodeString: &value)
-            keyUp.keyboardSetUnicodeString(stringLength: 1, unicodeString: &value)
-            inputSuppressionController?.recordSyntheticInput()
-            keyDown.post(tap: .cghidEventTap)
-            inputSuppressionController?.recordSyntheticInput()
-            keyUp.post(tap: .cghidEventTap)
+            postedPairCount += 1
         }
+        registerSyntheticKeyboardPairs(postedPairCount)
+        GeometryDebug.log("insertion-strategy strategy=per-character utf16Length=\(units.count)")
     }
 
     private func insertByClipboard(_ text: String) throws {
-        let pasteboard = NSPasteboard.general
-        let previousItems = pasteboard.pasteboardItems?.map { item -> NSPasteboardItem in
-            let copy = NSPasteboardItem()
-            for type in item.types {
-                if let data = item.data(forType: type) {
-                    copy.setData(data, forType: type)
-                }
-            }
-            return copy
-        }
-
+        let previousItems = pasteboard.preservedItems()
         pasteboard.clearContents()
-        pasteboard.setString(text, forType: .string)
+        pasteboard.setString(text)
 
-        guard let commandDown = CGEvent(keyboardEventSource: nil, virtualKey: 0x09, keyDown: true),
-              let commandUp = CGEvent(keyboardEventSource: nil, virtualKey: 0x09, keyDown: false) else {
-            restore(pasteboard: pasteboard, previousItems: previousItems)
+        guard keyboardEventPoster.postKey(0x09, flags: .maskCommand) else {
+            restore(previousItems: previousItems)
             throw AcceptanceError.insertionFailed
         }
 
-        commandDown.flags = .maskCommand
-        commandUp.flags = .maskCommand
-        inputSuppressionController?.recordSyntheticInput()
-        commandDown.post(tap: .cghidEventTap)
-        inputSuppressionController?.recordSyntheticInput()
-        commandUp.post(tap: .cghidEventTap)
+        registerSyntheticKeyboardPairs(1)
+        GeometryDebug.log("insertion-strategy strategy=clipboard utf16Length=\(text.utf16.count)")
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-            self.restore(pasteboard: pasteboard, previousItems: previousItems)
+        if clipboardRestoreDelay <= 0 {
+            restore(previousItems: previousItems)
+        } else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + clipboardRestoreDelay) {
+                self.restore(previousItems: previousItems)
+            }
         }
     }
 
-    private func restore(pasteboard: NSPasteboard, previousItems: [NSPasteboardItem]?) {
+    private func restore(previousItems: [PreservedPasteboardItem]?) {
         pasteboard.clearContents()
         if let previousItems {
-            pasteboard.writeObjects(previousItems)
+            pasteboard.writeItems(previousItems)
         }
+    }
+
+    private func registerSyntheticKeyboardPairs(_ count: Int) {
+        inputSuppressionController?.registerSyntheticInsertion(
+            expectedKeyDownCount: count,
+            expectedKeyUpCount: count
+        )
     }
 }

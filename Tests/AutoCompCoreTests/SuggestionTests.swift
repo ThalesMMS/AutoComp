@@ -50,4 +50,21 @@ final class SuggestionTests: XCTestCase {
         XCTAssertFalse(TextContinuationHeuristics.shouldSuppressAutocomplete(after: "That works"))
         XCTAssertFalse(TextContinuationHeuristics.shouldSuppressAutocomplete(after: "That works,"))
     }
+
+    func testAcceptNextWordAcceptsSelectedAlternativeForMultiSuggestion() {
+        var suggestion = Suggestion(
+            baseContextID: UUID(),
+            visibleText: " first option",
+            alternatives: [
+                SuggestionAlternative(visibleText: " first option"),
+                SuggestionAlternative(visibleText: " second option")
+            ],
+            selectedAlternativeIndex: 1,
+            latencyMs: 10
+        )
+
+        XCTAssertEqual(suggestion.acceptNextWord(), " second option")
+        XCTAssertTrue(suggestion.isExhausted)
+        XCTAssertEqual(suggestion.acceptedPrefix, " second option")
+    }
 }

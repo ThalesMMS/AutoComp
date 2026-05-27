@@ -5,17 +5,20 @@ public struct ActiveSuggestionTarget: Equatable, Sendable {
     public let domain: String?
     public let focusedElementID: String
     public let selectedRange: NSRange?
+    public let selectedText: String?
 
     public init(
         app: AppIdentity,
         domain: String?,
         focusedElementID: String,
-        selectedRange: NSRange?
+        selectedRange: NSRange?,
+        selectedText: String? = nil
     ) {
         self.app = app
         self.domain = domain
         self.focusedElementID = focusedElementID
         self.selectedRange = selectedRange
+        self.selectedText = selectedText
     }
 
     public init(context: TextContext) {
@@ -23,7 +26,8 @@ public struct ActiveSuggestionTarget: Equatable, Sendable {
             app: context.app,
             domain: context.domain,
             focusedElementID: context.focusedElementID,
-            selectedRange: context.selectedRange
+            selectedRange: context.selectedRange,
+            selectedText: context.selectedText
         )
     }
 }

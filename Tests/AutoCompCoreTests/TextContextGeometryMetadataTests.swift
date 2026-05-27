@@ -33,6 +33,11 @@ final class TextContextGeometryMetadataTests: XCTestCase {
         XCTAssertEqual(decoded, original)
         XCTAssertEqual(decoded.caretGeometryQuality, .lineMetric)
         XCTAssertEqual(decoded.observedCharacterWidth, 9)
+        XCTAssertEqual(decoded.textAfterCursor, " after")
+        XCTAssertEqual(decoded.selectedText, "selected")
+        XCTAssertEqual(decoded.fullTextWindow, "Hello selected after")
+        XCTAssertEqual(decoded.stableFieldIdentity?.roundedFocusedElementFrame, CGRect(x: 80, y: 10, width: 300, height: 40))
+        XCTAssertEqual(decoded.stableFieldIdentity?.focusChangeSequence, 2)
     }
 
     private func context(
@@ -43,7 +48,16 @@ final class TextContextGeometryMetadataTests: XCTestCase {
             id: UUID(uuidString: "D2F50429-A00C-4AB7-89B0-921C7E060452")!,
             app: AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1),
             focusedElementID: "field",
+            stableFieldIdentity: StableFieldIdentity(
+                app: AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1),
+                role: "AXTextArea",
+                focusedElementFrame: CGRect(x: 80.2, y: 10.4, width: 300.1, height: 40.3),
+                focusChangeSequence: 2
+            ),
             textBeforeCursor: "Hello",
+            textAfterCursor: " after",
+            selectedText: "selected",
+            fullTextWindow: "Hello selected after",
             selectedRange: NSRange(location: 5, length: 0),
             caretRect: CGRect(x: 100, y: 20, width: 2, height: 20),
             focusedElementRect: CGRect(x: 80, y: 10, width: 300, height: 40),

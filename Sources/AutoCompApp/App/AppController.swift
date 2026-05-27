@@ -17,11 +17,20 @@ final class AppController: ObservableObject {
     let personalizationStore: SecurePersonalizationStore
     let focusTrackingModel: FocusTrackingModel
     let suggestionEngine: SuggestionEngine
+    let shortcutSettingsStore: KeyboardShortcutSettingsStore
+    let debugOptionsStore: AutoCompDebugOptionsStore
+    let overlayRecoveryAdvisor: OverlayRecoveryAdvisor
+    let productivityMetricsStore: LocalProductivityMetricsStore
+    let installationLocationService: InstallationLocationService
 
     private let environment: AutoCompAppEnvironment
     private let acceptanceService: AcceptanceService
     private let keyboardShortcuts: KeyboardShortcutService
     private let completionBackendConfigurationService: CompletionBackendConfigurationService
+    private let completionPlaygroundService = CompletionPlaygroundService()
+    private let debugArtifactStore: DebugArtifactStore
+    private let suggestionDebugLogger: SuggestionDebugLogger
+    private let telemetryClient: any TelemetryClient
     private let usesInlinePreviewTestProvider: Bool
     private var onboardingWindow: NSWindow?
     private var settingsWindow: NSWindow?
@@ -40,9 +49,17 @@ final class AppController: ObservableObject {
         self.personalizationStore = environment.personalizationStore
         self.focusTrackingModel = environment.focusTrackingModel
         self.suggestionEngine = environment.suggestionEngine
+        self.shortcutSettingsStore = environment.shortcutSettingsStore
+        self.debugOptionsStore = environment.debugOptionsStore
+        self.overlayRecoveryAdvisor = environment.overlayRecoveryAdvisor
+        self.productivityMetricsStore = environment.productivityMetricsStore
         self.acceptanceService = environment.acceptanceService
         self.keyboardShortcuts = environment.keyboardShortcuts
         self.completionBackendConfigurationService = environment.completionBackendConfigurationService
+        self.debugArtifactStore = environment.debugArtifactStore
+        self.suggestionDebugLogger = environment.suggestionDebugLogger
+        self.installationLocationService = environment.installationLocationService
+        self.telemetryClient = environment.telemetryClient
         self.usesInlinePreviewTestProvider = environment.usesInlinePreviewTestProvider
         self.completionBackendSettings = environment.initialCompletionBackendSettings
         self.completionBackendSummary = environment.initialCompletionBackendSettings.summary
@@ -62,6 +79,7 @@ final class AppController: ObservableObject {
     }
 
     func start() {
+        installationLocationService.refresh()
         permissionService.refresh()
         refreshCompletionBackendSettings()
         suggestionEngine.start()
@@ -70,34 +88,57 @@ final class AppController: ObservableObject {
 
     private func startKeyboardShortcuts() {
         keyboardShortcuts.start(
-            onTab: { [weak self] in
-                guard let self else { return }
-                Task {
-                    await self.suggestionEngine.acceptNextWord(using: self.acceptanceService)
-                    self.syncShortcutStateAfterAcceptance()
-                }
-            },
-            onAcceptAll: { [weak self] in
-                guard let self else { return }
-                Task {
-                    await self.suggestionEngine.acceptAll(using: self.acceptanceService)
-                    self.syncShortcutStateAfterAcceptance()
-                }
-            },
-            onSuggestionTriggerKey: { [weak self] event in
+            onCommand: { [weak self] command in
                 Task { @MainActor in
-                    self?.suggestionEngine.recordSuggestionTriggerKey(event)
+                    await self?.handleShortcutCommand(command)
+                }
+            },
+            onInputEvent: { [weak self] event in
+                Task { @MainActor in
+                    self?.suggestionEngine.recordCapturedInputEvent(event)
                 }
             }
         )
     }
 
+    private func handleShortcutCommand(_ command: KeyboardShortcutCommand) async {
+        switch command {
+        case .acceptNextWord:
+            let outcome = await suggestionEngine.acceptNextWord(using: acceptanceService)
+            syncShortcutStateAfterAcceptance()
+            if outcome == .passedThrough {
+                keyboardShortcuts.replayPassthroughShortcut(command)
+            }
+        case .acceptFullSuggestion:
+            await suggestionEngine.acceptAll(using: acceptanceService)
+            syncShortcutStateAfterAcceptance()
+        case .manualTrigger:
+            await suggestionEngine.triggerManualSuggestion()
+            syncShortcutStateAfterAcceptance()
+        case .dismissSuggestion:
+            suggestionEngine.dismissSuggestionUntilTextMutation()
+            syncShortcutStateAfterAcceptance()
+        case .toggleAutocomplete:
+            toggleAutocompleteEnabled()
+        }
+    }
+
     private func syncShortcutStateAfterAcceptance() {
-        let hasSuggestion = suggestionEngine.currentSuggestion != nil
+        let hasSuggestion = suggestionEngine.isAutocompleteEnabled && suggestionEngine.currentSuggestion != nil
         keyboardShortcuts.setSuggestionActive(hasSuggestion)
         if !hasSuggestion {
             keyboardShortcuts.clearShortcutGrace()
         }
+    }
+
+    func toggleAutocompleteEnabled() {
+        suggestionEngine.setAutocompleteEnabled(!suggestionEngine.isAutocompleteEnabled)
+        syncShortcutStateAfterAcceptance()
+    }
+
+    func saveKeyboardShortcutSettings(_ settings: KeyboardShortcutSettings) {
+        shortcutSettingsStore.save(settings)
+        keyboardShortcuts.updateShortcutSettings(settings)
     }
 
     func stop() {
@@ -117,6 +158,53 @@ final class AppController: ObservableObject {
 
     func deletePersonalizationData() {
         try? personalizationStore.deleteAll()
+        try? privacySettingsStore.resetWritingPreferences()
+    }
+
+    func deleteAllLocalPrivacyData() throws {
+        try personalizationStore.deleteAll()
+        try privacySettingsStore.resetLocalPrivacyDataState()
+        productivityMetricsStore.reset()
+        telemetryClient.deleteAll()
+        saveDebugOptions(.normal)
+        try debugArtifactStore.deleteAll()
+    }
+
+    func savePrivacySettings(_ settings: PrivacySettings) {
+        try? privacySettingsStore.save(settings)
+        telemetryClient.setEnabled(false)
+        productivityMetricsStore.reload()
+    }
+
+    func resetProductivityMetrics() {
+        productivityMetricsStore.reset()
+    }
+
+    func saveDebugOptions(_ options: AutoCompDebugOptions) {
+        debugOptionsStore.save(options)
+    }
+
+    func debugOptions() -> AutoCompDebugOptions {
+        debugOptionsStore.load()
+    }
+
+    func deleteDebugArtifacts() throws {
+        try debugArtifactStore.deleteAll()
+    }
+
+    func exportDebugLogs(to directory: URL) throws -> URL {
+        try debugArtifactStore.exportDebugLogs(
+            to: directory,
+            options: debugOptions()
+        )
+    }
+
+    func debugArtifactCount() -> Int {
+        debugArtifactStore.artifactCount()
+    }
+
+    var debugArtifactDirectoryPath: String {
+        debugArtifactStore.directoryPath
     }
 
     func refreshCompletionBackendSettings() {
@@ -128,13 +216,88 @@ final class AppController: ObservableObject {
     }
 
     func saveCompletionBackendSettings(_ settings: CompletionBackendSettings) {
+        let switchReason = completionProviderSwitchReason(from: completionBackendSettings, to: settings)
         completionBackendConfigurationService.save(settings)
         completionBackendSettings = settings
         completionBackendSummary = settings.summary
+        suggestionEngine.updateMultiSuggestionEnabled(settings.multiSuggestionEnabled)
         suggestionEngine.updateCompletionProvider(
             environment.completionProvider(for: settings),
-            status: "Completion backend updated"
+            status: "Completion backend updated",
+            reason: switchReason
         )
+    }
+
+    private func completionProviderSwitchReason(
+        from previous: CompletionBackendSettings,
+        to next: CompletionBackendSettings
+    ) -> CompletionProviderSwitchReason {
+        guard previous.engineKind == .localLlama,
+              next.engineKind == .localLlama,
+              previous.localConfiguration != next.localConfiguration else {
+            return .backendSwitch
+        }
+        return .runtimeModelSwitch
+    }
+
+    func testRemoteConnection(settings: CompletionBackendSettings) async -> RemoteBackendProbeResult {
+        let result = await RemoteBackendProbe().testConnection(configuration: settings.remoteConfiguration)
+        suggestionEngine.recordBackendProbeResult(result)
+        recordRemoteProbeTelemetry(result, settings: settings)
+        return result
+    }
+
+    private func recordRemoteProbeTelemetry(
+        _ result: RemoteBackendProbeResult,
+        settings: CompletionBackendSettings
+    ) {
+        guard result.status == .failed else {
+            return
+        }
+
+        telemetryClient.capture(TelemetryEventInput(
+            name: "remote-backend-probe-failed",
+            appVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown",
+            buildNumber: Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown",
+            backendKind: settings.engineKind,
+            technicalError: TelemetryTechnicalError(
+                category: "remote-backend-probe",
+                code: result.issue?.logValue ?? "unknown"
+            ),
+            permissionStatuses: [
+                .accessibility: permissionService.accessibilityTrusted ? .granted : .denied,
+                .inputMonitoring: permissionService.inputMonitoringAllowed ? .granted : .denied,
+                .screenRecording: permissionService.screenRecordingAllowed ? .granted : .denied
+            ],
+            bundleID: permissionService.runtimeBundleID
+        ))
+    }
+
+    var isPlaygroundUITestMode: Bool {
+        environment.usesPlaygroundTestProvider
+    }
+
+    func playgroundPreview(
+        prefix: String,
+        suffix: String,
+        settings: CompletionBackendSettings
+    ) -> CompletionPlaygroundPreview {
+        completionPlaygroundService.preview(prefix: prefix, suffix: suffix, settings: settings)
+    }
+
+    func completePlayground(
+        prefix: String,
+        suffix: String,
+        settings: CompletionBackendSettings
+    ) async throws -> CompletionPlaygroundResult {
+        let result = try await completionPlaygroundService.complete(
+            prefix: prefix,
+            suffix: suffix,
+            settings: settings,
+            provider: environment.playgroundCompletionProvider(for: settings)
+        )
+        suggestionDebugLogger.recordPlaygroundResult(result, options: debugOptionsStore.load())
+        return result
     }
 
     func showOnboardingWindow() {
@@ -185,6 +348,9 @@ final class AppController: ObservableObject {
     private func openRequestedDebugWindowIfNeeded() {
         let arguments = ProcessInfo.processInfo.arguments
         if arguments.contains("--ui-test-settings") {
+            selectedSettingsSection = .model
+            showSettingsWindow()
+        } else if arguments.contains("--ui-test-playground") {
             selectedSettingsSection = .model
             showSettingsWindow()
         } else if arguments.contains("--ui-test-onboarding") {

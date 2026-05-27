@@ -1,4 +1,5 @@
 import AppKit
+import AutoCompCore
 @testable import AutoCompApp
 import XCTest
 
@@ -112,6 +113,100 @@ final class KeyboardShortcutServiceTests: XCTestCase {
     }
 
     @MainActor
+    func testManualTriggerShortcutRunsWithoutActiveSuggestion() async throws {
+        let service = KeyboardShortcutService()
+        let triggered = expectation(description: "manual trigger")
+        service.configureHandlers(
+            onCommand: { command in
+                XCTAssertEqual(command, .manualTrigger)
+                triggered.fulfill()
+            }
+        )
+
+        let event = try XCTUnwrap(CGEvent(keyboardEventSource: nil, virtualKey: 49, keyDown: true))
+        event.flags = .maskAlternate
+        let result = service.handle(type: .keyDown, event: event)
+
+        XCTAssertNil(result)
+        await fulfillment(of: [triggered], timeout: 1)
+    }
+
+    @MainActor
+    func testDismissShortcutRequiresActiveSuggestion() async throws {
+        let service = KeyboardShortcutService()
+        var commands: [KeyboardShortcutCommand] = []
+        service.configureHandlers(
+            onCommand: { command in
+                commands.append(command)
+            }
+        )
+
+        let inactiveEscape = try XCTUnwrap(CGEvent(keyboardEventSource: nil, virtualKey: 53, keyDown: true))
+        inactiveEscape.flags = []
+        XCTAssertNotNil(service.handle(type: .keyDown, event: inactiveEscape))
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(commands, [])
+
+        service.setSuggestionActive(true)
+        let activeEscape = try XCTUnwrap(CGEvent(keyboardEventSource: nil, virtualKey: 53, keyDown: true))
+        activeEscape.flags = []
+        XCTAssertNil(service.handle(type: .keyDown, event: activeEscape))
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(commands, [.dismissSuggestion])
+    }
+
+    @MainActor
+    func testCustomAcceptNextWordShortcutConsumesConfiguredKey() async throws {
+        var settings = KeyboardShortcutSettings.defaults
+        settings[.acceptNextWord] = KeyboardShortcutBinding(keyCode: 50)
+        let service = KeyboardShortcutService(shortcutSettings: settings)
+        let accepted = expectation(description: "accept next word")
+        service.configureHandlers(
+            onCommand: { command in
+                XCTAssertEqual(command, .acceptNextWord)
+                accepted.fulfill()
+            }
+        )
+        service.setSuggestionActive(true)
+
+        let event = try XCTUnwrap(CGEvent(keyboardEventSource: nil, virtualKey: 50, keyDown: true))
+        event.flags = []
+        let result = service.handle(type: .keyDown, event: event)
+
+        XCTAssertNil(result)
+        await fulfillment(of: [accepted], timeout: 1)
+    }
+
+    @MainActor
+    func testTabPassesThroughWhileInputMethodIsComposing() async throws {
+        let service = KeyboardShortcutService(
+            inputMethodStateProvider: {
+                InputMethodState(
+                    isASCIICompatible: true,
+                    isComposingText: true,
+                    currentInputSourceID: "com.apple.keylayout.US"
+                )
+            }
+        )
+        var tabCount = 0
+        service.configureHandlers(
+            onTab: {
+                tabCount += 1
+            },
+            onAcceptAll: {}
+        )
+        service.setSuggestionActive(true)
+
+        let event = try XCTUnwrap(CGEvent(keyboardEventSource: nil, virtualKey: 48, keyDown: true))
+        event.flags = []
+        let result = service.handle(type: .keyDown, event: event)
+
+        XCTAssertNotNil(result)
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(tabCount, 0)
+    }
+
+    @MainActor
     func testSpaceKeyRecordsSuggestionTriggerWithoutConsumingEvent() async throws {
         let service = KeyboardShortcutService()
         let triggered = expectation(description: "suggestion trigger")
@@ -119,7 +214,7 @@ final class KeyboardShortcutServiceTests: XCTestCase {
         service.configureHandlers(
             onTab: {},
             onAcceptAll: {},
-            onSuggestionTriggerKey: { event in
+            onInputEvent: { event in
                 capturedEvent = event
                 triggered.fulfill()
             }
@@ -133,6 +228,35 @@ final class KeyboardShortcutServiceTests: XCTestCase {
         XCTAssertNotNil(result)
         await fulfillment(of: [triggered], timeout: 1)
         XCTAssertEqual(capturedEvent, .text(keyCode: 49, isSuggestionTrigger: true))
+    }
+
+    @MainActor
+    func testSpaceKeyDoesNotRecordSuggestionTriggerForNonASCIIInputSource() async throws {
+        let service = KeyboardShortcutService(
+            inputMethodStateProvider: {
+                InputMethodState(
+                    isASCIICompatible: false,
+                    currentInputSourceID: "com.apple.inputmethod.example"
+                )
+            }
+        )
+        var capturedEvents: [CapturedInputEvent] = []
+        service.configureHandlers(
+            onTab: {},
+            onAcceptAll: {},
+            onInputEvent: { event in
+                capturedEvents.append(event)
+            }
+        )
+        service.setSuggestionActive(false)
+
+        let event = try XCTUnwrap(CGEvent(keyboardEventSource: nil, virtualKey: 49, keyDown: true))
+        event.flags = []
+        let result = service.handle(type: .keyDown, event: event)
+
+        XCTAssertNotNil(result)
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(capturedEvents, [])
     }
 
     func testCapturedInputEventClassifiesTextNavigationAndDismissalKeyCodes() throws {
@@ -149,7 +273,7 @@ final class KeyboardShortcutServiceTests: XCTestCase {
         commandSpace.flags = .maskCommand
         XCTAssertEqual(
             service.capturedInputEvent(type: .keyDown, event: commandSpace),
-            .text(keyCode: 49, isSuggestionTrigger: false)
+            .shortcutMutation(keyCode: 49)
         )
 
         let escape = try XCTUnwrap(CGEvent(keyboardEventSource: nil, virtualKey: 53, keyDown: true))
@@ -159,6 +283,20 @@ final class KeyboardShortcutServiceTests: XCTestCase {
         let leftArrow = try XCTUnwrap(CGEvent(keyboardEventSource: nil, virtualKey: 123, keyDown: true))
         leftArrow.flags = []
         XCTAssertEqual(service.capturedInputEvent(type: .keyDown, event: leftArrow), .navigation(keyCode: 123))
+    }
+
+    func testCapturedInputEventClassifiesMouseDownAsPointerReset() throws {
+        let service = KeyboardShortcutService()
+        let click = try XCTUnwrap(
+            CGEvent(
+                mouseEventSource: nil,
+                mouseType: .leftMouseDown,
+                mouseCursorPosition: .zero,
+                mouseButton: .left
+            )
+        )
+
+        XCTAssertEqual(service.capturedInputEvent(type: .leftMouseDown, event: click), .pointer)
     }
 
     func testCapturedInputEventClassifiesTabAndModifiedTab() throws {
@@ -190,6 +328,70 @@ final class KeyboardShortcutServiceTests: XCTestCase {
         let leftShift = try XCTUnwrap(CGEvent(keyboardEventSource: nil, virtualKey: 56, keyDown: true))
         leftShift.flags = .maskShift
         XCTAssertEqual(service.capturedInputEvent(type: .flagsChanged, event: leftShift), .shortcutMutation(keyCode: 56))
+    }
+
+    func testCapturedInputEventSchedulingAndClearingSemantics() {
+        let normalText = CapturedInputEvent.text(keyCode: 0, isSuggestionTrigger: false)
+        let triggerText = CapturedInputEvent.text(keyCode: CapturedInputEventAdapter.spaceKeyCode, isSuggestionTrigger: true)
+        let deleteText = CapturedInputEvent.text(keyCode: 51, isSuggestionTrigger: false)
+
+        XCTAssertTrue(normalText.shouldSchedulePrediction)
+        XCTAssertTrue(triggerText.shouldSchedulePrediction)
+        XCTAssertFalse(deleteText.shouldSchedulePrediction)
+
+        XCTAssertFalse(normalText.shouldClearSuggestion)
+        XCTAssertFalse(triggerText.shouldClearSuggestion)
+        XCTAssertTrue(deleteText.shouldClearSuggestion)
+        XCTAssertTrue(CapturedInputEvent.navigation(keyCode: 123).shouldClearSuggestion)
+        XCTAssertTrue(CapturedInputEvent.dismissal.shouldClearSuggestion)
+        XCTAssertTrue(CapturedInputEvent.shortcutMutation(keyCode: 56).shouldClearSuggestion)
+        XCTAssertTrue(CapturedInputEvent.pointer.shouldClearSuggestion)
+        XCTAssertFalse(CapturedInputEvent.tab.shouldClearSuggestion)
+        XCTAssertFalse(CapturedInputEvent.acceptAll.shouldClearSuggestion)
+        XCTAssertFalse(CapturedInputEvent.pointer.shouldSchedulePrediction)
+    }
+
+    @MainActor
+    func testTextNavigationAndShortcutMutationForwardAsInputEvents() async throws {
+        let service = KeyboardShortcutService()
+        var capturedEvents: [CapturedInputEvent] = []
+        service.configureHandlers(
+            onTab: {},
+            onAcceptAll: {},
+            onInputEvent: { event in
+                capturedEvents.append(event)
+            }
+        )
+
+        let text = try XCTUnwrap(CGEvent(keyboardEventSource: nil, virtualKey: 50, keyDown: true))
+        text.flags = []
+        XCTAssertNotNil(service.handle(type: .keyDown, event: text))
+
+        let navigation = try XCTUnwrap(CGEvent(keyboardEventSource: nil, virtualKey: 123, keyDown: true))
+        navigation.flags = []
+        XCTAssertNotNil(service.handle(type: .keyDown, event: navigation))
+
+        let modifier = try XCTUnwrap(CGEvent(keyboardEventSource: nil, virtualKey: 56, keyDown: true))
+        modifier.flags = .maskShift
+        XCTAssertNotNil(service.handle(type: .flagsChanged, event: modifier))
+
+        let click = try XCTUnwrap(
+            CGEvent(
+                mouseEventSource: nil,
+                mouseType: .leftMouseDown,
+                mouseCursorPosition: .zero,
+                mouseButton: .left
+            )
+        )
+        XCTAssertNotNil(service.handle(type: .leftMouseDown, event: click))
+
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(capturedEvents, [
+            .text(keyCode: 50, isSuggestionTrigger: false),
+            .navigation(keyCode: 123),
+            .shortcutMutation(keyCode: 56),
+            .pointer
+        ])
     }
 
     func testModifiedTabPassesThroughWhenSuggestionIsActive() throws {
@@ -279,7 +481,7 @@ final class KeyboardShortcutServiceTests: XCTestCase {
     }
 
     @MainActor
-    func testSyntheticSuggestionTriggerIsSuppressedButRealInputFlowsAfterWindow() async throws {
+    func testSyntheticSuggestionTriggerIsSuppressedButRealInputFlowsAfterBudget() async throws {
         let clock = KeyboardShortcutTestClock()
         let suppressionController = InputSuppressionController(
             syntheticInputSuppressionInterval: 0.5,
@@ -290,20 +492,22 @@ final class KeyboardShortcutServiceTests: XCTestCase {
         service.configureHandlers(
             onTab: {},
             onAcceptAll: {},
-            onSuggestionTriggerKey: { event in
+            onInputEvent: { event in
                 capturedEvents.append(event)
             }
         )
 
         let syntheticSpace = try XCTUnwrap(CGEvent(keyboardEventSource: nil, virtualKey: 49, keyDown: true))
         syntheticSpace.flags = []
-        suppressionController.recordSyntheticInput()
+        let syntheticSpaceRelease = try XCTUnwrap(CGEvent(keyboardEventSource: nil, virtualKey: 49, keyDown: false))
+        syntheticSpaceRelease.flags = []
+        suppressionController.registerSyntheticInsertion(expectedKeyDownCount: 1, expectedKeyUpCount: 1)
         XCTAssertNotNil(service.handle(type: .keyDown, event: syntheticSpace))
+        XCTAssertNotNil(service.handle(type: .keyUp, event: syntheticSpaceRelease))
 
         try await Task.sleep(nanoseconds: 50_000_000)
         XCTAssertEqual(capturedEvents, [])
 
-        clock.advance(by: 0.6)
         let realSpace = try XCTUnwrap(CGEvent(keyboardEventSource: nil, virtualKey: 49, keyDown: true))
         realSpace.flags = []
         XCTAssertNotNil(service.handle(type: .keyDown, event: realSpace))

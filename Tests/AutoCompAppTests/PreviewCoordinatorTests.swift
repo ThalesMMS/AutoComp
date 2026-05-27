@@ -8,28 +8,33 @@ final class PreviewCoordinatorTests: XCTestCase {
     func testInlineUsesVisualOverlayWhenNativeInlineIsUnavailable() {
         let native = RecordingPreviewPresenter(canPresentResult: false)
         let visual = RecordingPreviewPresenter(canPresentResult: true)
+        let simple = RecordingPreviewPresenter(canPresentResult: true)
         let mirror = RecordingPreviewPresenter(canPresentResult: true)
         let coordinator = PreviewCoordinator(
             nativeInlinePresenter: native,
             visualInlinePresenter: visual,
-            mirrorWindowPresenter: mirror
+            mirrorWindowPresenter: mirror,
+            simpleCaretPopupPresenter: simple
         )
 
         coordinator.show(suggestion(), for: context(), mode: .inline)
 
         XCTAssertEqual(coordinator.activeTier, .visualInlineOverlay)
         XCTAssertEqual(visual.showCount, 1)
+        XCTAssertEqual(simple.showCount, 0)
         XCTAssertEqual(mirror.showCount, 0)
     }
 
     func testNativeInlineTakesPrecedenceOverVisualOverlay() {
         let native = RecordingPreviewPresenter(canPresentResult: true)
         let visual = RecordingPreviewPresenter(canPresentResult: true)
+        let simple = RecordingPreviewPresenter(canPresentResult: true)
         let mirror = RecordingPreviewPresenter(canPresentResult: true)
         let coordinator = PreviewCoordinator(
             nativeInlinePresenter: native,
             visualInlinePresenter: visual,
-            mirrorWindowPresenter: mirror
+            mirrorWindowPresenter: mirror,
+            simpleCaretPopupPresenter: simple
         )
 
         coordinator.show(suggestion(), for: context(), mode: .inline)
@@ -37,21 +42,146 @@ final class PreviewCoordinatorTests: XCTestCase {
         XCTAssertEqual(coordinator.activeTier, .nativeInline)
         XCTAssertEqual(native.showCount, 1)
         XCTAssertEqual(visual.showCount, 0)
+        XCTAssertEqual(simple.showCount, 0)
         XCTAssertEqual(mirror.showCount, 0)
     }
 
-    func testInlineDisablesPreviewWhenVisualInlineHasNoGeometry() {
+    func testInlineFallsBackToMirrorWindowWhenNoInlineTierCanPresent() {
         let native = RecordingPreviewPresenter(canPresentResult: false)
+        let visual = RecordingPreviewPresenter(canPresentResult: false)
+        let simple = RecordingPreviewPresenter(canPresentResult: false)
         let mirror = RecordingPreviewPresenter(canPresentResult: true)
         let coordinator = PreviewCoordinator(
             nativeInlinePresenter: native,
-            visualInlinePresenter: VisualInlineOverlayPresenter(),
-            mirrorWindowPresenter: mirror
+            visualInlinePresenter: visual,
+            mirrorWindowPresenter: mirror,
+            simpleCaretPopupPresenter: simple
         )
 
         coordinator.show(suggestion(), for: context(caretRect: nil), mode: .inline)
 
-        XCTAssertEqual(coordinator.activeTier, .disabled)
+        XCTAssertEqual(coordinator.activeTier, .mirrorWindow)
+        XCTAssertEqual(mirror.showCount, 1)
+    }
+
+    func testInlineUsesSimpleCaretPopupBeforeMirrorWindow() {
+        let native = RecordingPreviewPresenter(canPresentResult: false)
+        let visual = RecordingPreviewPresenter(canPresentResult: false)
+        let simple = RecordingPreviewPresenter(canPresentResult: true)
+        let mirror = RecordingPreviewPresenter(canPresentResult: true)
+        let coordinator = PreviewCoordinator(
+            nativeInlinePresenter: native,
+            visualInlinePresenter: visual,
+            mirrorWindowPresenter: mirror,
+            simpleCaretPopupPresenter: simple
+        )
+
+        coordinator.show(suggestion(), for: context(), mode: .inline)
+
+        XCTAssertEqual(coordinator.activeTier, .simpleCaretPopup)
+        XCTAssertEqual(simple.showCount, 1)
+        XCTAssertEqual(mirror.showCount, 0)
+    }
+
+    func testMultiSuggestionPopupTakesPrecedenceOverInlineAndMirrorPresenters() {
+        let native = RecordingPreviewPresenter(canPresentResult: true)
+        let multi = RecordingPreviewPresenter(canPresentResult: true)
+        let visual = RecordingPreviewPresenter(canPresentResult: true)
+        let simple = RecordingPreviewPresenter(canPresentResult: true)
+        let mirror = RecordingPreviewPresenter(canPresentResult: true)
+        let coordinator = PreviewCoordinator(
+            nativeInlinePresenter: native,
+            visualInlinePresenter: visual,
+            mirrorWindowPresenter: mirror,
+            multiSuggestionPopupPresenter: multi,
+            simpleCaretPopupPresenter: simple
+        )
+
+        coordinator.show(multiSuggestion(), for: context(), mode: .mirrorWindow)
+
+        XCTAssertEqual(coordinator.activeTier, .multiSuggestionPopup)
+        XCTAssertEqual(multi.showCount, 1)
+        XCTAssertEqual(native.showCount, 0)
+        XCTAssertEqual(visual.showCount, 0)
+        XCTAssertEqual(simple.showCount, 0)
+        XCTAssertEqual(mirror.showCount, 0)
+    }
+
+    func testSafeOverlayModeUsesSimplePopupForTextEditAndChromeTextarea() {
+        for context in [
+            context(),
+            context(
+                app: AppIdentity(bundleID: "com.google.Chrome", displayName: "Chrome", processID: 2),
+                domain: "example.com"
+            )
+        ] {
+            let native = RecordingPreviewPresenter(canPresentResult: true)
+            let multi = RecordingPreviewPresenter(canPresentResult: true)
+            let visual = RecordingPreviewPresenter(canPresentResult: true)
+            let simple = RecordingPreviewPresenter(canPresentResult: true)
+            let mirror = RecordingPreviewPresenter(canPresentResult: true)
+            let coordinator = PreviewCoordinator(
+                nativeInlinePresenter: native,
+                visualInlinePresenter: visual,
+                mirrorWindowPresenter: mirror,
+                multiSuggestionPopupPresenter: multi,
+                simpleCaretPopupPresenter: simple,
+                safeOverlayModeEnabled: true
+            )
+
+            coordinator.show(multiSuggestion(), for: context, mode: .inline)
+
+            XCTAssertEqual(coordinator.activeTier, .simpleCaretPopup)
+            XCTAssertEqual(simple.showCount, 1)
+            XCTAssertEqual(native.showCount, 0)
+            XCTAssertEqual(multi.showCount, 0)
+            XCTAssertEqual(visual.showCount, 0)
+            XCTAssertEqual(mirror.showCount, 0)
+        }
+    }
+
+    func testSafeOverlayModeFallsBackToMirrorWhenSimplePopupCannotPresent() {
+        let native = RecordingPreviewPresenter(canPresentResult: true)
+        let multi = RecordingPreviewPresenter(canPresentResult: true)
+        let visual = RecordingPreviewPresenter(canPresentResult: true)
+        let simple = RecordingPreviewPresenter(canPresentResult: false)
+        let mirror = RecordingPreviewPresenter(canPresentResult: true)
+        let coordinator = PreviewCoordinator(
+            nativeInlinePresenter: native,
+            visualInlinePresenter: visual,
+            mirrorWindowPresenter: mirror,
+            multiSuggestionPopupPresenter: multi,
+            simpleCaretPopupPresenter: simple,
+            safeOverlayModeEnabled: true
+        )
+
+        coordinator.show(suggestion(), for: context(caretRect: nil), mode: .inline)
+
+        XCTAssertEqual(coordinator.activeTier, .mirrorWindow)
+        XCTAssertEqual(mirror.showCount, 1)
+        XCTAssertEqual(native.showCount, 0)
+        XCTAssertEqual(multi.showCount, 0)
+        XCTAssertEqual(visual.showCount, 0)
+    }
+
+    func testUpdatingExistingSimpleCaretPopupKeepsSameTier() {
+        let native = RecordingPreviewPresenter(canPresentResult: false)
+        let visual = RecordingPreviewPresenter(canPresentResult: false)
+        let simple = RecordingPreviewPresenter(canPresentResult: true)
+        let mirror = RecordingPreviewPresenter(canPresentResult: true)
+        let coordinator = PreviewCoordinator(
+            nativeInlinePresenter: native,
+            visualInlinePresenter: visual,
+            mirrorWindowPresenter: mirror,
+            simpleCaretPopupPresenter: simple
+        )
+
+        coordinator.show(suggestion(), for: context(), mode: .inline)
+        coordinator.update(suggestion(visibleText: " next"), for: context(), mode: .inline)
+
+        XCTAssertEqual(coordinator.activeTier, .simpleCaretPopup)
+        XCTAssertEqual(simple.showCount, 1)
+        XCTAssertEqual(simple.updateCount, 1)
         XCTAssertEqual(mirror.showCount, 0)
     }
 
@@ -98,12 +228,14 @@ final class PreviewCoordinatorTests: XCTestCase {
     func testDisabledModeHidesActivePresenter() {
         let native = RecordingPreviewPresenter(canPresentResult: false)
         let visual = RecordingPreviewPresenter(canPresentResult: true)
+        let simple = RecordingPreviewPresenter(canPresentResult: true)
         let mirror = RecordingPreviewPresenter(canPresentResult: true)
         let indicator = RecordingActivationIndicatorPresenter()
         let coordinator = PreviewCoordinator(
             nativeInlinePresenter: native,
             visualInlinePresenter: visual,
             mirrorWindowPresenter: mirror,
+            simpleCaretPopupPresenter: simple,
             activationIndicator: indicator
         )
 
@@ -112,6 +244,7 @@ final class PreviewCoordinatorTests: XCTestCase {
 
         XCTAssertEqual(coordinator.activeTier, .disabled)
         XCTAssertGreaterThanOrEqual(visual.hideCount, 1)
+        XCTAssertGreaterThanOrEqual(simple.hideCount, 1)
         XCTAssertEqual(mirror.showCount, 0)
         XCTAssertEqual(indicator.hideCount, 1)
     }
@@ -176,16 +309,44 @@ final class PreviewCoordinatorTests: XCTestCase {
         XCTAssertFalse(panel.collectionBehavior.contains(.transient))
     }
 
-    private func suggestion() -> Suggestion {
-        Suggestion(baseContextID: UUID(), visibleText: " continuation", latencyMs: 12)
+    func testSimpleCaretPopupPanelUsesPopupLevel() {
+        let panel = FloatingSuggestionPanelFactory.makePanel(
+            contentRect: CGRect(x: 0, y: 0, width: 180, height: 32),
+            level: .popUpMenu
+        )
+
+        XCTAssertEqual(panel.level, .popUpMenu)
+        XCTAssertFalse(panel.canBecomeKey)
+        XCTAssertFalse(panel.canBecomeMain)
+        XCTAssertTrue(panel.ignoresMouseEvents)
+    }
+
+    private func suggestion(visibleText: String = " continuation") -> Suggestion {
+        Suggestion(baseContextID: UUID(), visibleText: visibleText, latencyMs: 12)
+    }
+
+    private func multiSuggestion() -> Suggestion {
+        Suggestion(
+            baseContextID: UUID(),
+            visibleText: " first",
+            alternatives: [
+                SuggestionAlternative(visibleText: " first"),
+                SuggestionAlternative(visibleText: " second"),
+                SuggestionAlternative(visibleText: " third")
+            ],
+            latencyMs: 12
+        )
     }
 
     private func context(
+        app: AppIdentity = AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1),
+        domain: String? = nil,
         caretRect: CGRect? = CGRect(x: 100, y: 100, width: 2, height: 20),
         focusedElementRect: CGRect? = nil
     ) -> TextContext {
         TextContext(
-            app: AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1),
+            app: app,
+            domain: domain,
             focusedElementID: "field",
             textBeforeCursor: "Hello",
             selectedRange: NSRange(location: 5, length: 0),

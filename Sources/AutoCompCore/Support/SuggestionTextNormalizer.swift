@@ -3,6 +3,18 @@ import Foundation
 public enum SuggestionTextNormalizer {
     public static func normalize(
         rawText: String,
+        request: CompletionRequest
+    ) -> String {
+        normalize(
+            rawText: rawText,
+            precedingText: request.truncatedTextBeforeCursor,
+            trailingText: request.truncatedTextAfterCursor,
+            promptEchoCandidates: request.promptEchoCandidates
+        )
+    }
+
+    public static func normalize(
+        rawText: String,
         precedingText: String,
         trailingText: String? = nil,
         promptEchoCandidates: [String] = []
@@ -12,18 +24,22 @@ public enum SuggestionTextNormalizer {
             .replacingOccurrences(of: "\r", with: "\n")
 
         text = removeLeadingTemplateMarkers(from: text)
+        text = removeMarkdownWrappers(from: text)
         text = removeLeadingPromptEchoes(
             from: text,
             precedingText: precedingText,
             promptEchoCandidates: promptEchoCandidates
         )
+        text = removeLeadingExplanatoryPreamble(from: text)
         text = firstUsefulLine(in: text)
+        text = removeMarkdownWrappers(from: text)
         text = removeLeadingTemplateMarkers(from: text)
         text = removeLeadingPromptEchoes(
             from: text,
             precedingText: precedingText,
             promptEchoCandidates: promptEchoCandidates
         )
+        text = removeLeadingExplanatoryPreamble(from: text)
 
         if endsWithWhitespace(precedingText) {
             text = droppingLeadingWhitespace(from: text)
@@ -66,6 +82,49 @@ public enum SuggestionTextNormalizer {
         return remaining
     }
 
+    private static func removeMarkdownWrappers(from text: String) -> String {
+        var remaining = text
+        remaining = removeLeadingCodeFence(from: remaining)
+        remaining = removeTrailingCodeFence(from: remaining)
+        remaining = removeInlineMarkdownWrapper(from: remaining)
+        return remaining
+    }
+
+    private static func removeLeadingCodeFence(from text: String) -> String {
+        let candidate = droppingLeadingWhitespaceAndNewlines(from: text)
+        guard hasCodeFencePrefix(candidate) else {
+            return text
+        }
+
+        guard let lineEnd = candidate.firstIndex(of: "\n") else {
+            return removeInlineMarkdownWrapper(from: candidate)
+        }
+
+        return String(candidate[candidate.index(after: lineEnd)...])
+    }
+
+    private static func removeTrailingCodeFence(from text: String) -> String {
+        let withoutTrailingWhitespace = trimmingTrailingWhitespaceAndNewlines(from: text)
+        let lines = withoutTrailingWhitespace.split(separator: "\n", omittingEmptySubsequences: false)
+        guard let last = lines.last,
+              isCodeFenceLine(String(last)) else {
+            return text
+        }
+
+        return lines.dropLast().joined(separator: "\n")
+    }
+
+    private static func removeInlineMarkdownWrapper(from text: String) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        for wrapper in inlineMarkdownWrappers
+            where trimmed.hasPrefix(wrapper)
+                && trimmed.hasSuffix(wrapper)
+                && trimmed.count >= wrapper.count * 2 {
+            return String(trimmed.dropFirst(wrapper.count).dropLast(wrapper.count))
+        }
+        return text
+    }
+
     private static func removeLeadingPromptEchoes(
         from text: String,
         precedingText: String,
@@ -96,16 +155,40 @@ public enum SuggestionTextNormalizer {
         return remaining
     }
 
+    private static func removeLeadingExplanatoryPreamble(from text: String) -> String {
+        let candidate = droppingLeadingWhitespaceAndNewlines(from: text)
+        let lowercased = candidate.lowercased()
+        for prefix in leadingExplanationPrefixes where lowercased.hasPrefix(prefix) {
+            return String(candidate.dropFirst(prefix.count))
+        }
+        return text
+    }
+
     private static func firstUsefulLine(in text: String) -> String {
         for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
             let candidate = String(line)
-            if candidate.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty || isCodeFenceLine(trimmed) || isExplanatoryPreambleLine(trimmed) {
                 continue
             }
             return candidate
         }
 
         return ""
+    }
+
+    private static func hasCodeFencePrefix(_ text: String) -> Bool {
+        codeFencePrefixes.contains { text.hasPrefix($0) }
+    }
+
+    private static func isCodeFenceLine(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        return codeFencePrefixes.contains { trimmed.hasPrefix($0) }
+    }
+
+    private static func isExplanatoryPreambleLine(_ text: String) -> Bool {
+        let lowercased = text.lowercased()
+        return leadingExplanationPrefixes.contains { lowercased == $0 || lowercased == String($0.dropLast()) }
     }
 
     private static func removeTrailingTextEcho(from text: String, trailingText: String?) -> String {
@@ -166,6 +249,9 @@ public enum SuggestionTextNormalizer {
         "<|assistant",
         "<|im_start|>assistant",
         "<|im_end|>",
+        "<|fim_prefix|>",
+        "<|fim_suffix|>",
+        "<|fim_middle|>",
         "<|endoftext|>",
         "[/INST]",
         "<s>",
@@ -176,5 +262,26 @@ public enum SuggestionTextNormalizer {
         "Completion:",
         "Assistant:",
         "Response:"
+    ]
+
+    private static let codeFencePrefixes = [
+        "```",
+        "~~~"
+    ]
+
+    private static let inlineMarkdownWrappers = [
+        "```",
+        "~~~",
+        "`"
+    ]
+
+    private static let leadingExplanationPrefixes = [
+        "sure, here's the completion:",
+        "sure, here is the completion:",
+        "here's the completion:",
+        "here is the completion:",
+        "the completion is:",
+        "the completed text is:",
+        "you can write:"
     ]
 }

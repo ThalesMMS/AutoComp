@@ -45,7 +45,19 @@ public enum LocalLlamaError: LocalizedError, Equatable, Sendable {
 public protocol LocalLlamaRuntimeBackend: Sendable {
     func loadModel(configuration: LocalLlamaConfiguration) async throws
     func generateCompletion(for request: CompletionRequest) async throws -> String
+    func resetPromptCache() async
+    func promptCacheStats() async -> LlamaPromptCacheStats
     func shutdown() async
+}
+
+public extension LocalLlamaRuntimeBackend {
+    func resetPromptCache() async {}
+    func promptCacheStats() async -> LlamaPromptCacheStats { .empty }
+}
+
+public protocol PromptCacheReportingCompletionProvider: Sendable {
+    func resetPromptCache() async
+    func promptCacheStats() async -> LlamaPromptCacheStats?
 }
 
 public actor LocalLlamaRuntimeCore {
@@ -81,6 +93,14 @@ public actor LocalLlamaRuntimeCore {
         }
     }
 
+    public func resetPromptCache() async {
+        await backend.resetPromptCache()
+    }
+
+    public func promptCacheStats() async -> LlamaPromptCacheStats {
+        await backend.promptCacheStats()
+    }
+
     public func shutdown() async {
         await backend.shutdown()
         loadedModelPath = nil
@@ -98,22 +118,28 @@ public struct UnavailableLocalLlamaRuntimeBackend: LocalLlamaRuntimeBackend {
         throw LocalLlamaError.runtimeUnavailable
     }
 
+    public func resetPromptCache() async {}
+    public func promptCacheStats() async -> LlamaPromptCacheStats { .empty }
+
     public func shutdown() async {}
 }
 
-public struct LocalLlamaCompletionProvider: VisualContextAwareCompletionProvider {
+public struct LocalLlamaCompletionProvider: ClipboardContextAwareCompletionProvider, PromptCacheReportingCompletionProvider, RuntimeSwitchPreparingCompletionProvider {
     public let configuration: LocalLlamaConfiguration
     public let requestFactory: CompletionRequestFactory
     private let runtime: LocalLlamaRuntimeCore
+    private let promptCacheHintTracker: LlamaPromptCacheHintTracker
 
     public init(
         configuration: LocalLlamaConfiguration,
         requestFactory: CompletionRequestFactory = CompletionRequestFactory(),
-        runtime: LocalLlamaRuntimeCore = LocalLlamaRuntimeCore()
+        runtime: LocalLlamaRuntimeCore = LocalLlamaRuntimeCore(),
+        promptCacheHintTracker: LlamaPromptCacheHintTracker = LlamaPromptCacheHintTracker()
     ) {
         self.configuration = configuration
         self.requestFactory = requestFactory
         self.runtime = runtime
+        self.promptCacheHintTracker = promptCacheHintTracker
     }
 
     public func complete(context: TextContext) async throws -> Suggestion {
@@ -125,6 +151,20 @@ public struct LocalLlamaCompletionProvider: VisualContextAwareCompletionProvider
         privacySettings: PrivacySettings,
         visualContext: VisualContextSnapshot?
     ) async throws -> Suggestion {
+        try await complete(
+            context: context,
+            privacySettings: privacySettings,
+            visualContext: visualContext,
+            clipboardContext: nil
+        )
+    }
+
+    public func complete(
+        context: TextContext,
+        privacySettings: PrivacySettings,
+        visualContext: VisualContextSnapshot?,
+        clipboardContext: ClipboardContextSnapshot?
+    ) async throws -> Suggestion {
         let startedAt = ContinuousClock.now
         let completionRequest = requestFactory.makeRequest(
             for: context,
@@ -135,15 +175,18 @@ public struct LocalLlamaCompletionProvider: VisualContextAwareCompletionProvider
                 maxTokens: configuration.maxTokens
             ),
             privacySettings: privacySettings,
-            visualContext: visualContext
+            visualContext: visualContext,
+            clipboardContext: clipboardContext
         )
 
+        if await promptCacheHintTracker.observe(context: context, configuration: configuration) != nil {
+            await runtime.resetPromptCache()
+        }
         try await runtime.load(configuration: configuration)
         let rawText = try await runtime.generateCompletion(for: completionRequest)
         let text = SuggestionTextNormalizer.normalize(
             rawText: rawText,
-            precedingText: context.textBeforeCursor,
-            promptEchoCandidates: completionRequest.promptEchoCandidates
+            request: completionRequest
         )
 
         guard !text.isEmpty else {
@@ -159,6 +202,20 @@ public struct LocalLlamaCompletionProvider: VisualContextAwareCompletionProvider
     }
 
     public func shutdown() async {
+        await promptCacheHintTracker.reset()
         await runtime.shutdown()
+    }
+
+    public func resetPromptCache() async {
+        await promptCacheHintTracker.reset()
+        await runtime.resetPromptCache()
+    }
+
+    public func promptCacheStats() async -> LlamaPromptCacheStats? {
+        await runtime.promptCacheStats()
+    }
+
+    public func prepareForRuntimeSwitch() async {
+        await shutdown()
     }
 }

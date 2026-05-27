@@ -8,15 +8,17 @@ import IOKit.hid
 final class PermissionService: ObservableObject {
     @Published private(set) var accessibilityTrusted: Bool = false
     @Published private(set) var inputMonitoringAllowed: Bool = false
-    @Published private(set) var inputMonitoringStatus: String = "Required for Tab and Right Shift acceptance."
+    @Published private(set) var inputMonitoringStatus: String = PermissionKind.inputMonitoring.baselineDescription
     @Published private(set) var screenRecordingAllowed: Bool = false
     @Published private(set) var screenRecordingNeedsRelaunch: Bool = false
-    @Published private(set) var screenRecordingStatus: String = "Optional; improves visible context capture."
+    @Published private(set) var screenRecordingStatus: String = PermissionKind.screenRecording.baselineDescription
     @Published private(set) var runtimeBundleID: String = Bundle.main.bundleIdentifier ?? "unknown"
     @Published private(set) var runtimeExecutablePath: String = Bundle.main.executablePath ?? "unknown"
 
     private var refreshTimer: Timer?
+    private var appActivationObserver: NSObjectProtocol?
     private var screenRecordingWasRequested: Bool = false
+    private var lastLoggedPermissionState: PermissionDebugState?
 
     init() {
         refresh()
@@ -25,6 +27,9 @@ final class PermissionService: ObservableObject {
 
     isolated deinit {
         refreshTimer?.invalidate()
+        if let appActivationObserver {
+            NotificationCenter.default.removeObserver(appActivationObserver)
+        }
     }
 
     func refresh() {
@@ -33,11 +38,12 @@ final class PermissionService: ObservableObject {
         if inputMonitoringAllowed {
             inputMonitoringStatus = "Enabled"
         } else if inputMonitoringStatus != "Approve AutoComp in Privacy & Security > Input Monitoring." {
-            inputMonitoringStatus = "Required for Tab and Right Shift acceptance."
+            inputMonitoringStatus = PermissionKind.inputMonitoring.baselineDescription
         }
         updateScreenRecordingStatus(preflightAllowed: CGPreflightScreenCaptureAccess())
         runtimeBundleID = Bundle.main.bundleIdentifier ?? "unknown"
         runtimeExecutablePath = Bundle.main.executablePath ?? "unknown"
+        logPermissionStateIfNeeded()
     }
 
     func requestAccessibility() {
@@ -49,12 +55,13 @@ final class PermissionService: ObservableObject {
         NSApp.activate(ignoringOtherApps: true)
         inputMonitoringStatus = "Requesting Input Monitoring permission..."
 
-        // Creating a temporary event tap is the canonical way to trigger
-        // the macOS Input Monitoring consent dialog.
         if CGPreflightListenEventAccess() {
             inputMonitoringAllowed = true
             inputMonitoringStatus = "Enabled"
         } else {
+            // Creating a temporary event tap is the canonical way to trigger
+            // the macOS Input Monitoring consent dialog, but a created tap is
+            // not treated as proof that the global shortcut tap can run.
             let tap = CGEvent.tapCreate(
                 tap: .cgSessionEventTap,
                 place: .headInsertEventTap,
@@ -65,14 +72,17 @@ final class PermissionService: ObservableObject {
             )
 
             if let tap {
-                // Tap created successfully — permission was granted.
                 CFMachPortInvalidate(tap)
-                inputMonitoringAllowed = true
+            }
+
+            // Tap creation triggers the system prompt on first attempt.
+            // Also try the IOKit path as a secondary trigger.
+            _ = IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)
+
+            inputMonitoringAllowed = hasInputMonitoringAccess()
+            if inputMonitoringAllowed {
                 inputMonitoringStatus = "Enabled"
             } else {
-                // Tap creation triggers the system prompt on first attempt.
-                // Also try the IOKit path as a secondary trigger.
-                _ = IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)
                 inputMonitoringAllowed = false
                 inputMonitoringStatus = "Approve AutoComp in Privacy & Security > Input Monitoring."
                 openInputMonitoringSettings()
@@ -82,6 +92,7 @@ final class PermissionService: ObservableObject {
         accessibilityTrusted = AXIsProcessTrusted()
         updateScreenRecordingStatus(preflightAllowed: CGPreflightScreenCaptureAccess())
         updateRuntimeIdentity()
+        logPermissionStateIfNeeded()
     }
 
     func requestScreenRecording() {
@@ -103,6 +114,7 @@ final class PermissionService: ObservableObject {
             }
         }
         updateRuntimeIdentity()
+        logPermissionStateIfNeeded()
     }
 
     var permissionPresentations: [PermissionPresentation] {
@@ -146,16 +158,42 @@ final class PermissionService: ObservableObject {
                 self?.refresh()
             }
         }
+        appActivationObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.refresh()
+            }
+        }
     }
 
     private func hasInputMonitoringAccess() -> Bool {
-        CGPreflightListenEventAccess()
-            || IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeGranted
+        InputMonitoringPermissionPolicy.isUsableForGlobalShortcuts(
+            cgPreflightListenEventAccess: CGPreflightListenEventAccess(),
+            ioHIDListenEventAccessGranted: IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeGranted
+        )
     }
 
     private func updateRuntimeIdentity() {
         runtimeBundleID = Bundle.main.bundleIdentifier ?? "unknown"
         runtimeExecutablePath = Bundle.main.executablePath ?? "unknown"
+    }
+
+    private func logPermissionStateIfNeeded() {
+        let state = PermissionDebugState(
+            accessibilityTrusted: accessibilityTrusted,
+            inputMonitoringAllowed: inputMonitoringAllowed,
+            screenRecordingAllowed: screenRecordingAllowed,
+            runtimeBundleID: runtimeBundleID,
+            runtimeExecutablePath: runtimeExecutablePath
+        )
+        guard state != lastLoggedPermissionState else {
+            return
+        }
+        lastLoggedPermissionState = state
+        GeometryDebug.log("permissions accessibility=\(state.accessibilityTrusted) inputMonitoring=\(state.inputMonitoringAllowed) screenRecording=\(state.screenRecordingAllowed) bundle=\(state.runtimeBundleID) executable=\(state.runtimeExecutablePath)")
     }
 
     private func updateScreenRecordingStatus(preflightAllowed: Bool) {
@@ -168,7 +206,7 @@ final class PermissionService: ObservableObject {
             screenRecordingNeedsRelaunch = true
             screenRecordingStatus = "If AutoComp is enabled in System Settings, relaunch it to apply Screen Recording."
         } else {
-            screenRecordingStatus = "Optional; improves visible context capture."
+            screenRecordingStatus = PermissionKind.screenRecording.baselineDescription
         }
     }
 
@@ -182,4 +220,23 @@ final class PermissionService: ObservableObject {
             screenRecordingStatus: screenRecordingStatus
         )
     }
+}
+
+enum InputMonitoringPermissionPolicy {
+    static func isUsableForGlobalShortcuts(
+        cgPreflightListenEventAccess: Bool,
+        ioHIDListenEventAccessGranted: Bool
+    ) -> Bool {
+        // KeyboardShortcutService starts only when CGPreflightListenEventAccess()
+        // is true, so IOHIDCheckAccess alone must not turn the UI green.
+        cgPreflightListenEventAccess
+    }
+}
+
+private struct PermissionDebugState: Equatable {
+    let accessibilityTrusted: Bool
+    let inputMonitoringAllowed: Bool
+    let screenRecordingAllowed: Bool
+    let runtimeBundleID: String
+    let runtimeExecutablePath: String
 }

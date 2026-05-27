@@ -127,6 +127,71 @@ struct AXHelper {
         return (fullText as NSString).substring(to: selectedRange.location)
     }
 
+    func textAfterCursor(
+        from element: AXUIElement,
+        selectedRange: NSRange?,
+        fullText: String?,
+        textLength: Int
+    ) -> String? {
+        guard let selectedRange,
+              selectedRange.location != NSNotFound else {
+            return nil
+        }
+
+        let suffixStart = selectedRange.location + selectedRange.length
+        guard suffixStart >= 0 else {
+            return nil
+        }
+
+        let rangedLength = max(0, textLength - suffixStart)
+        if let rangedSuffix = stringForRange(
+            from: element,
+            range: CFRange(location: suffixStart, length: rangedLength)
+        ) {
+            return nonEmpty(rangedSuffix)
+        }
+
+        guard let fullText else {
+            return nil
+        }
+
+        let nsText = fullText as NSString
+        guard suffixStart <= nsText.length else {
+            return nil
+        }
+        return nonEmpty(nsText.substring(from: suffixStart))
+    }
+
+    func selectedText(
+        from element: AXUIElement,
+        selectedRange: NSRange?,
+        fullText: String?
+    ) -> String? {
+        guard let selectedRange,
+              selectedRange.location != NSNotFound,
+              selectedRange.length > 0 else {
+            return nil
+        }
+
+        if let rangedSelection = stringForRange(
+            from: element,
+            range: CFRange(location: selectedRange.location, length: selectedRange.length)
+        ) {
+            return nonEmpty(rangedSelection)
+        }
+
+        guard let fullText else {
+            return nil
+        }
+
+        let nsText = fullText as NSString
+        guard selectedRange.location >= 0,
+              selectedRange.location + selectedRange.length <= nsText.length else {
+            return nil
+        }
+        return nonEmpty(nsText.substring(with: selectedRange))
+    }
+
     func prefixRange(endingAt location: Int) -> CFRange {
         CFRange(location: 0, length: max(0, location))
     }
@@ -335,5 +400,9 @@ struct AXHelper {
             return attributedString.string
         }
         return nil
+    }
+
+    private func nonEmpty(_ text: String) -> String? {
+        text.isEmpty ? nil : text
     }
 }

@@ -34,6 +34,114 @@ final class PromptBuilderTests: XCTestCase {
             visualContext: visualContext
         )
 
-        XCTAssertTrue(prompt.contains("Visual context:\nVisible title: Budget Review"))
+        XCTAssertTrue(prompt.contains("Visual context (delimited):"))
+        XCTAssertTrue(prompt.contains("<visual_context>\nVisible title: Budget Review\n</visual_context>"))
+    }
+
+    func testScreenOCRGeometrySourceDoesNotCreateVisualContextBlock() {
+        let context = TextContext(
+            app: AppIdentity(bundleID: "com.google.Chrome", displayName: "Chrome", processID: 1),
+            focusedElementID: "field",
+            textBeforeCursor: "Authoritative AX text ",
+            captureSources: [.accessibility, .screenOCR]
+        )
+
+        let prompt = PromptBuilder().prompt(
+            for: context,
+            privacySettings: PrivacySettings(screenContextEnabled: true)
+        )
+
+        XCTAssertTrue(prompt.contains("Context sources: accessibility, screenOCR"))
+        XCTAssertTrue(prompt.contains("Text before cursor:\nAuthoritative AX text "))
+        XCTAssertFalse(prompt.contains("Visual context (delimited):"))
+        XCTAssertFalse(prompt.contains("<visual_context>"))
+    }
+
+    func testFillInMiddlePromptInstructsInsertionOnly() {
+        let context = TextContext(
+            app: AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1),
+            focusedElementID: "field",
+            textBeforeCursor: "A reuniao foi ",
+            textAfterCursor: " porque o prazo mudou.",
+            selectedText: "adiada"
+        )
+
+        let prompt = PromptBuilder().prompt(for: context)
+
+        XCTAssertTrue(prompt.contains("Return only the exact text to insert at the cursor"))
+        XCTAssertTrue(prompt.contains("Do not repeat the prefix, suffix, selected text"))
+        XCTAssertTrue(prompt.contains("Request mode: fillInMiddle"))
+        XCTAssertTrue(prompt.contains("Text before cursor (prefix):\nA reuniao foi "))
+        XCTAssertTrue(prompt.contains("Text after cursor (suffix):\n porque o prazo mudou."))
+        XCTAssertTrue(prompt.contains("Selected text to replace:\nadiada"))
+        XCTAssertTrue(prompt.contains("<|fim_middle|>"))
+    }
+
+    func testPromptIncludesClipboardOmissionReasonWhenClipboardIsNotRelevant() {
+        let context = TextContext(
+            app: AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1),
+            focusedElementID: "field",
+            textBeforeCursor: "Please summarize the launch plan"
+        )
+        let clipboardContext = ClipboardContextSnapshot(
+            summary: "",
+            status: .omittedNotRelevant
+        )
+
+        let prompt = PromptBuilder().prompt(
+            for: context,
+            privacySettings: PrivacySettings(clipboardContextEnabled: true),
+            clipboardContext: clipboardContext
+        )
+
+        XCTAssertTrue(prompt.contains("Clipboard context:\n[clipboard omitted: not relevant]"))
+    }
+
+    func testPromptDoesNotRenderClipboardContextWhenPrivacyIsOff() {
+        let context = TextContext(
+            app: AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1),
+            focusedElementID: "field",
+            textBeforeCursor: "Please summarize the launch plan"
+        )
+        let clipboardContext = ClipboardContextSnapshot(
+            summary: "Launch plan",
+            status: .included,
+            captureSources: [.clipboard]
+        )
+
+        let prompt = PromptBuilder().prompt(
+            for: context,
+            privacySettings: PrivacySettings(clipboardContextEnabled: false),
+            clipboardContext: clipboardContext
+        )
+
+        XCTAssertFalse(prompt.contains("Clipboard context:"))
+        XCTAssertFalse(prompt.contains("Launch plan"))
+    }
+
+    func testPromptIncludesWritingPreferencesOnlyWhenEnabled() {
+        let context = TextContext(
+            app: AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1),
+            focusedElementID: "field",
+            textBeforeCursor: "Please "
+        )
+        let disabledPrompt = PromptBuilder().prompt(
+            for: context,
+            privacySettings: PrivacySettings(
+                writingPreferences: WritingPreferences(enabled: false, rules: ["Write objectively"])
+            )
+        )
+        let enabledPrompt = PromptBuilder().prompt(
+            for: context,
+            privacySettings: PrivacySettings(
+                writingPreferences: WritingPreferences(
+                    enabled: true,
+                    rules: ["Write objectively", "Avoid emoji"]
+                )
+            )
+        )
+
+        XCTAssertFalse(disabledPrompt.contains("Writing preferences:"))
+        XCTAssertTrue(enabledPrompt.contains("Writing preferences:\n- Write objectively\n- Avoid emoji"))
     }
 }

@@ -120,6 +120,263 @@ final class AcceptanceSessionControllerTests: XCTestCase {
         )
     }
 
+    func testPublishedSuggestionIdleContextDoesNotBecomeAcceptedSession() {
+        let controller = AcceptanceSessionController()
+        let publishedContext = textContext(textBeforeCursor: "Please ")
+        let suggestion = Suggestion(
+            baseContextID: publishedContext.id,
+            visibleText: "continue this",
+            latencyMs: 20
+        )
+        controller.recordPublication(
+            context: publishedContext,
+            suggestion: suggestion,
+            now: now
+        )
+
+        XCTAssertEqual(
+            controller.handleAcceptedSuggestionSession(
+                context: publishedContext,
+                currentSuggestion: suggestion,
+                now: now.addingTimeInterval(0.5)
+            ),
+            .notActive
+        )
+
+        let typedThroughContext = textContext(textBeforeCursor: "Please c")
+        XCTAssertEqual(
+            controller.handleAcceptedSuggestionSession(
+                context: typedThroughContext,
+                currentSuggestion: suggestion,
+                now: now.addingTimeInterval(1)
+            ),
+            .handled(
+                AcceptanceSessionHandledResult(
+                    currentSuggestion: Suggestion(
+                        id: suggestion.id,
+                        baseContextID: suggestion.baseContextID,
+                        visibleText: "ontinue this",
+                        remainingText: "ontinue this",
+                        acceptedPrefix: "c",
+                        createdAt: suggestion.createdAt,
+                        latencyMs: suggestion.latencyMs
+                    ),
+                    statusMessage: "Continuing accepted suggestion"
+                )
+            )
+        )
+    }
+
+    func testAcceptanceValidationAllowsCurrentPublishedSuggestion() {
+        let controller = AcceptanceSessionController()
+        let publishedContext = textContext(textBeforeCursor: "Please ")
+        let suggestion = Suggestion(
+            baseContextID: publishedContext.id,
+            visibleText: "continue this",
+            latencyMs: 20
+        )
+        controller.recordPublication(
+            context: publishedContext,
+            suggestion: suggestion,
+            now: now
+        )
+
+        XCTAssertEqual(
+            controller.validateAcceptance(
+                context: publishedContext,
+                currentSuggestion: suggestion,
+                now: now.addingTimeInterval(0.5)
+            ),
+            .valid
+        )
+    }
+
+    func testAcceptanceValidationRejectsTargetChangeBeforeInsert() {
+        let controller = AcceptanceSessionController()
+        let publishedContext = textContext(textBeforeCursor: "Please ", focusedElementID: "field-a")
+        let suggestion = Suggestion(
+            baseContextID: publishedContext.id,
+            visibleText: "continue this",
+            latencyMs: 20
+        )
+        controller.recordPublication(
+            context: publishedContext,
+            suggestion: suggestion,
+            now: now
+        )
+
+        let changedTarget = textContext(
+            textBeforeCursor: "Please ",
+            focusedElementID: "field-b",
+            focusedElementRect: CGRect(x: 100, y: 180, width: 500, height: 40)
+        )
+        XCTAssertEqual(
+            controller.validateAcceptance(
+                context: changedTarget,
+                currentSuggestion: suggestion,
+                now: now.addingTimeInterval(0.5)
+            ),
+            .passedThrough(.targetChanged)
+        )
+    }
+
+    func testAcceptanceValidationRejectsUnexpectedSelectionBeforeInsert() {
+        let controller = AcceptanceSessionController()
+        let publishedContext = textContext(textBeforeCursor: "Please ")
+        let suggestion = Suggestion(
+            baseContextID: publishedContext.id,
+            visibleText: "continue this",
+            latencyMs: 20
+        )
+        controller.recordPublication(
+            context: publishedContext,
+            suggestion: suggestion,
+            now: now
+        )
+
+        let selectedContext = textContext(
+            textBeforeCursor: "Please ",
+            selectedRange: NSRange(location: 3, length: 2)
+        )
+        XCTAssertEqual(
+            controller.validateAcceptance(
+                context: selectedContext,
+                currentSuggestion: suggestion,
+                now: now.addingTimeInterval(0.5)
+            ),
+            .passedThrough(.unexpectedSelection)
+        )
+    }
+
+    func testAcceptanceValidationAllowsOriginalReplacementSelectionBeforeInsert() {
+        let controller = AcceptanceSessionController()
+        let selectedRange = NSRange(location: 14, length: 6)
+        let publishedContext = textContext(
+            textBeforeCursor: "A reuniao foi ",
+            selectedText: "adiada",
+            selectedRange: selectedRange
+        )
+        let suggestion = Suggestion(
+            baseContextID: publishedContext.id,
+            visibleText: "realizada",
+            latencyMs: 20
+        )
+        controller.recordPublication(
+            context: publishedContext,
+            suggestion: suggestion,
+            now: now
+        )
+
+        XCTAssertEqual(
+            controller.validateAcceptance(
+                context: publishedContext,
+                currentSuggestion: suggestion,
+                now: now.addingTimeInterval(0.5)
+            ),
+            .valid
+        )
+
+        let changedSelection = textContext(
+            textBeforeCursor: "A reuniao foi ",
+            selectedText: "cancelada",
+            selectedRange: selectedRange
+        )
+        XCTAssertEqual(
+            controller.validateAcceptance(
+                context: changedSelection,
+                currentSuggestion: suggestion,
+                now: now.addingTimeInterval(0.5)
+            ),
+            .passedThrough(.unexpectedSelection)
+        )
+    }
+
+
+    func testAcceptanceValidationRejectsDivergedTextBeforeInsert() {
+        let controller = AcceptanceSessionController()
+        let publishedContext = textContext(textBeforeCursor: "Please ")
+        let suggestion = Suggestion(
+            baseContextID: publishedContext.id,
+            visibleText: "continue this",
+            latencyMs: 20
+        )
+        controller.recordPublication(
+            context: publishedContext,
+            suggestion: suggestion,
+            now: now
+        )
+
+        let divergentContext = textContext(textBeforeCursor: "Please x")
+        XCTAssertEqual(
+            controller.validateAcceptance(
+                context: divergentContext,
+                currentSuggestion: suggestion,
+                now: now.addingTimeInterval(0.5)
+            ),
+            .passedThrough(.staleContext)
+        )
+    }
+
+    func testAcceptanceValidationRejectsStaleSuggestionBeforeInsert() {
+        let controller = AcceptanceSessionController()
+        let publishedContext = textContext(textBeforeCursor: "Please ")
+        let suggestion = Suggestion(
+            baseContextID: publishedContext.id,
+            visibleText: "continue this",
+            latencyMs: 20
+        )
+        controller.recordPublication(
+            context: publishedContext,
+            suggestion: suggestion,
+            now: now
+        )
+
+        let staleSuggestion = Suggestion(
+            baseContextID: publishedContext.id,
+            visibleText: "different text",
+            latencyMs: 20
+        )
+        XCTAssertEqual(
+            controller.validateAcceptance(
+                context: publishedContext,
+                currentSuggestion: staleSuggestion,
+                now: now.addingTimeInterval(0.5)
+            ),
+            .passedThrough(.staleSuggestion)
+        )
+    }
+
+    func testPublishedSuggestionTypedThroughExhaustionRequestsNextPrediction() {
+        let controller = AcceptanceSessionController()
+        let publishedContext = textContext(textBeforeCursor: "Please ")
+        let suggestion = Suggestion(
+            baseContextID: publishedContext.id,
+            visibleText: "done ",
+            latencyMs: 20
+        )
+        controller.recordPublication(
+            context: publishedContext,
+            suggestion: suggestion,
+            now: now
+        )
+
+        let exhaustedContext = textContext(textBeforeCursor: "Please done ")
+        XCTAssertEqual(
+            controller.handleAcceptedSuggestionSession(
+                context: exhaustedContext,
+                currentSuggestion: suggestion,
+                now: now.addingTimeInterval(0.5)
+            ),
+            .handled(
+                AcceptanceSessionHandledResult(
+                    currentSuggestion: nil,
+                    statusMessage: "Continuing accepted suggestion",
+                    shouldSchedulePrediction: true
+                )
+            )
+        )
+    }
+
     func testPublishedSuggestionDivergenceClearsSession() {
         let controller = AcceptanceSessionController()
         let publishedContext = textContext(textBeforeCursor: "Please ")
@@ -186,6 +443,45 @@ final class AcceptanceSessionControllerTests: XCTestCase {
         )
     }
 
+    func testPublishedSuggestionStableTextSurvivesGoogleDocsFocusIdentityDrift() {
+        let controller = AcceptanceSessionController()
+        let app = AppIdentity(bundleID: "com.google.Chrome", displayName: "Chrome", processID: 1)
+        let publishedContext = textContext(
+            textBeforeCursor: "Please ",
+            app: app,
+            domain: "docs.google.com",
+            focusedElementID: "docs-line-a",
+            focusedElementRect: CGRect(x: 420, y: 381, width: 626, height: 1)
+        )
+        let suggestion = Suggestion(
+            baseContextID: publishedContext.id,
+            visibleText: "continue this",
+            latencyMs: 20
+        )
+        controller.recordPublication(
+            context: publishedContext,
+            suggestion: suggestion,
+            now: now
+        )
+
+        let driftedContext = textContext(
+            textBeforeCursor: "Please ",
+            app: app,
+            domain: "docs.google.com",
+            focusedElementID: "docs-line-b",
+            focusedElementRect: CGRect(x: 520, y: 381, width: 626, height: 1)
+        )
+
+        XCTAssertEqual(
+            controller.handleAcceptedSuggestionSession(
+                context: driftedContext,
+                currentSuggestion: suggestion,
+                now: now.addingTimeInterval(0.5)
+            ),
+            .notActive
+        )
+    }
+
     func testPublishedSuggestionSelectionClearsSession() {
         let controller = AcceptanceSessionController()
         let publishedContext = textContext(textBeforeCursor: "Please ")
@@ -214,7 +510,7 @@ final class AcceptanceSessionControllerTests: XCTestCase {
         )
     }
 
-    func testPublishedSuggestionExhaustionEndsSession() {
+    func testPublishedSuggestionExhaustionEndsSessionAndRequestsNextPrediction() {
         let controller = AcceptanceSessionController()
         let publishedContext = textContext(textBeforeCursor: "Please ")
         let suggestion = Suggestion(
@@ -238,7 +534,8 @@ final class AcceptanceSessionControllerTests: XCTestCase {
             .handled(
                 AcceptanceSessionHandledResult(
                     currentSuggestion: nil,
-                    statusMessage: "Continuing accepted suggestion"
+                    statusMessage: "Continuing accepted suggestion",
+                    shouldSchedulePrediction: true
                 )
             )
         )
@@ -311,14 +608,19 @@ final class AcceptanceSessionControllerTests: XCTestCase {
 
     private func textContext(
         textBeforeCursor: String,
+        app: AppIdentity = AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1),
+        domain: String? = nil,
         focusedElementID: String = "field",
+        selectedText: String? = nil,
         selectedRange: NSRange? = NSRange(location: 0, length: 0),
         focusedElementRect: CGRect = CGRect(x: 100, y: 100, width: 500, height: 40)
     ) -> TextContext {
         TextContext(
-            app: AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1),
+            app: app,
+            domain: domain,
             focusedElementID: focusedElementID,
             textBeforeCursor: textBeforeCursor,
+            selectedText: selectedText,
             selectedRange: selectedRange,
             focusedElementRect: focusedElementRect
         )

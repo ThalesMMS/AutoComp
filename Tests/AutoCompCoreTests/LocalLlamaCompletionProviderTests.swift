@@ -57,6 +57,26 @@ final class LocalLlamaCompletionProviderTests: XCTestCase {
         XCTAssertEqual(request?.maxTokens, 7)
     }
 
+    func testGeneratedFillInMiddleTextIsNormalizedWithSuffix() async throws {
+        let modelURL = try makeTemporaryModelFile()
+        let backend = FakeLocalLlamaRuntimeBackend(
+            rawText: "```text\nadiada para sexta-feira porque o prazo mudou.\n```"
+        )
+        let provider = LocalLlamaCompletionProvider(
+            configuration: LocalLlamaConfiguration(modelPath: modelURL.path),
+            runtime: LocalLlamaRuntimeCore(backend: backend)
+        )
+
+        let suggestion = try await provider.complete(
+            context: makeContext(
+                textBeforeCursor: "A reuniao foi ",
+                textAfterCursor: " porque o prazo mudou."
+            )
+        )
+
+        XCTAssertEqual(suggestion.visibleText, "adiada para sexta-feira")
+    }
+
     func testRuntimeCoreSkipsSameModelReloadAndReloadsAfterModelChangeOrShutdown() async throws {
         let firstModelURL = try makeTemporaryModelFile()
         let secondModelURL = try makeTemporaryModelFile()
@@ -76,11 +96,66 @@ final class LocalLlamaCompletionProviderTests: XCTestCase {
         XCTAssertEqual(counts.shutdown, 1)
     }
 
-    private func makeContext() -> TextContext {
-        TextContext(
-            app: AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1),
+    func testPromptCacheHintTrackerResetsWhenFieldChanges() async throws {
+        let modelURL = try makeTemporaryModelFile()
+        let backend = FakeLocalLlamaRuntimeBackend()
+        let provider = LocalLlamaCompletionProvider(
+            configuration: LocalLlamaConfiguration(modelPath: modelURL.path),
+            runtime: LocalLlamaRuntimeCore(backend: backend)
+        )
+
+        _ = try await provider.complete(context: makeContext(focusedElementID: "field-a"))
+        _ = try await provider.complete(context: makeContext(focusedElementID: "field-a"))
+        _ = try await provider.complete(context: makeContext(focusedElementID: "field-b"))
+
+        let counts = await backend.counts()
+        XCTAssertEqual(counts.load, 1)
+        XCTAssertEqual(counts.generate, 3)
+        XCTAssertEqual(counts.reset, 1)
+    }
+
+    func testPromptCacheHintTrackerClassifiesConfigurationAndModelChanges() async {
+        let app = AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1)
+        let context = TextContext(
+            app: app,
             focusedElementID: "field",
             textBeforeCursor: "Can you "
+        )
+        let tracker = LlamaPromptCacheHintTracker()
+
+        let initial = await tracker.observe(
+            context: context,
+            configuration: LocalLlamaConfiguration(modelPath: "/tmp/first.gguf", maxTokens: 16)
+        )
+        let same = await tracker.observe(
+            context: context,
+            configuration: LocalLlamaConfiguration(modelPath: "/tmp/first.gguf", maxTokens: 16)
+        )
+        let settingsChanged = await tracker.observe(
+            context: context,
+            configuration: LocalLlamaConfiguration(modelPath: "/tmp/first.gguf", maxTokens: 32)
+        )
+        let modelChanged = await tracker.observe(
+            context: context,
+            configuration: LocalLlamaConfiguration(modelPath: "/tmp/second.gguf", maxTokens: 32)
+        )
+
+        XCTAssertNil(initial)
+        XCTAssertNil(same)
+        XCTAssertEqual(settingsChanged, .configurationChanged)
+        XCTAssertEqual(modelChanged, .modelChanged)
+    }
+
+    private func makeContext(
+        focusedElementID: String = "field",
+        textBeforeCursor: String = "Can you ",
+        textAfterCursor: String? = nil
+    ) -> TextContext {
+        TextContext(
+            app: AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1),
+            focusedElementID: focusedElementID,
+            textBeforeCursor: textBeforeCursor,
+            textAfterCursor: textAfterCursor
         )
     }
 
@@ -113,6 +188,7 @@ private actor FakeLocalLlamaRuntimeBackend: LocalLlamaRuntimeBackend {
     private(set) var loadCount = 0
     private(set) var generateCount = 0
     private(set) var shutdownCount = 0
+    private(set) var resetCount = 0
     private var paths: [String] = []
     private var storedRequest: CompletionRequest?
 
@@ -135,12 +211,26 @@ private actor FakeLocalLlamaRuntimeBackend: LocalLlamaRuntimeBackend {
         return rawText
     }
 
+    func resetPromptCache() async {
+        resetCount += 1
+    }
+
+    func promptCacheStats() async -> LlamaPromptCacheStats {
+        LlamaPromptCacheStats(
+            hits: UInt64(resetCount),
+            misses: UInt64(loadCount),
+            resets: UInt64(resetCount),
+            retainedPromptTokens: 3,
+            contextTokens: 512
+        )
+    }
+
     func shutdown() async {
         shutdownCount += 1
     }
 
-    func counts() -> (load: Int, generate: Int, shutdown: Int) {
-        (loadCount, generateCount, shutdownCount)
+    func counts() -> (load: Int, generate: Int, shutdown: Int, reset: Int) {
+        (loadCount, generateCount, shutdownCount, resetCount)
     }
 
     func loadedModelPaths() -> [String] {

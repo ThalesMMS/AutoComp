@@ -13,6 +13,7 @@ enum FocusFieldCapability: Equatable {
 
 struct FocusTrackingSnapshot: Equatable {
     let context: TextContext
+    let stableFieldIdentity: StableFieldIdentity?
     let focusChangeSequence: UInt64
     let capability: FocusFieldCapability
     let rejectionReason: String?
@@ -42,6 +43,7 @@ extension ScreenOCRGeometryFallbackResolver: ScreenOCRGeometryFallbackResolving 
 
 final class FocusTrackingModel: ObservableObject, TextContextProvider, @unchecked Sendable {
     @Published private(set) var snapshot: FocusTrackingSnapshot?
+    @Published private(set) var stableFieldIdentity: StableFieldIdentity?
     @Published private(set) var focusChangeSequence: UInt64 = 0
     @Published private(set) var capability: FocusFieldCapability = .unknown
     @Published private(set) var rejectionReason: String?
@@ -50,39 +52,51 @@ final class FocusTrackingModel: ObservableObject, TextContextProvider, @unchecke
     private let focusSnapshotResolver: any FocusSnapshotResolving
     private let textGeometryResolver: any AXTextGeometryResolving
     private let screenOCRGeometryFallbackResolver: any ScreenOCRGeometryFallbackResolving
-    private var lastFocusIdentity: TrackedFocusIdentity?
+    private let safeOverlayModeEnabled: Bool
+    private var lastStableFieldIdentity: StableFieldIdentity?
+    private var lastTrackedFocusIdentity: TrackedFocusIdentity?
 
     init(
         axHelper: AXHelper = AXHelper(),
         focusSnapshotResolver: (any FocusSnapshotResolving)? = nil,
         textGeometryResolver: (any AXTextGeometryResolving)? = nil,
-        screenOCRGeometryFallbackResolver: any ScreenOCRGeometryFallbackResolving = ScreenOCRGeometryFallbackResolver()
+        screenOCRGeometryFallbackResolver: any ScreenOCRGeometryFallbackResolving = ScreenOCRGeometryFallbackResolver(),
+        safeOverlayModeEnabled: Bool = SafeOverlayMode.isEnabled
     ) {
         self.axHelper = axHelper
         self.focusSnapshotResolver = focusSnapshotResolver ?? FocusSnapshotResolver(axHelper: axHelper)
         self.textGeometryResolver = textGeometryResolver ?? AXTextGeometryResolver(axHelper: axHelper)
         self.screenOCRGeometryFallbackResolver = screenOCRGeometryFallbackResolver
+        self.safeOverlayModeEnabled = safeOverlayModeEnabled
     }
 
     func currentContext() async throws -> TextContext {
         do {
             let focusSnapshot = try focusSnapshotResolver.resolve()
             var geometry = textGeometryResolver.resolve(snapshot: focusSnapshot)
-            var selectedRange = focusSnapshot.selectedRange
-            var textBeforeCursor = focusSnapshot.textBeforeCursor
+            let selectedRange = focusSnapshot.selectedRange
+            let textBeforeCursor = focusSnapshot.textBeforeCursor
+            let textAfterCursor = focusSnapshot.textAfterCursor
+            let selectedText = focusSnapshot.selectedText
+            let fullTextWindow = focusSnapshot.fullTextWindow
             var captureSources: Set<TextCaptureSource> = [.accessibility]
 
-            if textGeometryResolver.shouldUseScreenOCRFallback(
+            let shouldUseScreenOCRFallback = textGeometryResolver.shouldUseScreenOCRFallback(
                 snapshot: focusSnapshot,
                 geometry: geometry
-            ),
+            )
+            if safeOverlayModeEnabled,
+               shouldUseScreenOCRFallback {
+                GeometryDebug.log("safe-overlay-mode active feature=screenOCR-geometry action=disabled")
+            }
+
+            if !safeOverlayModeEnabled,
+               shouldUseScreenOCRFallback,
                let authoritativeText = textBeforeCursor,
                let fallback = await screenOCRGeometryFallbackResolver.resolve(
                 searchRect: axHelper.ancestorContentRect(for: focusSnapshot.focusedElement),
                 authoritativeText: authoritativeText
                ) {
-                textBeforeCursor = fallback.textBeforeCursor
-                selectedRange = NSRange(location: (fallback.textBeforeCursor as NSString).length, length: 0)
                 geometry.focusedElementRect = fallback.focusedElementRect
                 geometry.caretRect = fallback.caretRect
                 geometry.previousGlyphRect = fallback.previousGlyphRect
@@ -91,7 +105,7 @@ final class FocusTrackingModel: ObservableObject, TextContextProvider, @unchecke
                 geometry.caretGeometryQuality = .screenOCR
                 geometry.observedCharacterWidth = nil
                 captureSources.insert(.screenOCR)
-                GeometryDebug.log("ax-fallback source=screenOCR text=\(fallback.textBeforeCursor) focusedElementRect=\(fallback.focusedElementRect) caretRect=\(fallback.caretRect)")
+                GeometryDebug.log("ax-fallback source=screenOCR-geometry focusedElementRect=\(fallback.focusedElementRect) caretRect=\(fallback.caretRect)")
             }
 
             guard let textBeforeCursor else {
@@ -107,7 +121,17 @@ final class FocusTrackingModel: ObservableObject, TextContextProvider, @unchecke
                 app: focusSnapshot.app,
                 domain: focusSnapshot.domain,
                 focusedElementID: focusSnapshot.focusedElementID,
+                stableFieldIdentity: StableFieldIdentity(
+                    app: focusSnapshot.app,
+                    domain: focusSnapshot.domain,
+                    role: focusSnapshot.role,
+                    subrole: focusSnapshot.subrole,
+                    focusedElementFrame: geometry.focusedElementRect
+                ),
                 textBeforeCursor: textBeforeCursor,
+                textAfterCursor: textAfterCursor,
+                selectedText: selectedText,
+                fullTextWindow: fullTextWindow,
                 selectedRange: selectedRange,
                 caretRect: geometry.caretRect,
                 focusedElementRect: geometry.focusedElementRect,
@@ -119,8 +143,7 @@ final class FocusTrackingModel: ObservableObject, TextContextProvider, @unchecke
                 languageHint: Locale.current.language.languageCode?.identifier,
                 captureSources: captureSources
             )
-            await publishContext(context)
-            return context
+            return await publishContext(context)
         } catch {
             await publishRejection(error)
             throw error
@@ -128,26 +151,45 @@ final class FocusTrackingModel: ObservableObject, TextContextProvider, @unchecke
     }
 
     @MainActor
-    private func publishContext(_ context: TextContext) {
-        let trackedIdentity = TrackedFocusIdentity(context: context)
-        if lastFocusIdentity?.matches(context) != true {
-            focusChangeSequence += 1
+    private func publishContext(_ context: TextContext) -> TextContext {
+        let sequencedStableIdentity: StableFieldIdentity?
+        let trackedFocusIdentity = TrackedFocusIdentity(context: context)
+        if let baseStableIdentity = context.stableFieldIdentity {
+            let stableTargetMatches = lastStableFieldIdentity?.matchesStableTarget(baseStableIdentity) == true
+            let shouldUseFocusFallback = baseStableIdentity.roundedFocusedElementFrame == nil
+            let fallbackFocusMatches = shouldUseFocusFallback
+                && lastTrackedFocusIdentity?.matches(context) == true
+            if !stableTargetMatches && !fallbackFocusMatches {
+                focusChangeSequence += 1
+            }
+            sequencedStableIdentity = baseStableIdentity.withFocusChangeSequence(focusChangeSequence)
+        } else {
+            if lastTrackedFocusIdentity?.matches(context) != true {
+                focusChangeSequence += 1
+            }
+            sequencedStableIdentity = nil
         }
-        lastFocusIdentity = trackedIdentity
+        let publishedContext = context.withStableFieldIdentity(sequencedStableIdentity)
+        lastStableFieldIdentity = sequencedStableIdentity
+        lastTrackedFocusIdentity = trackedFocusIdentity
+        stableFieldIdentity = sequencedStableIdentity
         capability = .readableText
         rejectionReason = nil
         snapshot = FocusTrackingSnapshot(
-            context: context,
+            context: publishedContext,
+            stableFieldIdentity: sequencedStableIdentity,
             focusChangeSequence: focusChangeSequence,
             capability: capability,
             rejectionReason: rejectionReason
         )
+        return publishedContext
     }
 
     @MainActor
     private func publishRejection(_ error: Error) {
         capability = Self.capability(for: error)
         rejectionReason = Self.rejectionReason(for: error)
+        stableFieldIdentity = nil
         snapshot = nil
     }
 
@@ -186,5 +228,32 @@ private struct TrackedFocusIdentity {
         app == context.app
             && domain == context.domain
             && focusIdentity.matches(FocusIdentity(context: context))
+    }
+}
+
+private extension TextContext {
+    func withStableFieldIdentity(_ stableFieldIdentity: StableFieldIdentity?) -> TextContext {
+        TextContext(
+            id: id,
+            app: app,
+            domain: domain,
+            focusedElementID: focusedElementID,
+            stableFieldIdentity: stableFieldIdentity,
+            textBeforeCursor: textBeforeCursor,
+            textAfterCursor: textAfterCursor,
+            selectedText: selectedText,
+            fullTextWindow: fullTextWindow,
+            selectedRange: selectedRange,
+            caretRect: caretRect,
+            focusedElementRect: focusedElementRect,
+            previousGlyphRect: previousGlyphRect,
+            nextGlyphRect: nextGlyphRect,
+            lineReferenceRect: lineReferenceRect,
+            caretGeometryQuality: caretGeometryQuality,
+            observedCharacterWidth: observedCharacterWidth,
+            languageHint: languageHint,
+            captureSources: captureSources,
+            createdAt: createdAt
+        )
     }
 }

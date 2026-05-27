@@ -24,7 +24,31 @@ public protocol AppleFoundationModelBackend: Sendable {
     func generate(prompt: String) async throws -> String
 }
 
-public struct AppleFoundationCompletionProvider: VisualContextAwareCompletionProvider {
+public struct AppleFoundationModelAvailability: Equatable, Sendable {
+    public let isAvailable: Bool
+    public let statusTitle: String
+    public let detail: String
+
+    public init(isAvailable: Bool, statusTitle: String, detail: String) {
+        self.isAvailable = isAvailable
+        self.statusTitle = statusTitle
+        self.detail = detail
+    }
+
+    public static let unsupportedSDK = AppleFoundationModelAvailability(
+        isAvailable: false,
+        statusTitle: "Unavailable",
+        detail: "FoundationModels framework is not available in this SDK."
+    )
+
+    public static let unsupportedOS = AppleFoundationModelAvailability(
+        isAvailable: false,
+        statusTitle: "Unavailable",
+        detail: "FoundationModels requires macOS 26.0 or newer."
+    )
+}
+
+public struct AppleFoundationCompletionProvider: ClipboardContextAwareCompletionProvider {
     public let requestFactory: CompletionRequestFactory
     public let maxTokens: Int
     private let backend: AppleFoundationModelBackend
@@ -48,6 +72,20 @@ public struct AppleFoundationCompletionProvider: VisualContextAwareCompletionPro
         privacySettings: PrivacySettings,
         visualContext: VisualContextSnapshot?
     ) async throws -> Suggestion {
+        try await complete(
+            context: context,
+            privacySettings: privacySettings,
+            visualContext: visualContext,
+            clipboardContext: nil
+        )
+    }
+
+    public func complete(
+        context: TextContext,
+        privacySettings: PrivacySettings,
+        visualContext: VisualContextSnapshot?,
+        clipboardContext: ClipboardContextSnapshot?
+    ) async throws -> Suggestion {
         let startedAt = ContinuousClock.now
         let completionRequest = requestFactory.makeRequest(
             for: context,
@@ -58,7 +96,8 @@ public struct AppleFoundationCompletionProvider: VisualContextAwareCompletionPro
                 maxTokens: maxTokens
             ),
             privacySettings: privacySettings,
-            visualContext: visualContext
+            visualContext: visualContext,
+            clipboardContext: clipboardContext
         )
 
         let rawText: String
@@ -72,8 +111,7 @@ public struct AppleFoundationCompletionProvider: VisualContextAwareCompletionPro
 
         let text = SuggestionTextNormalizer.normalize(
             rawText: rawText,
-            precedingText: context.textBeforeCursor,
-            promptEchoCandidates: completionRequest.promptEchoCandidates
+            request: completionRequest
         )
 
         guard !text.isEmpty else {
@@ -92,15 +130,43 @@ public struct AppleFoundationCompletionProvider: VisualContextAwareCompletionPro
 public struct SystemAppleFoundationModelBackend: AppleFoundationModelBackend {
     public init() {}
 
+    public static func availability() -> AppleFoundationModelAvailability {
+        #if canImport(FoundationModels)
+        guard #available(macOS 26.0, *) else {
+            return .unsupportedOS
+        }
+
+        let model = SystemLanguageModel.default
+        guard model.isAvailable else {
+            return AppleFoundationModelAvailability(
+                isAvailable: false,
+                statusTitle: "Unavailable",
+                detail: "System language model state is \(model.availability)."
+            )
+        }
+        return AppleFoundationModelAvailability(
+            isAvailable: true,
+            statusTitle: "Available",
+            detail: "FoundationModels system language model is available."
+        )
+        #else
+        return .unsupportedSDK
+        #endif
+    }
+
     public func generate(prompt: String) async throws -> String {
         #if canImport(FoundationModels)
         guard #available(macOS 26.0, *) else {
-            throw AppleFoundationModelError.unavailable("FoundationModels requires macOS 26.0 or newer.")
+            throw AppleFoundationModelError.unavailable(Self.availability().detail)
+        }
+        let availability = Self.availability()
+        guard availability.isAvailable else {
+            throw AppleFoundationModelError.unavailable(availability.detail)
         }
 
         return try await generateWithFoundationModels(prompt: prompt)
         #else
-        throw AppleFoundationModelError.unavailable("FoundationModels framework is not available in this SDK.")
+        throw AppleFoundationModelError.unavailable(Self.availability().detail)
         #endif
     }
 

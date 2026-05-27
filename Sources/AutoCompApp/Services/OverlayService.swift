@@ -1,16 +1,18 @@
 import AppKit
 import AutoCompCore
-import OSLog
+import SwiftUI
 
 enum PreviewPresentationTier: Equatable {
     case nativeInline
+    case multiSuggestionPopup
     case visualInlineOverlay
+    case simpleCaretPopup
     case mirrorWindow
     case disabled
 }
 
 enum GeometryDebug {
-    private static let logger = Logger(subsystem: "com.autocomp.AutoComp", category: "geometry")
+    private static let logger = AutoCompLogger(category: "geometry")
 
     static var isEnabled: Bool {
         ProcessInfo.processInfo.arguments.contains("--geometry-debug")
@@ -22,7 +24,7 @@ enum GeometryDebug {
             return
         }
         let resolvedMessage = message()
-        logger.info("AutoCompGeometry \(resolvedMessage, privacy: .public)")
+        logger.info("AutoCompGeometry \(resolvedMessage)")
         if let data = "AutoCompGeometry \(resolvedMessage)\n".data(using: .utf8) {
             FileHandle.standardError.write(data)
         }
@@ -48,7 +50,10 @@ protocol VisualInlineSuggestionPresenting: SuggestionTierPresenting {
 
 @MainActor
 enum FloatingSuggestionPanelFactory {
-    static func makePanel(contentRect: NSRect) -> NSPanel {
+    static func makePanel(
+        contentRect: NSRect,
+        level: NSWindow.Level = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 2)
+    ) -> NSPanel {
         let panel = FloatingSuggestionPanel(
             contentRect: contentRect,
             styleMask: [.borderless, .nonactivatingPanel],
@@ -56,7 +61,7 @@ enum FloatingSuggestionPanelFactory {
             defer: true
         )
         panel.isReleasedWhenClosed = false
-        panel.level = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 2)
+        panel.level = level
         panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
         panel.backgroundColor = .clear
         panel.isOpaque = false
@@ -76,29 +81,53 @@ private final class FloatingSuggestionPanel: NSPanel {
 @MainActor
 final class PreviewCoordinator: SuggestionPresenter {
     private let nativeInlinePresenter: NativeInlineSuggestionPresenting
+    private let multiSuggestionPopupPresenter: VisualInlineSuggestionPresenting
     private let visualInlinePresenter: VisualInlineSuggestionPresenting
+    private let simpleCaretPopupPresenter: VisualInlineSuggestionPresenting
     private let mirrorWindowPresenter: SuggestionTierPresenting
     private let activationIndicator: ActivationIndicatorPresenting
+    private let focusDebugOverlayPresenter: FocusDebugOverlayPresenting
+    private let safeOverlayModeEnabled: Bool
+    private let overlayRecoveryAdvisor: OverlayRecoveryAdvisor?
 
     private(set) var activeTier: PreviewPresentationTier = .disabled
 
-    init() {
+    init(
+        safeOverlayModeEnabled: Bool = SafeOverlayMode.isEnabled,
+        overlayRecoveryAdvisor: OverlayRecoveryAdvisor? = nil,
+        focusDebugOverlayPresenter: FocusDebugOverlayPresenting? = nil
+    ) {
         self.nativeInlinePresenter = UnavailableNativeInlinePresenter()
+        self.multiSuggestionPopupPresenter = MultiSuggestionPopupPresenter()
         self.visualInlinePresenter = VisualInlineOverlayPresenter()
+        self.simpleCaretPopupPresenter = SimpleCaretPopupSuggestionPresenter()
         self.mirrorWindowPresenter = MirrorWindowSuggestionPresenter()
         self.activationIndicator = ActivationIndicatorController()
+        self.focusDebugOverlayPresenter = focusDebugOverlayPresenter ?? FocusDebugOverlayController()
+        self.safeOverlayModeEnabled = safeOverlayModeEnabled
+        self.overlayRecoveryAdvisor = overlayRecoveryAdvisor
     }
 
     init(
         nativeInlinePresenter: NativeInlineSuggestionPresenting,
         visualInlinePresenter: VisualInlineSuggestionPresenting,
         mirrorWindowPresenter: SuggestionTierPresenting,
-        activationIndicator: ActivationIndicatorPresenting? = nil
+        multiSuggestionPopupPresenter: VisualInlineSuggestionPresenting? = nil,
+        simpleCaretPopupPresenter: VisualInlineSuggestionPresenting? = nil,
+        activationIndicator: ActivationIndicatorPresenting? = nil,
+        focusDebugOverlayPresenter: FocusDebugOverlayPresenting? = nil,
+        safeOverlayModeEnabled: Bool = SafeOverlayMode.isEnabled,
+        overlayRecoveryAdvisor: OverlayRecoveryAdvisor? = nil
     ) {
         self.nativeInlinePresenter = nativeInlinePresenter
+        self.multiSuggestionPopupPresenter = multiSuggestionPopupPresenter ?? MultiSuggestionPopupPresenter()
         self.visualInlinePresenter = visualInlinePresenter
+        self.simpleCaretPopupPresenter = simpleCaretPopupPresenter ?? SimpleCaretPopupSuggestionPresenter()
         self.mirrorWindowPresenter = mirrorWindowPresenter
         self.activationIndicator = activationIndicator ?? ActivationIndicatorController()
+        self.focusDebugOverlayPresenter = focusDebugOverlayPresenter ?? FocusDebugOverlayController()
+        self.safeOverlayModeEnabled = safeOverlayModeEnabled
+        self.overlayRecoveryAdvisor = overlayRecoveryAdvisor
     }
 
     func show(_ suggestion: Suggestion, for context: TextContext, mode: SuggestionDisplayMode) {
@@ -110,16 +139,38 @@ final class PreviewCoordinator: SuggestionPresenter {
     }
 
     func hide() {
+        GeometryDebug.log("presenter-hide activeTier=\(activeTier)")
         activeTier = .disabled
         nativeInlinePresenter.hide()
+        multiSuggestionPopupPresenter.hide()
         visualInlinePresenter.hide()
+        simpleCaretPopupPresenter.hide()
         mirrorWindowPresenter.hide()
         activationIndicator.hide()
+        focusDebugOverlayPresenter.hide()
     }
 
     func resolveTier(for suggestion: Suggestion, context: TextContext, mode: SuggestionDisplayMode) -> PreviewPresentationTier {
         guard mode != .disabled, !suggestion.visibleText.isEmpty else {
             return .disabled
+        }
+        if safeOverlayModeEnabled {
+            switch mode {
+            case .inline:
+                if simpleCaretPopupPresenter.canPresent(suggestion, for: context) {
+                    return .simpleCaretPopup
+                }
+                return .mirrorWindow
+            case .mirrorWindow:
+                return .mirrorWindow
+            case .disabled:
+                return .disabled
+            }
+        }
+
+        if suggestion.hasMultipleAlternatives,
+           multiSuggestionPopupPresenter.canPresent(suggestion, for: context) {
+            return .multiSuggestionPopup
         }
 
         switch mode {
@@ -130,7 +181,10 @@ final class PreviewCoordinator: SuggestionPresenter {
             if visualInlinePresenter.canPresent(suggestion, for: context) {
                 return .visualInlineOverlay
             }
-            return .disabled
+            if simpleCaretPopupPresenter.canPresent(suggestion, for: context) {
+                return .simpleCaretPopup
+            }
+            return .mirrorWindow
         case .mirrorWindow:
             return .mirrorWindow
         case .disabled:
@@ -140,14 +194,23 @@ final class PreviewCoordinator: SuggestionPresenter {
 
     private func present(_ suggestion: Suggestion, for context: TextContext, mode: SuggestionDisplayMode, isUpdate: Bool) {
         let nextTier = resolveTier(for: suggestion, context: context, mode: mode)
-        GeometryDebug.log("mode=\(mode.rawValue) resolvedTier=\(nextTier) app=\(context.app.displayName) bundle=\(context.app.bundleID) context=\(context.geometryDebugDescription)")
+        if safeOverlayModeEnabled {
+            GeometryDebug.log("safe-overlay-mode active feature=preview-tier mode=\(mode.rawValue) resolvedTier=\(nextTier)")
+        }
+        recordOverlayRecoverySignal(tier: nextTier, mode: mode)
+        GeometryDebug.log("presenter-present update=\(isUpdate) previousTier=\(String(describing: activeTier)) mode=\(mode.rawValue) resolvedTier=\(nextTier) app=\(context.app.displayName) bundle=\(context.app.bundleID) visibleLength=\((suggestion.visibleText as NSString).length) context=\(context.geometryDebugDescription)")
         let shouldUpdateExistingTier = isUpdate && activeTier == nextTier
         hidePresenters(except: nextTier)
         activeTier = nextTier
         if nextTier == .disabled {
             activationIndicator.hide()
+            focusDebugOverlayPresenter.hide()
         } else {
-            activationIndicator.show(for: context, displayMode: mode)
+            activationIndicator.show(
+                for: context,
+                displayMode: nextTier == .mirrorWindow ? .mirrorWindow : mode
+            )
+            focusDebugOverlayPresenter.show(context: context, tier: nextTier)
         }
 
         switch nextTier {
@@ -155,10 +218,18 @@ final class PreviewCoordinator: SuggestionPresenter {
             shouldUpdateExistingTier
                 ? nativeInlinePresenter.update(suggestion, for: context)
                 : nativeInlinePresenter.show(suggestion, for: context)
+        case .multiSuggestionPopup:
+            shouldUpdateExistingTier
+                ? multiSuggestionPopupPresenter.update(suggestion, for: context)
+                : multiSuggestionPopupPresenter.show(suggestion, for: context)
         case .visualInlineOverlay:
             shouldUpdateExistingTier
                 ? visualInlinePresenter.update(suggestion, for: context)
                 : visualInlinePresenter.show(suggestion, for: context)
+        case .simpleCaretPopup:
+            shouldUpdateExistingTier
+                ? simpleCaretPopupPresenter.update(suggestion, for: context)
+                : simpleCaretPopupPresenter.show(suggestion, for: context)
         case .mirrorWindow:
             shouldUpdateExistingTier
                 ? mirrorWindowPresenter.update(suggestion, for: context)
@@ -168,12 +239,35 @@ final class PreviewCoordinator: SuggestionPresenter {
         }
     }
 
+    private func recordOverlayRecoverySignal(tier: PreviewPresentationTier, mode: SuggestionDisplayMode) {
+        guard mode == .inline,
+              !safeOverlayModeEnabled else {
+            return
+        }
+
+        switch tier {
+        case .nativeInline, .multiSuggestionPopup, .visualInlineOverlay:
+            overlayRecoveryAdvisor?.recordAdvancedOverlaySuccess()
+        case .simpleCaretPopup, .mirrorWindow:
+            overlayRecoveryAdvisor?.recordAdvancedOverlayFallback()
+        case .disabled:
+            break
+        }
+    }
+
     private func hidePresenters(except tier: PreviewPresentationTier) {
+        GeometryDebug.log("presenter-hide-except keep=\(tier) activeTier=\(String(describing: activeTier))")
         if tier != .nativeInline {
             nativeInlinePresenter.hide()
         }
+        if tier != .multiSuggestionPopup {
+            multiSuggestionPopupPresenter.hide()
+        }
         if tier != .visualInlineOverlay {
             visualInlinePresenter.hide()
+        }
+        if tier != .simpleCaretPopup {
+            simpleCaretPopupPresenter.hide()
         }
         if tier != .mirrorWindow {
             mirrorWindowPresenter.hide()
@@ -193,9 +287,161 @@ final class UnavailableNativeInlinePresenter: NativeInlineSuggestionPresenting {
 }
 
 @MainActor
+final class SimpleCaretPopupSuggestionPresenter: VisualInlineSuggestionPresenting {
+    private var panel: NSPanel?
+    private var contentView: NSHostingView<SimpleCaretPopupView>?
+    private var fontSizeResolver = GhostFontSizeResolver()
+
+    func canPresent(_ suggestion: Suggestion, for context: TextContext) -> Bool {
+        layout(for: suggestion, context: context) != nil
+    }
+
+    func show(_ suggestion: Suggestion, for context: TextContext) {
+        update(suggestion, for: context)
+    }
+
+    func update(_ suggestion: Suggestion, for context: TextContext) {
+        guard let layout = layout(for: suggestion, context: context) else {
+            GeometryDebug.log("tier=simpleCaretPopup rejected app=\(context.app.displayName) bundle=\(context.app.bundleID) context=\(context.geometryDebugDescription)")
+            hide()
+            return
+        }
+
+        let panel = panel ?? makePanel()
+        self.panel = panel
+        let contentView = contentView ?? makeContentView(for: panel)
+        self.contentView = contentView
+        contentView.rootView = SimpleCaretPopupView(text: SimpleCaretPopupLayout.normalized(suggestion.visibleText))
+        contentView.frame = NSRect(origin: .zero, size: layout.panelFrame.size)
+        panel.setFrame(layout.panelFrame, display: true)
+        GeometryDebug.log("tier=simpleCaretPopup placement=\(layout.placementReason.rawValue) app=\(context.app.displayName) bundle=\(context.app.bundleID) panel=\(layout.panelFrame) context=\(context.geometryDebugDescription)")
+        panel.orderFrontRegardless()
+    }
+
+    func hide() {
+        GeometryDebug.log("tier=simpleCaretPopup hide hasPanel=\(panel != nil)")
+        fontSizeResolver.reset()
+        panel?.orderOut(nil)
+    }
+
+    private func layout(for suggestion: Suggestion, context: TextContext) -> SimpleCaretPopupLayout? {
+        guard let anchorRect = context.caretRect
+            ?? context.previousGlyphRect
+            ?? context.nextGlyphRect
+            ?? context.lineReferenceRect
+            ?? context.focusedElementRect else {
+            return nil
+        }
+
+        let screen = OverlayGeometry.screen(containingAccessibilityRect: anchorRect)
+        let mainScreenFrame = NSScreen.screens.first?.frame ?? screen.frame
+        return SimpleCaretPopupLayout.resolve(
+            text: suggestion.visibleText,
+            context: context,
+            font: fontSizeResolver.font(for: context),
+            screenFrame: mainScreenFrame,
+            visibleFrame: screen.visibleFrame,
+            screenFrames: NSScreen.screens.map(\.frame)
+        )
+    }
+
+    private func makePanel() -> NSPanel {
+        FloatingSuggestionPanelFactory.makePanel(
+            contentRect: NSRect(x: 0, y: 0, width: 180, height: 32),
+            level: .popUpMenu
+        )
+    }
+
+    private func makeContentView(for panel: NSPanel) -> NSHostingView<SimpleCaretPopupView> {
+        let view = NSHostingView(rootView: SimpleCaretPopupView(text: ""))
+        view.frame = NSRect(x: 0, y: 0, width: 180, height: 32)
+        panel.contentView = view
+        return view
+    }
+}
+
+@MainActor
+final class MultiSuggestionPopupPresenter: VisualInlineSuggestionPresenting {
+    private var panel: NSPanel?
+    private var contentView: NSHostingView<MultiSuggestionPopupView>?
+    private var fontSizeResolver = GhostFontSizeResolver()
+
+    func canPresent(_ suggestion: Suggestion, for context: TextContext) -> Bool {
+        suggestion.hasMultipleAlternatives && layout(for: suggestion, context: context) != nil
+    }
+
+    func show(_ suggestion: Suggestion, for context: TextContext) {
+        update(suggestion, for: context)
+    }
+
+    func update(_ suggestion: Suggestion, for context: TextContext) {
+        guard let layout = layout(for: suggestion, context: context) else {
+            GeometryDebug.log("tier=multiSuggestionPopup rejected app=\(context.app.displayName) bundle=\(context.app.bundleID) context=\(context.geometryDebugDescription)")
+            hide()
+            return
+        }
+
+        let panel = panel ?? makePanel()
+        self.panel = panel
+        let contentView = contentView ?? makeContentView(for: panel)
+        self.contentView = contentView
+        contentView.rootView = MultiSuggestionPopupView(
+            alternatives: suggestion.alternatives,
+            selectedIndex: suggestion.selectedAlternativeIndex
+        )
+        contentView.frame = NSRect(origin: .zero, size: layout.panelFrame.size)
+        panel.setFrame(layout.panelFrame, display: true)
+        GeometryDebug.log("tier=multiSuggestionPopup placement=\(layout.placementReason.rawValue) selected=\(suggestion.selectedAlternativeIndex) count=\(suggestion.alternatives.count) app=\(context.app.displayName) bundle=\(context.app.bundleID) panel=\(layout.panelFrame) context=\(context.geometryDebugDescription)")
+        panel.orderFrontRegardless()
+    }
+
+    func hide() {
+        GeometryDebug.log("tier=multiSuggestionPopup hide hasPanel=\(panel != nil)")
+        fontSizeResolver.reset()
+        panel?.orderOut(nil)
+    }
+
+    private func layout(for suggestion: Suggestion, context: TextContext) -> MultiSuggestionPopupLayout? {
+        guard let anchorRect = context.caretRect
+            ?? context.previousGlyphRect
+            ?? context.nextGlyphRect
+            ?? context.lineReferenceRect
+            ?? context.focusedElementRect else {
+            return nil
+        }
+
+        let screen = OverlayGeometry.screen(containingAccessibilityRect: anchorRect)
+        let mainScreenFrame = NSScreen.screens.first?.frame ?? screen.frame
+        return MultiSuggestionPopupLayout.resolve(
+            suggestion: suggestion,
+            context: context,
+            font: fontSizeResolver.font(for: context),
+            screenFrame: mainScreenFrame,
+            visibleFrame: screen.visibleFrame,
+            screenFrames: NSScreen.screens.map(\.frame)
+        )
+    }
+
+    private func makePanel() -> NSPanel {
+        FloatingSuggestionPanelFactory.makePanel(
+            contentRect: NSRect(x: 0, y: 0, width: 320, height: 120),
+            level: .popUpMenu
+        )
+    }
+
+    private func makeContentView(for panel: NSPanel) -> NSHostingView<MultiSuggestionPopupView> {
+        let view = NSHostingView(rootView: MultiSuggestionPopupView(alternatives: [], selectedIndex: 0))
+        view.frame = NSRect(x: 0, y: 0, width: 320, height: 120)
+        panel.contentView = view
+        return view
+    }
+}
+
+@MainActor
 final class VisualInlineOverlayPresenter: VisualInlineSuggestionPresenting {
     private var panel: NSPanel?
     private var contentView: InlineGhostTextView?
+    private var fontSizeResolver = GhostFontSizeResolver()
     private let maxWidth: CGFloat = 520
 
     func canPresent(_ suggestion: Suggestion, for context: TextContext) -> Bool {
@@ -218,18 +464,33 @@ final class VisualInlineOverlayPresenter: VisualInlineSuggestionPresenting {
         self.panel = panel
         let contentView = contentView ?? makeContentView(for: panel)
         self.contentView = contentView
+        let textDirection = TextDirectionDetector.direction(for: context.textBeforeCursor)
+        let font = font(for: context)
+        let ghostLayout = layout.ghostTextLayout ?? InlineGhostTextLayout.resolve(
+            text: suggestion.visibleText,
+            font: font,
+            textDirection: textDirection,
+            anchorFrame: NSRect(origin: layout.origin, size: layout.size),
+            inputFrame: layout.inputFrame,
+            visibleFrame: NSRect(origin: layout.origin, size: layout.size),
+            observedCharacterWidth: context.observedCharacterWidth,
+            geometryQuality: context.caretGeometryQuality
+        )
 
         contentView.update(
-            text: suggestion.visibleText,
-            font: font(for: context),
-            textColor: ghostTextColor(for: context)
+            layout: ghostLayout,
+            font: font,
+            textColor: ghostTextColor(),
+            textDirection: textDirection
         )
-        panel.setFrame(NSRect(origin: layout.origin, size: layout.size), display: true)
-        GeometryDebug.log("tier=visualInlineOverlay source=\(layout.source.rawValue) app=\(context.app.displayName) bundle=\(context.app.bundleID) panel=\(NSRect(origin: layout.origin, size: layout.size)) context=\(context.geometryDebugDescription)")
+        panel.setFrame(ghostLayout.panelFrame, display: true)
+        GeometryDebug.log("tier=visualInlineOverlay source=\(layout.source.rawValue) placement=\(ghostLayout.placementReason.rawValue) app=\(context.app.displayName) bundle=\(context.app.bundleID) panel=\(ghostLayout.panelFrame) context=\(context.geometryDebugDescription)")
         panel.orderFrontRegardless()
     }
 
     func hide() {
+        GeometryDebug.log("tier=visualInlineOverlay hide hasPanel=\(panel != nil)")
+        fontSizeResolver.reset()
         panel?.orderOut(nil)
     }
 
@@ -248,16 +509,41 @@ final class VisualInlineOverlayPresenter: VisualInlineSuggestionPresenting {
 
         let screen = OverlayGeometry.screen(containingAccessibilityRect: anchorRect)
         let mainScreenFrame = NSScreen.screens.first?.frame ?? screen.frame
-        return InlinePreviewGeometry.resolve(
+        let font = font(for: context)
+        let textDirection = TextDirectionDetector.direction(for: context.textBeforeCursor)
+        let resolution = InlinePreviewGeometry.resolve(
             context: context,
-            contentSize: preferredSize(for: suggestion.visibleText, context: context),
+            contentSize: preferredSize(for: suggestion.visibleText, context: context, resolvedFont: font),
             screenFrame: mainScreenFrame,
-            visibleFrame: screen.visibleFrame
+            visibleFrame: screen.visibleFrame,
+            screenFrames: NSScreen.screens.map(\.frame),
+            allowsLineWrapPlacement: true
         )
+        guard let layout = resolution.layout else {
+            return resolution
+        }
+
+        let ghostLayout = InlineGhostTextLayout.resolve(
+            text: suggestion.visibleText,
+            font: font,
+            textDirection: textDirection,
+            anchorFrame: NSRect(origin: layout.origin, size: layout.size),
+            inputFrame: layout.inputFrame,
+            visibleFrame: screen.visibleFrame,
+            observedCharacterWidth: context.observedCharacterWidth,
+            geometryQuality: context.caretGeometryQuality
+        )
+        return InlinePreviewLayout(
+            origin: ghostLayout.panelFrame.origin,
+            size: ghostLayout.panelFrame.size,
+            source: layout.source,
+            inputFrame: layout.inputFrame,
+            ghostTextLayout: ghostLayout
+        ).resolution
     }
 
-    private func preferredSize(for text: String, context: TextContext) -> NSSize {
-        let font = font(for: context)
+    private func preferredSize(for text: String, context: TextContext, resolvedFont: NSFont? = nil) -> NSSize {
+        let font = resolvedFont ?? font(for: context)
         let attributes: [NSAttributedString.Key: Any] = [.font: font]
         let measured = (text as NSString).size(withAttributes: attributes)
         let referenceHeight = InlinePreviewGeometry.referenceHeight(for: context)
@@ -268,15 +554,11 @@ final class VisualInlineOverlayPresenter: VisualInlineSuggestionPresenting {
     }
 
     private func font(for context: TextContext) -> NSFont {
-        .systemFont(ofSize: InlinePreviewGeometry.fontSize(for: context))
+        fontSizeResolver.font(for: context)
     }
 
-    private func ghostTextColor(for context: TextContext) -> NSColor {
-        if context.domain?.contains("docs.google.com") == true {
-            return NSColor(calibratedWhite: 0.22, alpha: 0.62)
-        }
-
-        return NSColor.tertiaryLabelColor.withAlphaComponent(0.72)
+    private func ghostTextColor() -> NSColor {
+        GhostTextColorResolver.color()
     }
 
     private func makePanel() -> NSPanel {
@@ -334,11 +616,426 @@ struct InlinePreviewLayout: Equatable {
     let origin: CGPoint
     let size: NSSize
     let source: InlinePreviewLayoutSource
+    let inputFrame: NSRect?
+    let ghostTextLayout: InlineGhostTextLayout?
+
+    init(
+        origin: CGPoint,
+        size: NSSize,
+        source: InlinePreviewLayoutSource,
+        inputFrame: NSRect? = nil,
+        ghostTextLayout: InlineGhostTextLayout? = nil
+    ) {
+        self.origin = origin
+        self.size = size
+        self.source = source
+        self.inputFrame = inputFrame
+        self.ghostTextLayout = ghostTextLayout
+    }
 }
 
 enum InlinePreviewLayoutSource: String, Equatable {
     case exactAX
     case textBoxEstimate
+}
+
+struct InlineGhostTextLayout: Equatable {
+    struct Line: Equatable {
+        let text: String
+        let indent: CGFloat
+        let width: CGFloat
+    }
+
+    enum PlacementReason: String, Equatable {
+        case sameLine
+        case wrappedLine
+        case rightToLeft
+        case clampedToVisibleFrame
+    }
+
+    let panelFrame: NSRect
+    let lines: [Line]
+    let lineHeight: CGFloat
+    let keycapHintFrame: NSRect?
+    let placementReason: PlacementReason
+
+    static func resolve(
+        text: String,
+        font: NSFont,
+        textDirection: TextDirection,
+        anchorFrame: NSRect,
+        inputFrame: NSRect?,
+        visibleFrame: NSRect,
+        observedCharacterWidth: CGFloat?,
+        geometryQuality: CaretGeometryQuality,
+        maxPanelWidth: CGFloat = 520
+    ) -> InlineGhostTextLayout {
+        let normalizedText = normalized(text)
+        let lineHeight = max(16, ceil(font.ascender - font.descender + font.leading + 2))
+        let keycapWidth = max(CGFloat(28), min(CGFloat(44), (observedCharacterWidth ?? font.pointSize * 0.55) * 5))
+        let keycapGap: CGFloat = geometryQuality == .screenOCR ? 8 : 6
+        let edgePadding: CGFloat = 4
+        let minimumLineWidth = max(CGFloat(48), font.pointSize * 4)
+        let sameLineAvailable: CGFloat
+        switch textDirection {
+        case .leftToRight:
+            sameLineAvailable = visibleFrame.maxX - anchorFrame.minX
+        case .rightToLeft:
+            sameLineAvailable = anchorFrame.maxX - visibleFrame.minX
+        }
+
+        let shouldUseWrappedLine = textDirection == .leftToRight
+            && sameLineAvailable < minimumLineWidth
+        let rawPanelWidth = min(maxPanelWidth, max(minimumLineWidth, sameLineAvailable - edgePadding))
+        let fallbackLineWidth = min(
+            maxPanelWidth,
+            max(
+                minimumLineWidth,
+                (inputFrame ?? visibleFrame).width - edgePadding * 2
+            )
+        )
+        let panelWidth = shouldUseWrappedLine ? fallbackLineWidth : rawPanelWidth
+        let wrappedLines = wrappedTextLines(
+            normalizedText,
+            font: font,
+            maxLineWidth: panelWidth
+        )
+        let longestLineWidth = wrappedLines.map(\.width).max() ?? minimumLineWidth
+        let measuredWidth = min(
+            panelWidth,
+            max(minimumLineWidth, longestLineWidth + keycapWidth + keycapGap)
+        )
+        let lines = linesWithIndent(
+            wrappedLines,
+            panelWidth: measuredWidth,
+            direction: textDirection
+        )
+        let panelHeight = max(lineHeight, lineHeight * CGFloat(max(1, lines.count)))
+
+        let desiredOrigin: CGPoint
+        let reason: PlacementReason
+        switch textDirection {
+        case .leftToRight where shouldUseWrappedLine:
+            let x = min(
+                max((inputFrame?.minX ?? visibleFrame.minX) + edgePadding, visibleFrame.minX),
+                visibleFrame.maxX - measuredWidth
+            )
+            desiredOrigin = CGPoint(x: x, y: anchorFrame.minY - panelHeight - 2)
+            reason = .wrappedLine
+        case .leftToRight:
+            desiredOrigin = CGPoint(x: anchorFrame.minX, y: anchorFrame.minY)
+            reason = lines.count > 1 ? .wrappedLine : .sameLine
+        case .rightToLeft:
+            desiredOrigin = CGPoint(x: anchorFrame.maxX - measuredWidth, y: anchorFrame.minY)
+            reason = .rightToLeft
+        }
+
+        let clampedOrigin = CGPoint(
+            x: min(max(desiredOrigin.x, visibleFrame.minX), max(visibleFrame.minX, visibleFrame.maxX - measuredWidth)),
+            y: min(max(desiredOrigin.y, visibleFrame.minY), max(visibleFrame.minY, visibleFrame.maxY - panelHeight))
+        )
+        let placementReason: PlacementReason = clampedOrigin == desiredOrigin ? reason : .clampedToVisibleFrame
+        let panelFrame = NSRect(
+            x: clampedOrigin.x,
+            y: clampedOrigin.y,
+            width: measuredWidth,
+            height: panelHeight
+        )
+        let keycapHintFrame = keycapFrame(
+            lines: lines,
+            panelFrame: panelFrame,
+            lineHeight: lineHeight,
+            keycapWidth: keycapWidth,
+            keycapGap: keycapGap,
+            direction: textDirection
+        )
+
+        return InlineGhostTextLayout(
+            panelFrame: panelFrame,
+            lines: lines,
+            lineHeight: lineHeight,
+            keycapHintFrame: keycapHintFrame,
+            placementReason: placementReason
+        )
+    }
+
+    private static func normalized(_ text: String) -> String {
+        text
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+    }
+
+    private static func wrappedTextLines(
+        _ text: String,
+        font: NSFont,
+        maxLineWidth: CGFloat
+    ) -> [(text: String, width: CGFloat)] {
+        guard !text.isEmpty else {
+            return [("", 1)]
+        }
+
+        var lines: [(text: String, width: CGFloat)] = []
+        var current = ""
+        var currentWidth: CGFloat = 0
+        for word in text.split(separator: " ").map(String.init) {
+            let candidate = current.isEmpty ? word : current + " " + word
+            let candidateWidth = measuredWidth(candidate, font: font)
+            if !current.isEmpty, candidateWidth > maxLineWidth {
+                lines.append((current, currentWidth))
+                current = word
+                currentWidth = min(measuredWidth(word, font: font), maxLineWidth)
+            } else {
+                current = candidate
+                currentWidth = min(candidateWidth, maxLineWidth)
+            }
+        }
+
+        if !current.isEmpty {
+            lines.append((current, currentWidth))
+        }
+        return lines
+    }
+
+    private static func linesWithIndent(
+        _ lines: [(text: String, width: CGFloat)],
+        panelWidth: CGFloat,
+        direction: TextDirection
+    ) -> [Line] {
+        lines.map { line in
+            let indent: CGFloat
+            switch direction {
+            case .leftToRight:
+                indent = 0
+            case .rightToLeft:
+                indent = max(0, panelWidth - line.width)
+            }
+            return Line(text: line.text, indent: indent, width: line.width)
+        }
+    }
+
+    private static func measuredWidth(_ text: String, font: NSFont) -> CGFloat {
+        ceil((text as NSString).size(withAttributes: [.font: font]).width + 2)
+    }
+
+    private static func keycapFrame(
+        lines: [Line],
+        panelFrame: NSRect,
+        lineHeight: CGFloat,
+        keycapWidth: CGFloat,
+        keycapGap: CGFloat,
+        direction: TextDirection
+    ) -> NSRect? {
+        guard let lastLine = lines.last else {
+            return nil
+        }
+
+        let lineIndex = CGFloat(max(0, lines.count - 1))
+        let height = max(CGFloat(12), lineHeight - 4)
+        let y = panelFrame.minY + lineIndex * lineHeight + 2
+        switch direction {
+        case .leftToRight:
+            let x = panelFrame.minX + lastLine.indent + lastLine.width + keycapGap
+            guard x + keycapWidth <= panelFrame.maxX else {
+                return nil
+            }
+            return NSRect(x: x, y: y, width: keycapWidth, height: height)
+        case .rightToLeft:
+            let x = panelFrame.minX + lastLine.indent - keycapGap - keycapWidth
+            guard x >= panelFrame.minX else {
+                return nil
+            }
+            return NSRect(x: x, y: y, width: keycapWidth, height: height)
+        }
+    }
+}
+
+struct SimpleCaretPopupLayout: Equatable {
+    enum PlacementReason: String, Equatable {
+        case caret
+        case focusedElement
+        case clampedToVisibleFrame
+    }
+
+    let panelFrame: NSRect
+    let anchorFrame: NSRect
+    let placementReason: PlacementReason
+
+    static func resolve(
+        text: String,
+        context: TextContext,
+        font: NSFont,
+        screenFrame: CGRect,
+        visibleFrame: CGRect,
+        screenFrames: [CGRect] = [],
+        maxPanelWidth: CGFloat = 360
+    ) -> SimpleCaretPopupLayout? {
+        guard context.selectedRange?.length == 0 else {
+            return nil
+        }
+
+        let normalizedText = normalized(text)
+        guard !normalizedText.isEmpty,
+              screenFrame.isFiniteAndNonEmpty,
+              visibleFrame.isFiniteAndNonEmpty else {
+            return nil
+        }
+
+        let validation = OverlayGeometryValidator(
+            screenFrame: screenFrame,
+            visibleFrame: visibleFrame,
+            screenFrames: screenFrames
+        ).validate(context: context)
+
+        let anchor: NSRect
+        let reason: PlacementReason
+        if let caretRect = validation.caretRect
+            ?? validation.previousGlyphRect
+            ?? validation.nextGlyphRect {
+            anchor = caretRect
+            reason = .caret
+        } else if let focusedElementRect = validation.focusedElementRect {
+            anchor = focusedElementRect
+            reason = .focusedElement
+        } else {
+            return nil
+        }
+
+        let measured = measuredSize(for: normalizedText, font: font)
+        let panelWidth = min(maxPanelWidth, max(CGFloat(92), measured.width + 60))
+        let panelHeight = max(CGFloat(28), measured.height + 12)
+        let textDirection = TextDirectionDetector.direction(for: context.textBeforeCursor)
+        let desiredX: CGFloat
+        switch textDirection {
+        case .leftToRight:
+            desiredX = anchor.minX
+        case .rightToLeft:
+            desiredX = anchor.maxX - panelWidth
+        }
+
+        let belowY = anchor.minY - panelHeight - 6
+        let desiredY = belowY >= visibleFrame.minY
+            ? belowY
+            : anchor.maxY + 6
+        let desiredOrigin = CGPoint(x: desiredX, y: desiredY)
+        let clampedOrigin = CGPoint(
+            x: min(max(desiredOrigin.x, visibleFrame.minX), max(visibleFrame.minX, visibleFrame.maxX - panelWidth)),
+            y: min(max(desiredOrigin.y, visibleFrame.minY), max(visibleFrame.minY, visibleFrame.maxY - panelHeight))
+        )
+        let placementReason = clampedOrigin == desiredOrigin ? reason : .clampedToVisibleFrame
+
+        return SimpleCaretPopupLayout(
+            panelFrame: NSRect(
+                x: clampedOrigin.x,
+                y: clampedOrigin.y,
+                width: panelWidth,
+                height: panelHeight
+            ),
+            anchorFrame: anchor,
+            placementReason: placementReason
+        )
+    }
+
+    static func normalized(_ text: String) -> String {
+        text
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+    }
+
+    private static func measuredSize(for text: String, font: NSFont) -> NSSize {
+        let size = (text as NSString).size(withAttributes: [.font: font])
+        return NSSize(width: ceil(size.width), height: ceil(size.height))
+    }
+}
+
+struct MultiSuggestionPopupLayout: Equatable {
+    enum PlacementReason: String, Equatable {
+        case caret
+        case focusedElement
+        case clampedToVisibleFrame
+    }
+
+    let panelFrame: NSRect
+    let anchorFrame: NSRect
+    let placementReason: PlacementReason
+
+    static func resolve(
+        suggestion: Suggestion,
+        context: TextContext,
+        font: NSFont,
+        screenFrame: CGRect,
+        visibleFrame: CGRect,
+        screenFrames: [CGRect] = [],
+        maxPanelWidth: CGFloat = 420
+    ) -> MultiSuggestionPopupLayout? {
+        guard suggestion.hasMultipleAlternatives,
+              context.selectedRange?.length == 0,
+              screenFrame.isFiniteAndNonEmpty,
+              visibleFrame.isFiniteAndNonEmpty else {
+            return nil
+        }
+
+        let validation = OverlayGeometryValidator(
+            screenFrame: screenFrame,
+            visibleFrame: visibleFrame,
+            screenFrames: screenFrames
+        ).validate(context: context)
+
+        let anchor: NSRect
+        let reason: PlacementReason
+        if let caretRect = validation.caretRect
+            ?? validation.previousGlyphRect
+            ?? validation.nextGlyphRect {
+            anchor = caretRect
+            reason = .caret
+        } else if let focusedElementRect = validation.focusedElementRect {
+            anchor = focusedElementRect
+            reason = .focusedElement
+        } else {
+            return nil
+        }
+
+        let longest = suggestion.alternatives
+            .map { SimpleCaretPopupLayout.normalized($0.visibleText) }
+            .max { lhs, rhs in measuredWidth(lhs, font: font) < measuredWidth(rhs, font: font) } ?? ""
+        guard !longest.isEmpty else {
+            return nil
+        }
+
+        let panelWidth = min(maxPanelWidth, max(CGFloat(220), measuredWidth(longest, font: font) + 62))
+        let rowCount = min(3, max(1, suggestion.alternatives.count))
+        let panelHeight = CGFloat(rowCount * 30 + 12)
+        let textDirection = TextDirectionDetector.direction(for: context.textBeforeCursor)
+        let desiredX: CGFloat
+        switch textDirection {
+        case .leftToRight:
+            desiredX = anchor.minX
+        case .rightToLeft:
+            desiredX = anchor.maxX - panelWidth
+        }
+
+        let belowY = anchor.minY - panelHeight - 6
+        let desiredY = belowY >= visibleFrame.minY
+            ? belowY
+            : anchor.maxY + 6
+        let desiredOrigin = CGPoint(x: desiredX, y: desiredY)
+        let clampedOrigin = CGPoint(
+            x: min(max(desiredOrigin.x, visibleFrame.minX), max(visibleFrame.minX, visibleFrame.maxX - panelWidth)),
+            y: min(max(desiredOrigin.y, visibleFrame.minY), max(visibleFrame.minY, visibleFrame.maxY - panelHeight))
+        )
+        let placementReason = clampedOrigin == desiredOrigin ? reason : .clampedToVisibleFrame
+
+        return MultiSuggestionPopupLayout(
+            panelFrame: NSRect(x: clampedOrigin.x, y: clampedOrigin.y, width: panelWidth, height: panelHeight),
+            anchorFrame: anchor,
+            placementReason: placementReason
+        )
+    }
+
+    private static func measuredWidth(_ text: String, font: NSFont) -> CGFloat {
+        ceil((text as NSString).size(withAttributes: [.font: font]).width)
+    }
 }
 
 struct InlinePreviewResolution {
@@ -359,20 +1056,23 @@ struct InlinePreviewResolution {
 enum InlinePreviewGeometry {
     private static let caretGap: CGFloat = 1
     private static let minimumUsefulWidth: CGFloat = 24
-    private static let focusedElementTolerance: CGFloat = 12
     private static let screenTolerance: CGFloat = 12
 
     static func layout(
         context: TextContext,
         contentSize: NSSize,
         screenFrame: CGRect,
-        visibleFrame: CGRect
+        visibleFrame: CGRect,
+        screenFrames: [CGRect] = [],
+        allowsLineWrapPlacement: Bool = false
     ) -> InlinePreviewLayout? {
         resolve(
             context: context,
             contentSize: contentSize,
             screenFrame: screenFrame,
-            visibleFrame: visibleFrame
+            visibleFrame: visibleFrame,
+            screenFrames: screenFrames,
+            allowsLineWrapPlacement: allowsLineWrapPlacement
         ).layout
     }
 
@@ -380,7 +1080,9 @@ enum InlinePreviewGeometry {
         context: TextContext,
         contentSize: NSSize,
         screenFrame: CGRect,
-        visibleFrame: CGRect
+        visibleFrame: CGRect,
+        screenFrames: [CGRect] = [],
+        allowsLineWrapPlacement: Bool = false
     ) -> InlinePreviewResolution {
         guard isCollapsedSelection(context.selectedRange) else {
             return InlinePreviewResolution(rejectionReason: "selection-not-collapsed")
@@ -390,28 +1092,15 @@ enum InlinePreviewGeometry {
             return InlinePreviewResolution(rejectionReason: "invalid-screen")
         }
 
-        let focusedElementRect = validatedElementRect(
-            context.focusedElementRect,
-            screenFrame: screenFrame
-        )
-        let caretRect = validatedMetricRect(
-            context.caretRect,
+        let validation = OverlayGeometryValidator(
             screenFrame: screenFrame,
-            focusedElementRect: focusedElementRect,
-            name: "caret"
-        )
-        let previousGlyphRect = validatedMetricRect(
-            context.previousGlyphRect ?? context.lineReferenceRect,
-            screenFrame: screenFrame,
-            focusedElementRect: focusedElementRect,
-            name: "previous-glyph"
-        )
-        let nextGlyphRect = validatedMetricRect(
-            context.nextGlyphRect,
-            screenFrame: screenFrame,
-            focusedElementRect: focusedElementRect,
-            name: "next-glyph"
-        )
+            visibleFrame: visibleFrame,
+            screenFrames: screenFrames
+        ).validate(context: context)
+        let focusedElementRect = validation.focusedElementRect
+        let caretRect = validation.caretRect
+        let previousGlyphRect = validation.previousGlyphRect
+        let nextGlyphRect = validation.nextGlyphRect
 
         guard caretRect != nil || previousGlyphRect != nil || nextGlyphRect != nil else {
             return estimatedTextBoxLayout(
@@ -436,7 +1125,12 @@ enum InlinePreviewGeometry {
             )
         }
 
-        guard let insertionX = insertionPointX(caretRect: caretRect, previousGlyphRect: previousGlyphRect) else {
+        let textDirection = TextDirectionDetector.direction(for: context.textBeforeCursor)
+        guard let insertionX = insertionPointX(
+            caretRect: caretRect,
+            previousGlyphRect: previousGlyphRect,
+            textDirection: textDirection
+        ) else {
             return estimatedTextBoxLayout(
                 context: context,
                 focusedElementRect: focusedElementRect,
@@ -446,15 +1140,38 @@ enum InlinePreviewGeometry {
             )
         }
 
-        let x = insertionX + caretGap
+        let x: CGFloat
+        let availableWidth: CGFloat
+        switch textDirection {
+        case .leftToRight:
+            x = insertionX + caretGap
+            guard x >= visibleFrame.minX - screenTolerance,
+                  x <= visibleFrame.maxX + screenTolerance else {
+                return InlinePreviewResolution(rejectionReason: "insertion-outside-visible-frame")
+            }
+            let rightSideWidth = visibleFrame.maxX - x
+            guard rightSideWidth >= minimumUsefulWidth || allowsLineWrapPlacement else {
+                return InlinePreviewResolution(rejectionReason: "insufficient-right-side-space")
+            }
+            availableWidth = max(rightSideWidth, minimumUsefulWidth)
+        case .rightToLeft:
+            let rightEdge = insertionX - caretGap
+            guard rightEdge >= visibleFrame.minX - screenTolerance,
+                  rightEdge <= visibleFrame.maxX + screenTolerance else {
+                return InlinePreviewResolution(rejectionReason: "insertion-outside-visible-frame")
+            }
+            let leftSideWidth = rightEdge - visibleFrame.minX
+            guard leftSideWidth >= minimumUsefulWidth || allowsLineWrapPlacement else {
+                return InlinePreviewResolution(rejectionReason: "insufficient-left-side-space")
+            }
+            availableWidth = max(leftSideWidth, minimumUsefulWidth)
+            let width = min(max(contentSize.width, minimumUsefulWidth), availableWidth)
+            x = rightEdge - width
+        }
+
         guard x >= visibleFrame.minX - screenTolerance,
               x <= visibleFrame.maxX + screenTolerance else {
             return InlinePreviewResolution(rejectionReason: "insertion-outside-visible-frame")
-        }
-
-        let availableWidth = visibleFrame.maxX - x
-        guard availableWidth >= minimumUsefulWidth else {
-            return InlinePreviewResolution(rejectionReason: "insufficient-right-side-space")
         }
 
         guard let referenceRect = lineReferenceRect(
@@ -476,7 +1193,8 @@ enum InlinePreviewGeometry {
         return InlinePreviewLayout(
             origin: CGPoint(x: x, y: y),
             size: size,
-            source: .exactAX
+            source: .exactAX,
+            inputFrame: focusedElementRect
         )
         .resolution
     }
@@ -501,7 +1219,27 @@ enum InlinePreviewGeometry {
         selectedRange?.length == 0
     }
 
-    private static func insertionPointX(caretRect: CGRect?, previousGlyphRect: CGRect?) -> CGFloat? {
+    private static func insertionPointX(
+        caretRect: CGRect?,
+        previousGlyphRect: CGRect?,
+        textDirection: TextDirection
+    ) -> CGFloat? {
+        if textDirection == .rightToLeft {
+            if let caretRect, OverlayGeometry.isFineCaret(caretRect) {
+                return caretRect.minX
+            }
+
+            if let previousGlyphRect {
+                return previousGlyphRect.minX
+            }
+
+            if let caretRect {
+                return caretRect.minX
+            }
+
+            return nil
+        }
+
         if let caretRect, OverlayGeometry.isFineCaret(caretRect) {
             return caretRect.maxX
         }
@@ -538,27 +1276,6 @@ enum InlinePreviewGeometry {
         return caretRect
     }
 
-    private static func validatedElementRect(_ rawRect: CGRect?, screenFrame: CGRect) -> CGRect? {
-        guard let rawRect,
-              rawRect.isFiniteAndNonEmpty,
-              rawRect.width <= screenFrame.width * 1.2,
-              rawRect.height <= screenFrame.height * 1.2 else {
-            return nil
-        }
-
-        guard !(abs(rawRect.minX) < 0.5 && abs(rawRect.minY) < 0.5) else {
-            GeometryDebug.log("metric=focused-element rejected reason=zero-origin raw=\(rawRect)")
-            return nil
-        }
-
-        let converted = OverlayGeometry.appKitRect(accessibilityRect: rawRect, screenFrame: screenFrame)
-        guard converted.isFiniteAndNonEmpty,
-              screenFrame.insetBy(dx: -screenTolerance, dy: -screenTolerance).intersects(converted) else {
-            return nil
-        }
-        return converted
-    }
-
     private static func estimatedTextBoxLayout(
         context: TextContext,
         focusedElementRect: CGRect?,
@@ -572,6 +1289,7 @@ enum InlinePreviewGeometry {
 
         let horizontalPadding = estimatedHorizontalPadding(for: context)
         let visibleFocus = focusedElementRect.intersection(visibleFrame)
+        let textDirection = TextDirectionDetector.direction(for: context.textBeforeCursor)
         guard visibleFocus.isFiniteAndNonEmpty,
               visibleFocus.width >= minimumUsefulWidth + horizontalPadding * 2,
               visibleFocus.height >= 12 else {
@@ -596,11 +1314,27 @@ enum InlinePreviewGeometry {
             maxLineWidth: maxTextLineWidth
         )
         let measuredLineWidth = lineEstimate.width
-        let estimatedX = leftLimit + measuredLineWidth + caretGap
-        let x = min(max(estimatedX, leftLimit), maxXWithUsefulSpace)
-        let availableWidth = rightLimit - x
-        guard availableWidth >= minimumUsefulWidth else {
-            return InlinePreviewResolution(rejectionReason: "insufficient-right-side-space")
+        let x: CGFloat
+        let availableWidth: CGFloat
+        let estimatedAnchorX: CGFloat
+        switch textDirection {
+        case .leftToRight:
+            estimatedAnchorX = leftLimit + measuredLineWidth + caretGap
+            x = min(max(estimatedAnchorX, leftLimit), maxXWithUsefulSpace)
+            availableWidth = rightLimit - x
+            guard availableWidth >= minimumUsefulWidth else {
+                return InlinePreviewResolution(rejectionReason: "insufficient-right-side-space")
+            }
+        case .rightToLeft:
+            estimatedAnchorX = rightLimit - measuredLineWidth - caretGap
+            let minimumRightEdge = leftLimit + minimumUsefulWidth
+            let rightEdge = min(max(estimatedAnchorX, minimumRightEdge), rightLimit)
+            availableWidth = rightEdge - leftLimit
+            guard availableWidth >= minimumUsefulWidth else {
+                return InlinePreviewResolution(rejectionReason: "insufficient-left-side-space")
+            }
+            let width = min(max(contentSize.width, minimumUsefulWidth), availableWidth)
+            x = rightEdge - width
         }
 
         let height = max(1, max(contentSize.height, lineHeight))
@@ -624,8 +1358,13 @@ enum InlinePreviewGeometry {
             return InlinePreviewResolution(rejectionReason: "estimated-panel-outside-focused-element")
         }
 
-        GeometryDebug.log("metric=text-box-estimate reason=\(fallbackReason) focused=\(focusedElementRect) lineIndex=\(lineEstimate.lineIndex) lineWidth=\(measuredLineWidth) estimatedX=\(estimatedX) panel=\(frame)")
-        return InlinePreviewLayout(origin: CGPoint(x: x, y: y), size: size, source: .textBoxEstimate).resolution
+        GeometryDebug.log("metric=text-box-estimate reason=\(fallbackReason) focused=\(focusedElementRect) lineIndex=\(lineEstimate.lineIndex) lineWidth=\(measuredLineWidth) estimatedAnchorX=\(estimatedAnchorX) direction=\(textDirection) panel=\(frame)")
+        return InlinePreviewLayout(
+            origin: CGPoint(x: x, y: y),
+            size: size,
+            source: .textBoxEstimate,
+            inputFrame: focusedElementRect
+        ).resolution
     }
 
     private static func estimatedFontSize(for focusedElementRect: CGRect, context: TextContext) -> CGFloat {
@@ -692,52 +1431,195 @@ enum InlinePreviewGeometry {
         return text
     }
 
-    private static func validatedMetricRect(
-        _ rawRect: CGRect?,
+}
+
+struct OverlayGeometryValidation: Equatable {
+    let focusedElementRect: CGRect?
+    let caretRect: CGRect?
+    let previousGlyphRect: CGRect?
+    let nextGlyphRect: CGRect?
+    let lineReferenceRect: CGRect?
+}
+
+struct OverlayGeometryValidator {
+    private let screenFrame: CGRect
+    private let visibleFrame: CGRect
+    private let screenFrames: [CGRect]
+    private let focusedElementTolerance: CGFloat
+    private let screenTolerance: CGFloat
+
+    init(
         screenFrame: CGRect,
-        focusedElementRect: CGRect?,
-        name: String
+        visibleFrame: CGRect,
+        screenFrames: [CGRect] = [],
+        focusedElementTolerance: CGFloat = 12,
+        screenTolerance: CGFloat = 12
+    ) {
+        self.screenFrame = screenFrame
+        self.visibleFrame = visibleFrame
+        self.screenFrames = screenFrames.isEmpty ? [screenFrame] : screenFrames
+        self.focusedElementTolerance = focusedElementTolerance
+        self.screenTolerance = screenTolerance
+    }
+
+    func validate(context: TextContext) -> OverlayGeometryValidation {
+        let focusedElementRect = validatedElementRect(context.focusedElementRect)
+        let caretRect = validatedMetricRect(
+            context.caretRect,
+            name: "caret",
+            quality: context.caretGeometryQuality,
+            selectedRange: context.selectedRange,
+            focusedElementRect: focusedElementRect
+        )
+        let previousGlyphRect = validatedMetricRect(
+            context.previousGlyphRect ?? context.lineReferenceRect,
+            name: "previous-glyph",
+            quality: context.caretGeometryQuality,
+            selectedRange: context.selectedRange,
+            focusedElementRect: focusedElementRect
+        )
+        let nextGlyphRect = validatedMetricRect(
+            context.nextGlyphRect,
+            name: "next-glyph",
+            quality: context.caretGeometryQuality,
+            selectedRange: context.selectedRange,
+            focusedElementRect: focusedElementRect
+        )
+        let lineReferenceRect = validatedMetricRect(
+            context.lineReferenceRect,
+            name: "line-reference",
+            quality: context.caretGeometryQuality,
+            selectedRange: context.selectedRange,
+            focusedElementRect: focusedElementRect
+        )
+        return OverlayGeometryValidation(
+            focusedElementRect: focusedElementRect,
+            caretRect: caretRect,
+            previousGlyphRect: previousGlyphRect,
+            nextGlyphRect: nextGlyphRect,
+            lineReferenceRect: lineReferenceRect
+        )
+    }
+
+    private func validatedElementRect(_ rawRect: CGRect?) -> CGRect? {
+        guard let rawRect,
+              rawRect.isFiniteAndNonEmpty,
+              rawRect.width <= screenFrame.width * 1.2,
+              rawRect.height <= screenFrame.height * 1.2 else {
+            return nil
+        }
+
+        guard !isSuspiciousZeroOrigin(rawRect) else {
+            GeometryDebug.log("overlay-geometry rejected-zero-origin metric=focused-element raw=\(rawRect)")
+            return nil
+        }
+
+        guard let converted = convertedRect(rawRect, name: "focused-element") else {
+            return nil
+        }
+        GeometryDebug.log("overlay-geometry accepted metric=focused-element converted=\(converted)")
+        return converted
+    }
+
+    private func validatedMetricRect(
+        _ rawRect: CGRect?,
+        name: String,
+        quality: CaretGeometryQuality,
+        selectedRange: NSRange?,
+        focusedElementRect: CGRect?
     ) -> CGRect? {
         guard let rawRect else {
             return nil
         }
 
         guard rawRect.isFiniteAndNonEmpty || isCollapsedCaretMetric(rawRect, metricName: name) else {
-            GeometryDebug.log("metric=\(name) rejected reason=non-finite-or-empty raw=\(rawRect)")
+            GeometryDebug.log("overlay-geometry rejected-empty metric=\(name) raw=\(rawRect)")
             return nil
         }
 
-        guard !(abs(rawRect.minX) < 0.5 && abs(rawRect.minY) < 0.5) else {
-            GeometryDebug.log("metric=\(name) rejected reason=zero-origin raw=\(rawRect)")
+        guard !isSuspiciousZeroOrigin(rawRect) else {
+            GeometryDebug.log("overlay-geometry rejected-zero-origin metric=\(name) raw=\(rawRect)")
             return nil
         }
 
-        let normalizedRawRect = normalizedMetricRect(rawRect, metricName: name)
-        guard normalizedRawRect.width <= screenFrame.width,
-              normalizedRawRect.height <= max(120, screenFrame.height * 0.25) else {
-            GeometryDebug.log("metric=\(name) rejected reason=absurd-size raw=\(rawRect)")
+        let normalizedRawRect = normalizedMetricRect(
+            rawRect,
+            metricName: name,
+            quality: quality,
+            selectedRange: selectedRange
+        )
+
+        guard metricWithinQualityCaps(normalizedRawRect, metricName: name, quality: quality) else {
+            GeometryDebug.log("overlay-geometry rejected-absurd-size metric=\(name) raw=\(rawRect) normalized=\(normalizedRawRect) quality=\(quality.rawValue)")
             return nil
         }
 
-        let converted = OverlayGeometry.appKitRect(accessibilityRect: normalizedRawRect, screenFrame: screenFrame)
-        guard converted.isFiniteAndNonEmpty,
-              screenFrame.insetBy(dx: -screenTolerance, dy: -screenTolerance).intersects(converted) else {
-            GeometryDebug.log("metric=\(name) rejected reason=outside-screen raw=\(rawRect) converted=\(converted)")
+        guard let converted = convertedRect(normalizedRawRect, name: name) else {
             return nil
         }
 
-        if let focusedElementRect {
+        if let focusedElementRect,
+           shouldRequireFocusProximity(metricName: name, quality: quality) {
             let expandedFocus = focusedElementRect.insetBy(dx: -focusedElementTolerance, dy: -focusedElementTolerance)
             guard expandedFocus.intersects(converted) || expandedFocus.contains(CGPoint(x: converted.midX, y: converted.midY)) else {
-                GeometryDebug.log("metric=\(name) rejected reason=outside-focused-element raw=\(rawRect) converted=\(converted) focused=\(focusedElementRect)")
+                GeometryDebug.log("overlay-geometry rejected-far-from-field metric=\(name) raw=\(rawRect) converted=\(converted) focused=\(focusedElementRect) quality=\(quality.rawValue)")
                 return nil
             }
         }
 
+        if normalizedRawRect != rawRect {
+            GeometryDebug.log("overlay-geometry normalized metric=\(name) raw=\(rawRect) normalized=\(normalizedRawRect) converted=\(converted) quality=\(quality.rawValue)")
+        } else {
+            GeometryDebug.log("overlay-geometry accepted metric=\(name) converted=\(converted) quality=\(quality.rawValue)")
+        }
         return converted
     }
 
-    private static func isCollapsedCaretMetric(_ rect: CGRect, metricName: String) -> Bool {
+    private func convertedRect(_ rawRect: CGRect, name: String) -> CGRect? {
+        for candidate in rawRectCandidates(rawRect) {
+            let converted = OverlayGeometry.appKitRect(accessibilityRect: candidate.rect, screenFrame: screenFrame)
+            guard converted.isFiniteAndNonEmpty else {
+                continue
+            }
+            if intersectsAnyScreen(converted) {
+                if let reason = candidate.reason {
+                    GeometryDebug.log("overlay-geometry normalized metric=\(name) reason=\(reason) raw=\(rawRect) normalized=\(candidate.rect) converted=\(converted)")
+                }
+                return converted
+            }
+        }
+
+        let converted = OverlayGeometry.appKitRect(accessibilityRect: rawRect, screenFrame: screenFrame)
+        GeometryDebug.log("overlay-geometry rejected-outside-screen metric=\(name) raw=\(rawRect) converted=\(converted)")
+        return nil
+    }
+
+    private func rawRectCandidates(_ rawRect: CGRect) -> [(rect: CGRect, reason: String?)] {
+        var candidates: [(rect: CGRect, reason: String?)] = [(rawRect, nil)]
+        for scale in [CGFloat(2), CGFloat(3)] {
+            let scaled = CGRect(
+                x: rawRect.minX / scale,
+                y: rawRect.minY / scale,
+                width: rawRect.width / scale,
+                height: rawRect.height / scale
+            )
+            candidates.append((scaled, "physical-to-points-\(Int(scale))x"))
+        }
+        return candidates
+    }
+
+    private func intersectsAnyScreen(_ rect: CGRect) -> Bool {
+        let expanded = rect.insetBy(dx: -screenTolerance, dy: -screenTolerance)
+        return screenFrames.contains { screenFrame in
+            screenFrame.insetBy(dx: -screenTolerance, dy: -screenTolerance).intersects(expanded)
+        } || visibleFrame.insetBy(dx: -screenTolerance, dy: -screenTolerance).intersects(expanded)
+    }
+
+    private func isSuspiciousZeroOrigin(_ rect: CGRect) -> Bool {
+        abs(rect.minX) < 0.5 && abs(rect.minY) < 0.5
+    }
+
+    private func isCollapsedCaretMetric(_ rect: CGRect, metricName: String) -> Bool {
         guard metricName == "caret" || metricName == "previous-glyph" else {
             return false
         }
@@ -749,11 +1631,56 @@ enum InlinePreviewGeometry {
             && rect.height > 0
     }
 
-    private static func normalizedMetricRect(_ rect: CGRect, metricName: String) -> CGRect {
-        guard isCollapsedCaretMetric(rect, metricName: metricName) else {
-            return rect
+    private func normalizedMetricRect(
+        _ rect: CGRect,
+        metricName: String,
+        quality: CaretGeometryQuality,
+        selectedRange: NSRange?
+    ) -> CGRect {
+        if isCollapsedCaretMetric(rect, metricName: metricName) {
+            return CGRect(x: rect.minX, y: rect.minY, width: 1, height: rect.height)
         }
-        return CGRect(x: rect.minX, y: rect.minY, width: 1, height: rect.height)
+
+        if metricName == "caret",
+           selectedRange?.length == 0,
+           rect.width > max(CGFloat(4), rect.height * 0.35),
+           quality != .elementFrame,
+           quality != .unavailable {
+            return CGRect(x: rect.minX, y: rect.minY, width: 1, height: rect.height)
+        }
+
+        return rect
+    }
+
+    private func metricWithinQualityCaps(
+        _ rect: CGRect,
+        metricName: String,
+        quality: CaretGeometryQuality
+    ) -> Bool {
+        let maximumHeight: CGFloat
+        switch quality {
+        case .directCaret, .glyph, .lineMetric, .screenOCR:
+            maximumHeight = max(120, screenFrame.height * 0.25)
+        case .elementFrame, .unavailable:
+            maximumHeight = max(80, screenFrame.height * 0.12)
+        }
+
+        let maximumWidth = metricName == "caret"
+            ? max(CGFloat(24), screenFrame.width * 0.05)
+            : screenFrame.width
+        return rect.width <= maximumWidth && rect.height <= maximumHeight
+    }
+
+    private func shouldRequireFocusProximity(metricName: String, quality: CaretGeometryQuality) -> Bool {
+        guard metricName != "focused-element" else {
+            return false
+        }
+        switch quality {
+        case .screenOCR:
+            return false
+        case .directCaret, .glyph, .lineMetric, .elementFrame, .unavailable:
+            return true
+        }
     }
 }
 
@@ -823,10 +1750,82 @@ extension TextContext {
     }
 }
 
+private struct SimpleCaretPopupView: View {
+    let text: String
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(text)
+                .font(.system(size: 13, weight: .regular))
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .foregroundStyle(.primary.opacity(0.82))
+            Text("Tab")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(
+                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        .fill(Color.secondary.opacity(0.13))
+                )
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+    }
+}
+
+private struct MultiSuggestionPopupView: View {
+    let alternatives: [SuggestionAlternative]
+    let selectedIndex: Int
+
+    var body: some View {
+        VStack(spacing: 4) {
+            ForEach(Array(alternatives.prefix(3).enumerated()), id: \.offset) { index, alternative in
+                HStack(spacing: 8) {
+                    Text(SimpleCaretPopupLayout.normalized(alternative.visibleText))
+                        .font(.system(size: 13))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .foregroundStyle(index == selectedIndex ? .primary : .secondary)
+                    Spacer(minLength: 8)
+                    if index == selectedIndex {
+                        Text("Tab")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(
+                                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                    .fill(Color.secondary.opacity(0.13))
+                            )
+                    }
+                }
+                .padding(.horizontal, 10)
+                .frame(height: 26)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(index == selectedIndex ? Color.accentColor.opacity(0.12) : Color.clear)
+                )
+            }
+        }
+        .padding(6)
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+    }
+}
+
 private final class InlineGhostTextView: NSView {
-    private var text = ""
+    private var layout = InlineGhostTextLayout(
+        panelFrame: .zero,
+        lines: [],
+        lineHeight: 16,
+        keycapHintFrame: nil,
+        placementReason: .sameLine
+    )
     private var font = NSFont.systemFont(ofSize: 14)
     private var textColor = NSColor.tertiaryLabelColor
+    private var textDirection = TextDirection.leftToRight
 
     override var isFlipped: Bool {
         true
@@ -846,10 +1845,17 @@ private final class InlineGhostTextView: NSView {
         layer?.masksToBounds = true
     }
 
-    func update(text: String, font: NSFont, textColor: NSColor) {
-        self.text = text
+    func update(
+        layout: InlineGhostTextLayout,
+        font: NSFont,
+        textColor: NSColor,
+        textDirection: TextDirection
+    ) {
+        self.layout = layout
         self.font = font
         self.textColor = textColor
+        self.textDirection = textDirection
+        frame = NSRect(origin: .zero, size: layout.panelFrame.size)
         needsDisplay = true
     }
 
@@ -858,22 +1864,55 @@ private final class InlineGhostTextView: NSView {
 
         let paragraphStyle = NSMutableParagraphStyle()
         paragraphStyle.lineBreakMode = .byTruncatingTail
+        switch textDirection {
+        case .leftToRight:
+            paragraphStyle.alignment = .left
+            paragraphStyle.baseWritingDirection = .leftToRight
+        case .rightToLeft:
+            paragraphStyle.alignment = .right
+            paragraphStyle.baseWritingDirection = .rightToLeft
+        }
+        for (index, line) in layout.lines.enumerated() {
+            let attributedText = NSAttributedString(
+                string: line.text,
+                attributes: [
+                    .font: font,
+                    .foregroundColor: textColor,
+                    .paragraphStyle: paragraphStyle
+                ]
+            )
+            let drawRect = NSRect(
+                x: bounds.minX + line.indent,
+                y: bounds.minY + CGFloat(index) * layout.lineHeight,
+                width: max(1, bounds.width - line.indent),
+                height: layout.lineHeight
+            )
+            attributedText.draw(with: drawRect, options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
+        }
+
+        if let keycapFrame = layout.keycapHintFrame {
+            drawKeycap(keycapFrame.offsetBy(dx: -layout.panelFrame.minX, dy: -layout.panelFrame.minY))
+        }
+    }
+
+    private func drawKeycap(_ rect: NSRect) {
+        let path = NSBezierPath(roundedRect: rect, xRadius: 4, yRadius: 4)
+        NSColor.separatorColor.withAlphaComponent(0.25).setFill()
+        path.fill()
+        let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.alignment = .center
         let attributedText = NSAttributedString(
-            string: text,
+            string: "Tab",
             attributes: [
-                .font: font,
-                .foregroundColor: textColor,
+                .font: NSFont.systemFont(ofSize: max(9, font.pointSize - 3), weight: .medium),
+                .foregroundColor: textColor.withAlphaComponent(0.8),
                 .paragraphStyle: paragraphStyle
             ]
         )
-        let textSize = attributedText.size()
-        let drawRect = NSRect(
-            x: bounds.minX,
-            y: bounds.minY,
-            width: bounds.width,
-            height: min(bounds.height, ceil(textSize.height) + 2)
+        attributedText.draw(
+            with: rect.insetBy(dx: 2, dy: 1),
+            options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine]
         )
-        attributedText.draw(with: drawRect, options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
     }
 }
 

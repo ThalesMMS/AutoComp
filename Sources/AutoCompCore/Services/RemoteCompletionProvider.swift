@@ -36,9 +36,68 @@ public enum BackendConnectivityIssue: Equatable, Sendable {
             return "Remote backend request failed: \(message)"
         }
     }
+
+    public var statusReason: String {
+        switch self {
+        case .missingAPIKey:
+            return "Configuration"
+        case .invalidEndpoint:
+            return "Invalid endpoint"
+        case .offline, .transport:
+            return "Connection error"
+        case .localNetworkDenied:
+            return "Local Network"
+        case .unauthorized:
+            return "Unauthorized"
+        case .timeout:
+            return "Timeout"
+        case .httpStatus(let statusCode):
+            return "HTTP \(statusCode)"
+        case .malformedResponse:
+            return "Malformed response"
+        case .emptyResponse:
+            return "Empty response"
+        }
+    }
+
+    public var logValue: String {
+        switch self {
+        case .missingAPIKey:
+            return "missing-api-key"
+        case .invalidEndpoint:
+            return "invalid-endpoint"
+        case .offline:
+            return "offline"
+        case .localNetworkDenied:
+            return "local-network-denied"
+        case .unauthorized:
+            return "unauthorized"
+        case .timeout:
+            return "timeout"
+        case .httpStatus(let statusCode):
+            return "http-\(statusCode)"
+        case .malformedResponse:
+            return "malformed-response"
+        case .emptyResponse:
+            return "empty-response"
+        case .transport:
+            return "transport"
+        }
+    }
+
+    public var isTransientBackendFailure: Bool {
+        switch self {
+        case .offline, .localNetworkDenied, .timeout, .transport:
+            return true
+        case .httpStatus(let statusCode):
+            return (500..<600).contains(statusCode)
+        case .missingAPIKey, .invalidEndpoint, .unauthorized, .malformedResponse, .emptyResponse:
+            return false
+        }
+    }
 }
 
-public enum RemoteCompletionError: LocalizedError, Equatable {
+public enum RemoteCompletionError: LocalizedError, Equatable, Sendable {
     case invalidBaseURL(String)
     case missingAPIKey
     case badStatus(Int, String)
@@ -89,7 +148,7 @@ public struct RemoteCompletionConfiguration: Codable, Equatable, Sendable {
     }
 }
 
-public struct RemoteCompletionProvider: VisualContextAwareCompletionProvider {
+public struct RemoteCompletionProvider: ClipboardContextAwareCompletionProvider, MultipleCompletionProvider {
     public let configuration: RemoteCompletionConfiguration
     public let requestFactory: CompletionRequestFactory
     public var promptBuilder: PromptBuilder { requestFactory.promptBuilder }
@@ -126,6 +185,40 @@ public struct RemoteCompletionProvider: VisualContextAwareCompletionProvider {
         privacySettings: PrivacySettings,
         visualContext: VisualContextSnapshot?
     ) async throws -> Suggestion {
+        try await complete(
+            context: context,
+            privacySettings: privacySettings,
+            visualContext: visualContext,
+            clipboardContext: nil
+        )
+    }
+
+    public func complete(
+        context: TextContext,
+        privacySettings: PrivacySettings,
+        visualContext: VisualContextSnapshot?,
+        clipboardContext: ClipboardContextSnapshot?
+    ) async throws -> Suggestion {
+        let suggestions = try await complete(
+            context: context,
+            privacySettings: privacySettings,
+            visualContext: visualContext,
+            clipboardContext: clipboardContext,
+            options: CompletionOptions()
+        )
+        guard let suggestion = suggestions.first else {
+            throw RemoteCompletionError.emptyResponse
+        }
+        return suggestion
+    }
+
+    public func complete(
+        context: TextContext,
+        privacySettings: PrivacySettings,
+        visualContext: VisualContextSnapshot?,
+        clipboardContext: ClipboardContextSnapshot?,
+        options: CompletionOptions
+    ) async throws -> [Suggestion] {
         guard !configuration.apiKey.isEmpty else {
             throw RemoteCompletionError.missingAPIKey
         }
@@ -143,12 +236,14 @@ public struct RemoteCompletionProvider: VisualContextAwareCompletionProvider {
             for: context,
             configuration: configuration,
             privacySettings: privacySettings,
-            visualContext: visualContext
+            visualContext: visualContext,
+            clipboardContext: clipboardContext
         )
         request.httpBody = try JSONEncoder().encode(RemoteChatRequest(
             completionRequest: completionRequest,
+            suggestionCount: options.suggestionCount,
             messages: [
-                RemoteChatMessage(role: "system", content: "You are AutoComp, a low-latency autocomplete engine. Return only the user's likely next words. Do not explain."),
+                RemoteChatMessage(role: "system", content: systemPrompt(for: completionRequest.mode)),
                 RemoteChatMessage(role: "user", content: completionRequest.prompt)
             ]
         ))
@@ -175,26 +270,54 @@ public struct RemoteCompletionProvider: VisualContextAwareCompletionProvider {
         } catch {
             throw RemoteCompletionError.connectivity(.malformedResponse)
         }
-        let rawText = decoded.choices.first?.message.content ?? ""
-        let text = SuggestionTextNormalizer.normalize(
-            rawText: rawText,
-            precedingText: context.textBeforeCursor,
-            promptEchoCandidates: completionRequest.promptEchoCandidates
-        )
+        let suggestions = decoded.choices.compactMap { choice -> Suggestion? in
+            let rawText = choice.message.content ?? ""
+            let text = SuggestionTextNormalizer.normalize(
+                rawText: rawText,
+                request: completionRequest
+            )
+            guard !text.isEmpty else {
+                return nil
+            }
+            return Suggestion(
+                baseContextID: context.id,
+                visibleText: text,
+                rawText: rawText,
+                latencyMs: startedAt.duration(to: .now).milliseconds
+            )
+        }.deduplicatedByVisibleText()
 
-        guard !text.isEmpty else {
+        guard !suggestions.isEmpty else {
             throw RemoteCompletionError.emptyResponse
         }
 
-        return Suggestion(
-            baseContextID: context.id,
-            visibleText: text,
-            rawText: rawText,
-            latencyMs: startedAt.duration(to: .now).milliseconds
-        )
+        return suggestions
+    }
+
+    private func systemPrompt(for mode: CompletionRequestMode) -> String {
+        switch mode {
+        case .continuation:
+            return "You are AutoComp, a low-latency autocomplete engine. Return only the user's likely next words. Do not explain."
+        case .fillInMiddle:
+            return "You are AutoComp, a low-latency autocomplete engine. Fill the cursor gap and return only the text to insert. Do not repeat suffix text or explain."
+        }
     }
 
     private func endpointURL(baseURL: String) -> URL? {
+        RemoteEndpointBuilder.chatCompletionsURL(baseURL: baseURL)
+    }
+}
+
+enum RemoteEndpointBuilder {
+    static func chatCompletionsURL(baseURL: String) -> URL? {
+        endpointURL(baseURL: baseURL, leafPath: "chat/completions")
+    }
+
+    static func modelsURL(baseURL: String) -> URL? {
+        endpointURL(baseURL: baseURL, leafPath: "models")
+    }
+
+    private static func endpointURL(baseURL: String, leafPath: String) -> URL? {
         guard var components = URLComponents(string: baseURL) else {
             return nil
         }
@@ -204,18 +327,43 @@ public struct RemoteCompletionProvider: VisualContextAwareCompletionProvider {
             return nil
         }
 
-        let path = components.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        if path.isEmpty {
-            components.path = "/v1/chat/completions"
-        } else if !path.hasSuffix("chat/completions") {
-            components.path = "/" + path + "/v1/chat/completions"
-        }
+        let versionedPath = versionedBasePath(from: components.path)
+        components.path = "/" + [versionedPath, leafPath]
+            .filter { !$0.isEmpty }
+            .joined(separator: "/")
 
         return components.url
     }
+
+    private static func versionedBasePath(from path: String) -> String {
+        var parts = path
+            .split(separator: "/")
+            .map(String.init)
+
+        if Array(parts.suffix(2)) == ["chat", "completions"] {
+            parts.removeLast(2)
+        } else if parts.last == "models" {
+            parts.removeLast()
+        }
+
+        if parts.last.map(isVersionPathComponent) != true {
+            parts.append("v1")
+        }
+
+        return parts.joined(separator: "/")
+    }
+
+    private static func isVersionPathComponent(_ component: String) -> Bool {
+        guard component.first == "v",
+              component.count > 1 else {
+            return false
+        }
+
+        return component.dropFirst().allSatisfy(\.isNumber)
+    }
 }
 
-private enum BackendConnectivityClassifier {
+enum BackendConnectivityClassifier {
     static func issue(for error: URLError, endpoint: URL) -> BackendConnectivityIssue {
         if containsLocalNetworkDenial(error) {
             return .localNetworkDenied
@@ -287,13 +435,15 @@ private struct RemoteChatRequest: Codable {
     let messages: [RemoteChatMessage]
     let maxTokens: Int
     let temperature: Double
+    let n: Int?
     let chatTemplateKwargs: ChatTemplateKwargs
 
-    init(completionRequest: CompletionRequest, messages: [RemoteChatMessage]) {
+    init(completionRequest: CompletionRequest, suggestionCount: Int = 1, messages: [RemoteChatMessage]) {
         self.model = completionRequest.model
         self.messages = messages
         self.maxTokens = completionRequest.maxTokens
         self.temperature = completionRequest.temperature
+        self.n = suggestionCount > 1 ? suggestionCount : nil
         self.chatTemplateKwargs = ChatTemplateKwargs(enableThinking: false)
     }
 
@@ -302,6 +452,7 @@ private struct RemoteChatRequest: Codable {
         case messages
         case maxTokens = "max_tokens"
         case temperature
+        case n
         case chatTemplateKwargs = "chat_template_kwargs"
     }
 }
@@ -325,4 +476,20 @@ private struct RemoteChatResponse: Codable {
 
 private struct RemoteChatChoice: Codable {
     let message: RemoteChatMessage
+}
+
+private extension Array where Element == Suggestion {
+    func deduplicatedByVisibleText() -> [Suggestion] {
+        var seen: Set<String> = []
+        var result: [Suggestion] = []
+        for suggestion in self {
+            let key = suggestion.visibleText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard !key.isEmpty, !seen.contains(key) else {
+                continue
+            }
+            seen.insert(key)
+            result.append(suggestion)
+        }
+        return result
+    }
 }

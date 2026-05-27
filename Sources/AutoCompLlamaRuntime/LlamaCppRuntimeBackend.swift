@@ -2,22 +2,6 @@ import AutoCompCore
 import CLlamaBridge
 import Foundation
 
-public struct LlamaPromptCacheStats: Equatable, Sendable {
-    public let hits: UInt64
-    public let misses: UInt64
-    public let resets: UInt64
-    public let retainedPromptTokens: Int
-    public let contextTokens: UInt32
-
-    public static let empty = LlamaPromptCacheStats(
-        hits: 0,
-        misses: 0,
-        resets: 0,
-        retainedPromptTokens: 0,
-        contextTokens: 0
-    )
-}
-
 public final class LlamaCppRuntimeBackend: LocalLlamaRuntimeBackend, @unchecked Sendable {
     private let loadVocabularyOnly: Bool
     private let lock = NSLock()
@@ -42,6 +26,7 @@ public final class LlamaCppRuntimeBackend: LocalLlamaRuntimeBackend, @unchecked 
         guard FileManager.default.fileExists(atPath: configuration.modelPath) else {
             throw LocalLlamaError.modelNotFound(configuration.modelPath)
         }
+        try enforceRAMLimit(configuration: configuration)
 
         try lock.withLock {
             if !backendInitialized {
@@ -62,8 +47,11 @@ public final class LlamaCppRuntimeBackend: LocalLlamaRuntimeBackend, @unchecked 
     }
 
     public func generateCompletion(for request: CompletionRequest) async throws -> String {
-        try await Task.detached(priority: .userInitiated) { [self] in
-            try lock.withLock {
+        try Task.checkCancellation()
+        return try await Task.detached(priority: .userInitiated) { [self] in
+            try Task.checkCancellation()
+            return try lock.withLock {
+                try Task.checkCancellation()
                 guard let loadedModel else {
                     throw LocalLlamaError.runtimeUnavailable
                 }
@@ -81,19 +69,24 @@ public final class LlamaCppRuntimeBackend: LocalLlamaRuntimeBackend, @unchecked 
                 guard let generated else {
                     throw LocalLlamaError.generationFailed(String(cString: autocomp_llama_error_message(&error)))
                 }
+                try Task.checkCancellation()
                 defer { autocomp_llama_string_free(generated) }
                 return String(cString: generated)
             }
         }.value
     }
 
-    public func resetPromptCache() {
+    public func resetPromptCache() async {
         lock.withLock {
             guard let loadedModel else {
                 return
             }
             autocomp_llama_model_reset_cache(loadedModel)
         }
+    }
+
+    public func promptCacheStats() async -> LlamaPromptCacheStats {
+        cacheStats()
     }
 
     public func cacheStats() -> LlamaPromptCacheStats {
@@ -128,5 +121,23 @@ public final class LlamaCppRuntimeBackend: LocalLlamaRuntimeBackend, @unchecked 
         }
         autocomp_llama_model_free(loadedModel)
         self.loadedModel = nil
+    }
+
+    private func enforceRAMLimit(configuration: LocalLlamaConfiguration) throws {
+        let attributes = try FileManager.default.attributesOfItem(atPath: configuration.modelPath)
+        let fileSize = (attributes[.size] as? NSNumber)?.uint64Value ?? 0
+        guard fileSize <= configuration.maxRAMBytes else {
+            let fileSizeLabel = ByteCountFormatter.string(
+                fromByteCount: Int64(min(fileSize, UInt64(Int64.max))),
+                countStyle: .memory
+            )
+            let limitLabel = ByteCountFormatter.string(
+                fromByteCount: Int64(min(configuration.maxRAMBytes, UInt64(Int64.max))),
+                countStyle: .memory
+            )
+            throw LocalLlamaError.loadFailed(
+                "Model file size \(fileSizeLabel) exceeds configured local memory limit \(limitLabel)."
+            )
+        }
     }
 }

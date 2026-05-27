@@ -10,12 +10,83 @@ struct AXFocusSnapshot {
     let focusedElement: AXUIElement
     let focusedElementID: String
     let domain: String?
+    let role: String?
+    let subrole: String?
     let isGoogleDocsElement: Bool
     let isCodexComposerElement: Bool
     let selectedRange: NSRange?
     let fullText: String?
     let textLength: Int
     let textBeforeCursor: String?
+    let textAfterCursor: String?
+    let selectedText: String?
+    let fullTextWindow: String?
+}
+
+struct FocusSnapshotTextWindow: Equatable {
+    let textAfterCursor: String?
+    let selectedText: String?
+    let fullTextWindow: String?
+
+    static func resolve(
+        textAfterCursor: String?,
+        selectedText: String?,
+        fullText: String?,
+        selectedRange: NSRange?,
+        maxTextAfterCursorCharacters: Int = 1_500,
+        maxSelectedTextCharacters: Int = 1_500,
+        maxFullTextWindowCharacters: Int = 3_000
+    ) -> FocusSnapshotTextWindow {
+        FocusSnapshotTextWindow(
+            textAfterCursor: limitedPrefix(
+                textAfterCursor,
+                maxCharacters: maxTextAfterCursorCharacters
+            ),
+            selectedText: limitedPrefix(
+                selectedText,
+                maxCharacters: maxSelectedTextCharacters
+            ),
+            fullTextWindow: textWindow(
+                fullText: fullText,
+                selectedRange: selectedRange,
+                maxCharacters: maxFullTextWindowCharacters
+            )
+        )
+    }
+
+    private static func limitedPrefix(_ text: String?, maxCharacters: Int) -> String? {
+        guard let text, !text.isEmpty, maxCharacters > 0 else {
+            return nil
+        }
+
+        let nsText = text as NSString
+        guard nsText.length > maxCharacters else {
+            return text
+        }
+        return nsText.substring(to: maxCharacters)
+    }
+
+    private static func textWindow(
+        fullText: String?,
+        selectedRange: NSRange?,
+        maxCharacters: Int
+    ) -> String? {
+        guard let fullText, !fullText.isEmpty, maxCharacters > 0 else {
+            return nil
+        }
+
+        let nsText = fullText as NSString
+        let textLength = nsText.length
+        guard textLength > maxCharacters else {
+            return fullText
+        }
+
+        let rawAnchor = selectedRange.map { $0.location + ($0.length / 2) } ?? textLength
+        let anchor = min(max(0, rawAnchor), textLength)
+        let preferredStart = max(0, anchor - (maxCharacters / 2))
+        let start = min(preferredStart, max(0, textLength - maxCharacters))
+        return nsText.substring(with: NSRange(location: start, length: maxCharacters))
+    }
 }
 
 struct FocusSnapshotResolver {
@@ -57,6 +128,8 @@ struct FocusSnapshotResolver {
             throw AXTextContextError.secureOrUnsupportedField
         }
 
+        let role = axHelper.stringAttribute(kAXRoleAttribute, from: focusedElement)
+        let subrole = axHelper.stringAttribute(kAXSubroleAttribute, from: focusedElement)
         let isGoogleDocsElement = isGoogleDocsEditingElement(focusedElement)
             || hasGoogleDocsDocumentAncestor(focusedElement)
         let isCodexComposerElement = isCodexComposerElement(focusedElement, bundleID: bundleID)
@@ -76,6 +149,21 @@ struct FocusSnapshotResolver {
             selectedRange: selectedRange,
             fullText: fullText
         )
+        let textWindow = FocusSnapshotTextWindow.resolve(
+            textAfterCursor: axHelper.textAfterCursor(
+                from: focusedElement,
+                selectedRange: selectedRange,
+                fullText: fullText,
+                textLength: textLength
+            ),
+            selectedText: axHelper.selectedText(
+                from: focusedElement,
+                selectedRange: selectedRange,
+                fullText: fullText
+            ),
+            fullText: fullText,
+            selectedRange: selectedRange
+        )
 
         return AXFocusSnapshot(
             app: AppIdentity(
@@ -88,12 +176,17 @@ struct FocusSnapshotResolver {
             focusedElement: focusedElement,
             focusedElementID: "\(app.processIdentifier)-\(Unmanaged.passUnretained(focusedElement).toOpaque())",
             domain: domain,
+            role: role,
+            subrole: subrole,
             isGoogleDocsElement: isGoogleDocsElement,
             isCodexComposerElement: isCodexComposerElement,
             selectedRange: selectedRange,
             fullText: fullText,
             textLength: textLength,
-            textBeforeCursor: textBeforeCursor
+            textBeforeCursor: textBeforeCursor,
+            textAfterCursor: textWindow.textAfterCursor,
+            selectedText: textWindow.selectedText,
+            fullTextWindow: textWindow.fullTextWindow
         )
     }
 

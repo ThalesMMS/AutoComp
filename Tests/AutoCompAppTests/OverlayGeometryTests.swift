@@ -1,4 +1,5 @@
 import ApplicationServices
+import AppKit
 import AutoCompCore
 @testable import AutoCompApp
 import XCTest
@@ -91,6 +92,26 @@ final class OverlayGeometryTests: XCTestCase {
         )
 
         XCTAssertEqual(gate, .rejected(reason: "disabled"))
+    }
+
+    func testSafeOverlayModeDisablesTextMarkerFallback() {
+        XCTAssertTrue(SafeOverlayMode.isEnabled(environment: ["AUTOCOMP_SAFE_OVERLAY_MODE": "1"]))
+        XCTAssertTrue(SafeOverlayMode.isEnabled(environment: [:], arguments: ["--safe-overlay-mode"]))
+        XCTAssertFalse(
+            AXTextMarkerGeometryFallback.isEnabledByDefault(
+                environment: ["AUTOCOMP_SAFE_OVERLAY_MODE": "1"],
+                arguments: []
+            )
+        )
+        XCTAssertEqual(
+            AXTextMarkerGeometryFallback.gate(
+                bundleID: "com.google.Chrome",
+                geometry: weakGeometry(),
+                isEnabled: true,
+                isSafeOverlayModeEnabled: true
+            ),
+            .rejected(reason: "safe-overlay-mode")
+        )
     }
 
     func testTextMarkerFallbackGateRejectsNativeAppsAndStrongGeometry() {
@@ -240,6 +261,288 @@ final class OverlayGeometryTests: XCTestCase {
         XCTAssertGreaterThan(layout?.origin.y ?? 0, 950)
     }
 
+    func testRightToLeftFineCaretAnchorsInlinePreviewBeforeCursor() {
+        let caretRect = CGRect(x: 200, y: 20, width: 2, height: 20)
+        let layout = InlinePreviewGeometry.layout(
+            context: textContext(
+                textBeforeCursor: "שלום עולם",
+                selectedRange: NSRange(location: 9, length: 0),
+                caretRect: caretRect,
+                focusedElementRect: CGRect(x: 0, y: 0, width: 500, height: 120)
+            ),
+            contentSize: NSSize(width: 120, height: 18),
+            screenFrame: CGRect(x: 0, y: 0, width: 1_000, height: 1_000),
+            visibleFrame: CGRect(x: 0, y: 0, width: 1_000, height: 1_000)
+        )
+
+        XCTAssertEqual(layout?.source, .exactAX)
+        XCTAssertLessThanOrEqual((layout?.origin.x ?? 0) + (layout?.size.width ?? 0), caretRect.minX - 1)
+    }
+
+    func testRightToLeftTextBoxEstimateDoesNotOverlapPreviousText() {
+        let focusedRect = CGRect(x: 120, y: 500, width: 520, height: 48)
+        let layout = InlinePreviewGeometry.layout(
+            context: textContext(
+                textBeforeCursor: "مرحبا بالعالم",
+                selectedRange: NSRange(location: 13, length: 0),
+                caretRect: nil,
+                focusedElementRect: focusedRect
+            ),
+            contentSize: NSSize(width: 160, height: 18),
+            screenFrame: CGRect(x: 0, y: 0, width: 1_000, height: 1_000),
+            visibleFrame: CGRect(x: 0, y: 0, width: 1_000, height: 1_000)
+        )
+
+        let convertedFocus = OverlayGeometry.appKitRect(
+            accessibilityRect: focusedRect,
+            screenFrame: CGRect(x: 0, y: 0, width: 1_000, height: 1_000)
+        )
+        XCTAssertEqual(layout?.source, .textBoxEstimate)
+        XCTAssertGreaterThanOrEqual(layout?.origin.x ?? 0, convertedFocus.minX)
+        XCTAssertLessThan((layout?.origin.x ?? 0) + (layout?.size.width ?? 0), convertedFocus.maxX)
+    }
+
+    func testInlineGhostTextLayoutWrapsLongTextInsideVisibleFrame() {
+        let layout = InlineGhostTextLayout.resolve(
+            text: "This is a long suggestion that should wrap before it leaves the visible screen frame",
+            font: NSFont.systemFont(ofSize: 14),
+            textDirection: .leftToRight,
+            anchorFrame: NSRect(x: 120, y: 500, width: 180, height: 18),
+            inputFrame: NSRect(x: 100, y: 460, width: 360, height: 80),
+            visibleFrame: NSRect(x: 0, y: 0, width: 420, height: 900),
+            observedCharacterWidth: 8,
+            geometryQuality: .directCaret,
+            maxPanelWidth: 220
+        )
+
+        XCTAssertGreaterThan(layout.lines.count, 1)
+        XCTAssertLessThanOrEqual(layout.panelFrame.maxX, 420)
+        XCTAssertTrue(layout.lines.allSatisfy { $0.width <= layout.panelFrame.width })
+    }
+
+    func testInlineGhostTextLayoutExposesKeycapHintPositionWhenSpaceAllows() {
+        let layout = InlineGhostTextLayout.resolve(
+            text: "continue",
+            font: NSFont.systemFont(ofSize: 14),
+            textDirection: .leftToRight,
+            anchorFrame: NSRect(x: 120, y: 500, width: 180, height: 18),
+            inputFrame: NSRect(x: 100, y: 460, width: 360, height: 80),
+            visibleFrame: NSRect(x: 0, y: 0, width: 520, height: 900),
+            observedCharacterWidth: 8,
+            geometryQuality: .directCaret,
+            maxPanelWidth: 220
+        )
+
+        XCTAssertNotNil(layout.keycapHintFrame)
+        XCTAssertGreaterThan(layout.keycapHintFrame?.minX ?? 0, layout.panelFrame.minX)
+        XCTAssertLessThanOrEqual(layout.keycapHintFrame?.maxX ?? 0, layout.panelFrame.maxX)
+    }
+
+    func testInlineGhostTextLayoutUsesFollowingLineNearRightEdge() {
+        let layout = InlineGhostTextLayout.resolve(
+            text: "continue here",
+            font: NSFont.systemFont(ofSize: 14),
+            textDirection: .leftToRight,
+            anchorFrame: NSRect(x: 390, y: 500, width: 24, height: 18),
+            inputFrame: NSRect(x: 100, y: 460, width: 320, height: 80),
+            visibleFrame: NSRect(x: 0, y: 0, width: 420, height: 900),
+            observedCharacterWidth: 8,
+            geometryQuality: .directCaret,
+            maxPanelWidth: 220
+        )
+
+        XCTAssertEqual(layout.placementReason, .wrappedLine)
+        XCTAssertLessThan(layout.panelFrame.minX, 390)
+        XCTAssertLessThan(layout.panelFrame.minY, 500)
+    }
+
+    func testInlinePreviewResolutionCanAnchorWrappedGhostLayoutNearRightEdge() {
+        let visibleFrame = CGRect(x: 0, y: 0, width: 1_000, height: 1_000)
+        let resolution = InlinePreviewGeometry.resolve(
+            context: textContext(
+                selectedRange: NSRange(location: 12, length: 0),
+                caretRect: CGRect(x: 990, y: 500, width: 2, height: 20),
+                focusedElementRect: CGRect(x: 900, y: 450, width: 100, height: 100),
+                caretGeometryQuality: .directCaret
+            ),
+            contentSize: NSSize(width: 120, height: 18),
+            screenFrame: visibleFrame,
+            visibleFrame: visibleFrame,
+            allowsLineWrapPlacement: true
+        )
+
+        guard let anchor = resolution.layout else {
+            return XCTFail("Expected an edge anchor for wrapped ghost text placement")
+        }
+        XCTAssertEqual(anchor.source, InlinePreviewLayoutSource.exactAX)
+        XCTAssertGreaterThanOrEqual(anchor.origin.x, 993)
+        XCTAssertEqual(anchor.inputFrame, NSRect(x: 900, y: 450, width: 100, height: 100))
+
+        let ghostLayout = InlineGhostTextLayout.resolve(
+            text: "continue here",
+            font: NSFont.systemFont(ofSize: 14),
+            textDirection: .leftToRight,
+            anchorFrame: NSRect(origin: anchor.origin, size: anchor.size),
+            inputFrame: anchor.inputFrame,
+            visibleFrame: visibleFrame,
+            observedCharacterWidth: 8,
+            geometryQuality: .directCaret,
+            maxPanelWidth: 220
+        )
+        XCTAssertEqual(ghostLayout.placementReason, InlineGhostTextLayout.PlacementReason.wrappedLine)
+        XCTAssertLessThan(ghostLayout.panelFrame.minY, anchor.origin.y)
+        XCTAssertGreaterThanOrEqual(ghostLayout.panelFrame.minX, visibleFrame.minX)
+        XCTAssertLessThanOrEqual(ghostLayout.panelFrame.maxX, visibleFrame.maxX)
+    }
+
+    func testInlineGhostTextLayoutKeepsSecondaryScreenFrame() {
+        let visibleFrame = NSRect(x: 1_000, y: 0, width: 800, height: 900)
+        let layout = InlineGhostTextLayout.resolve(
+            text: "secondary display text",
+            font: NSFont.systemFont(ofSize: 14),
+            textDirection: .leftToRight,
+            anchorFrame: NSRect(x: 1_220, y: 500, width: 180, height: 18),
+            inputFrame: NSRect(x: 1_100, y: 460, width: 460, height: 80),
+            visibleFrame: visibleFrame,
+            observedCharacterWidth: 8,
+            geometryQuality: .directCaret
+        )
+
+        XCTAssertGreaterThanOrEqual(layout.panelFrame.minX, visibleFrame.minX)
+        XCTAssertLessThanOrEqual(layout.panelFrame.maxX, visibleFrame.maxX)
+    }
+
+    func testInlineGhostTextLayoutPositionsRightToLeftTextBeforeCaret() {
+        let anchor = NSRect(x: 300, y: 500, width: 120, height: 18)
+        let layout = InlineGhostTextLayout.resolve(
+            text: "שלום עולם חדש",
+            font: NSFont.systemFont(ofSize: 14),
+            textDirection: .rightToLeft,
+            anchorFrame: anchor,
+            inputFrame: NSRect(x: 100, y: 460, width: 360, height: 80),
+            visibleFrame: NSRect(x: 0, y: 0, width: 500, height: 900),
+            observedCharacterWidth: 8,
+            geometryQuality: .directCaret,
+            maxPanelWidth: 220
+        )
+
+        XCTAssertEqual(layout.placementReason, .rightToLeft)
+        XCTAssertLessThanOrEqual(layout.panelFrame.maxX, anchor.maxX)
+        XCTAssertTrue(layout.lines.allSatisfy { $0.indent >= 0 })
+    }
+
+    func testSimpleCaretPopupLayoutClampsToVisibleFrame() {
+        let visibleFrame = CGRect(x: 0, y: 0, width: 420, height: 320)
+        let layout = SimpleCaretPopupLayout.resolve(
+            text: "fallback suggestion",
+            context: textContext(
+                selectedRange: NSRange(location: 12, length: 0),
+                caretRect: CGRect(x: 410, y: 300, width: 2, height: 20),
+                focusedElementRect: CGRect(x: 300, y: 260, width: 120, height: 50)
+            ),
+            font: NSFont.systemFont(ofSize: 14),
+            screenFrame: visibleFrame,
+            visibleFrame: visibleFrame
+        )
+
+        XCTAssertNotNil(layout)
+        XCTAssertEqual(layout?.placementReason, .clampedToVisibleFrame)
+        XCTAssertGreaterThanOrEqual(layout?.panelFrame.minX ?? -1, visibleFrame.minX)
+        XCTAssertLessThanOrEqual(layout?.panelFrame.maxX ?? .greatestFiniteMagnitude, visibleFrame.maxX)
+        XCTAssertGreaterThanOrEqual(layout?.panelFrame.minY ?? -1, visibleFrame.minY)
+        XCTAssertLessThanOrEqual(layout?.panelFrame.maxY ?? .greatestFiniteMagnitude, visibleFrame.maxY)
+    }
+
+    func testSimpleCaretPopupLayoutRejectsSelection() {
+        let layout = SimpleCaretPopupLayout.resolve(
+            text: "fallback suggestion",
+            context: textContext(
+                selectedRange: NSRange(location: 12, length: 2),
+                caretRect: CGRect(x: 120, y: 200, width: 2, height: 20),
+                focusedElementRect: CGRect(x: 100, y: 160, width: 240, height: 60)
+            ),
+            font: NSFont.systemFont(ofSize: 14),
+            screenFrame: CGRect(x: 0, y: 0, width: 420, height: 320),
+            visibleFrame: CGRect(x: 0, y: 0, width: 420, height: 320)
+        )
+
+        XCTAssertNil(layout)
+    }
+
+    func testSimpleCaretPopupLayoutCanUseFocusedElementAnchor() {
+        let focusedFrame = CGRect(x: 120, y: 180, width: 240, height: 60)
+        let layout = SimpleCaretPopupLayout.resolve(
+            text: "fallback suggestion",
+            context: textContext(
+                selectedRange: NSRange(location: 12, length: 0),
+                caretRect: nil,
+                focusedElementRect: focusedFrame
+            ),
+            font: NSFont.systemFont(ofSize: 14),
+            screenFrame: CGRect(x: 0, y: 0, width: 500, height: 500),
+            visibleFrame: CGRect(x: 0, y: 0, width: 500, height: 500)
+        )
+
+        XCTAssertEqual(layout?.placementReason, .focusedElement)
+        XCTAssertEqual(layout?.anchorFrame, CGRect(x: 120, y: 260, width: 240, height: 60))
+    }
+
+    func testMultiSuggestionPopupLayoutClampsToVisibleFrame() {
+        let visibleFrame = CGRect(x: 0, y: 0, width: 420, height: 320)
+        let layout = MultiSuggestionPopupLayout.resolve(
+            suggestion: multiSuggestion(),
+            context: textContext(
+                selectedRange: NSRange(location: 12, length: 0),
+                caretRect: CGRect(x: 410, y: 300, width: 2, height: 20),
+                focusedElementRect: CGRect(x: 300, y: 260, width: 120, height: 50)
+            ),
+            font: NSFont.systemFont(ofSize: 14),
+            screenFrame: visibleFrame,
+            visibleFrame: visibleFrame
+        )
+
+        XCTAssertNotNil(layout)
+        XCTAssertEqual(layout?.placementReason, .clampedToVisibleFrame)
+        XCTAssertGreaterThanOrEqual(layout?.panelFrame.minX ?? -1, visibleFrame.minX)
+        XCTAssertLessThanOrEqual(layout?.panelFrame.maxX ?? .greatestFiniteMagnitude, visibleFrame.maxX)
+        XCTAssertGreaterThanOrEqual(layout?.panelFrame.minY ?? -1, visibleFrame.minY)
+        XCTAssertLessThanOrEqual(layout?.panelFrame.maxY ?? .greatestFiniteMagnitude, visibleFrame.maxY)
+    }
+
+    func testMultiSuggestionPopupLayoutRejectsSelection() {
+        let layout = MultiSuggestionPopupLayout.resolve(
+            suggestion: multiSuggestion(),
+            context: textContext(
+                selectedRange: NSRange(location: 12, length: 2),
+                caretRect: CGRect(x: 120, y: 200, width: 2, height: 20),
+                focusedElementRect: CGRect(x: 100, y: 160, width: 240, height: 60)
+            ),
+            font: NSFont.systemFont(ofSize: 14),
+            screenFrame: CGRect(x: 0, y: 0, width: 420, height: 320),
+            visibleFrame: CGRect(x: 0, y: 0, width: 420, height: 320)
+        )
+
+        XCTAssertNil(layout)
+    }
+
+    func testMultiSuggestionPopupLayoutCanUseFocusedElementAnchor() {
+        let focusedFrame = CGRect(x: 120, y: 180, width: 240, height: 60)
+        let layout = MultiSuggestionPopupLayout.resolve(
+            suggestion: multiSuggestion(),
+            context: textContext(
+                selectedRange: NSRange(location: 12, length: 0),
+                caretRect: nil,
+                focusedElementRect: focusedFrame
+            ),
+            font: NSFont.systemFont(ofSize: 14),
+            screenFrame: CGRect(x: 0, y: 0, width: 500, height: 500),
+            visibleFrame: CGRect(x: 0, y: 0, width: 500, height: 500)
+        )
+
+        XCTAssertEqual(layout?.placementReason, .focusedElement)
+        XCTAssertEqual(layout?.anchorFrame, CGRect(x: 120, y: 260, width: 240, height: 60))
+    }
+
     func testCollapsedGoogleDocsCaretStillAnchorsInlinePreview() {
         let layout = InlinePreviewGeometry.layout(
             context: textContext(
@@ -272,7 +575,7 @@ final class OverlayGeometryTests: XCTestCase {
             visibleFrame: CGRect(x: 0, y: 0, width: 1_000, height: 1_000)
         )
 
-        XCTAssertEqual(layout?.origin.x, 420)
+        XCTAssertEqual(layout?.origin.x, 422)
     }
 
     func testWideAccessibilityCaretCanUseLeadingInsertionPointAsLastFallback() {
@@ -287,7 +590,106 @@ final class OverlayGeometryTests: XCTestCase {
             visibleFrame: CGRect(x: 0, y: 0, width: 1_000, height: 1_000)
         )
 
-        XCTAssertEqual(layout?.origin.x, 421)
+        XCTAssertEqual(layout?.origin.x, 422)
+    }
+
+    func testOverlayGeometryValidatorNormalizesWideCollapsedCaret() {
+        let validation = overlayValidation(
+            for: textContext(
+                selectedRange: NSRange(location: 12, length: 0),
+                caretRect: CGRect(x: 420, y: 500, width: 120, height: 24),
+                focusedElementRect: CGRect(x: 300, y: 460, width: 300, height: 100)
+            )
+        )
+
+        XCTAssertEqual(validation.caretRect, CGRect(x: 420, y: 476, width: 1, height: 24))
+    }
+
+    func testOverlayGeometryValidatorRejectsCaretOutsideAllScreens() {
+        let validation = overlayValidation(
+            for: textContext(
+                selectedRange: NSRange(location: 12, length: 0),
+                caretRect: CGRect(x: 5_000, y: 5_000, width: 2, height: 20),
+                focusedElementRect: nil
+            )
+        )
+
+        XCTAssertNil(validation.caretRect)
+    }
+
+    func testOverlayGeometryValidatorRejectsCaretFarFromFocusedElement() {
+        let validation = overlayValidation(
+            for: textContext(
+                selectedRange: NSRange(location: 12, length: 0),
+                caretRect: CGRect(x: 900, y: 900, width: 2, height: 20),
+                focusedElementRect: CGRect(x: 100, y: 100, width: 300, height: 80)
+            )
+        )
+
+        XCTAssertNotNil(validation.focusedElementRect)
+        XCTAssertNil(validation.caretRect)
+    }
+
+    func testOverlayGeometryValidatorNormalizesRetinaPhysicalCoordinates() {
+        let validation = overlayValidation(
+            for: textContext(
+                selectedRange: NSRange(location: 12, length: 0),
+                caretRect: CGRect(x: 1_600, y: 960, width: 4, height: 36),
+                focusedElementRect: nil
+            )
+        )
+
+        XCTAssertEqual(validation.caretRect, CGRect(x: 800, y: 502, width: 2, height: 18))
+    }
+
+    func testOverlayGeometryValidatorAcceptsSecondaryScreenRect() {
+        let validation = overlayValidation(
+            for: textContext(
+                selectedRange: NSRange(location: 12, length: 0),
+                caretRect: CGRect(x: 1_220, y: 500, width: 2, height: 20),
+                focusedElementRect: nil
+            ),
+            screenFrames: [
+                CGRect(x: 0, y: 0, width: 1_000, height: 1_000),
+                CGRect(x: 1_000, y: 0, width: 1_000, height: 1_000)
+            ]
+        )
+
+        XCTAssertEqual(validation.caretRect, CGRect(x: 1_220, y: 480, width: 2, height: 20))
+    }
+
+    func testOverlayGeometryValidatorAppliesCaretQualityCaps() {
+        let weakValidation = overlayValidation(
+            for: textContext(
+                selectedRange: NSRange(location: 12, length: 0),
+                caretRect: CGRect(x: 300, y: 500, width: 2, height: 150),
+                focusedElementRect: nil,
+                caretGeometryQuality: .elementFrame
+            )
+        )
+        let directValidation = overlayValidation(
+            for: textContext(
+                selectedRange: NSRange(location: 12, length: 0),
+                caretRect: CGRect(x: 300, y: 500, width: 2, height: 150),
+                focusedElementRect: nil,
+                caretGeometryQuality: .directCaret
+            )
+        )
+
+        XCTAssertNil(weakValidation.caretRect)
+        XCTAssertEqual(directValidation.caretRect, CGRect(x: 300, y: 350, width: 2, height: 150))
+    }
+
+    func testOverlayGeometryValidatorRejectsFocusedFrameOutsideScreen() {
+        let validation = overlayValidation(
+            for: textContext(
+                selectedRange: NSRange(location: 12, length: 0),
+                caretRect: nil,
+                focusedElementRect: CGRect(x: 4_000, y: 4_000, width: 300, height: 80)
+            )
+        )
+
+        XCTAssertNil(validation.focusedElementRect)
     }
 
     func testInlinePreviewDoesNotFlipLeftWhenRightEdgeHasNoUsefulSpace() {
@@ -486,7 +888,8 @@ final class OverlayGeometryTests: XCTestCase {
         focusedElementRect: CGRect? = nil,
         previousGlyphRect: CGRect? = nil,
         nextGlyphRect: CGRect? = nil,
-        lineReferenceRect: CGRect? = nil
+        lineReferenceRect: CGRect? = nil,
+        caretGeometryQuality: CaretGeometryQuality = .directCaret
     ) -> TextContext {
         TextContext(
             app: app,
@@ -497,7 +900,32 @@ final class OverlayGeometryTests: XCTestCase {
             focusedElementRect: focusedElementRect,
             previousGlyphRect: previousGlyphRect,
             nextGlyphRect: nextGlyphRect,
-            lineReferenceRect: lineReferenceRect
+            lineReferenceRect: lineReferenceRect,
+            caretGeometryQuality: caretGeometryQuality
+        )
+    }
+
+    private func overlayValidation(
+        for context: TextContext,
+        screenFrames: [CGRect] = [CGRect(x: 0, y: 0, width: 1_000, height: 1_000)]
+    ) -> OverlayGeometryValidation {
+        OverlayGeometryValidator(
+            screenFrame: CGRect(x: 0, y: 0, width: 1_000, height: 1_000),
+            visibleFrame: CGRect(x: 0, y: 0, width: 1_000, height: 1_000),
+            screenFrames: screenFrames
+        ).validate(context: context)
+    }
+
+    private func multiSuggestion() -> Suggestion {
+        Suggestion(
+            baseContextID: UUID(),
+            visibleText: " first",
+            alternatives: [
+                SuggestionAlternative(visibleText: " first"),
+                SuggestionAlternative(visibleText: " second longer"),
+                SuggestionAlternative(visibleText: " third")
+            ],
+            latencyMs: 12
         )
     }
 
@@ -549,12 +977,17 @@ final class OverlayGeometryTests: XCTestCase {
             focusedElement: AXUIElementCreateSystemWide(),
             focusedElementID: "docs-field",
             domain: "docs.google.com",
+            role: "AXTextArea",
+            subrole: nil,
             isGoogleDocsElement: true,
             isCodexComposerElement: false,
             selectedRange: NSRange(location: (textBeforeCursor as NSString).length, length: 0),
             fullText: textBeforeCursor,
             textLength: (textBeforeCursor as NSString).length,
-            textBeforeCursor: textBeforeCursor
+            textBeforeCursor: textBeforeCursor,
+            textAfterCursor: nil,
+            selectedText: nil,
+            fullTextWindow: textBeforeCursor
         )
     }
 }

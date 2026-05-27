@@ -63,6 +63,10 @@ def candidate_sign_update_paths(explicit_path: str | None) -> list[Path]:
             derived_data.glob("*/SourcePackages/artifacts/**/Sparkle/bin/sign_update")
         )
 
+    local_cache = Path(".build/sparkle-release")
+    if local_cache.exists():
+        candidates.extend(local_cache.glob("**/bin/sign_update"))
+
     return candidates
 
 

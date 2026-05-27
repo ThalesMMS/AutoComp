@@ -11,6 +11,33 @@ final class SuggestionTextNormalizerTests: XCTestCase {
         XCTAssertEqual(normalized, "review this")
     }
 
+    func testRemovesMarkdownFenceWrapper() {
+        let normalized = SuggestionTextNormalizer.normalize(
+            rawText: "```text\nreview this\n```",
+            precedingText: "Can you "
+        )
+
+        XCTAssertEqual(normalized, "review this")
+    }
+
+    func testRemovesInlineBacktickWrapper() {
+        let normalized = SuggestionTextNormalizer.normalize(
+            rawText: "`review this`",
+            precedingText: "Can you "
+        )
+
+        XCTAssertEqual(normalized, "review this")
+    }
+
+    func testRemovesExplanatoryPreambleBeforeCompletion() {
+        let normalized = SuggestionTextNormalizer.normalize(
+            rawText: "Sure, here's the completion:\nreview this",
+            precedingText: "Can you "
+        )
+
+        XCTAssertEqual(normalized, "review this")
+    }
+
     func testRemovesPrecedingTextEchoAtStart() {
         let normalized = SuggestionTextNormalizer.normalize(
             rawText: "Can you review this",
@@ -111,5 +138,49 @@ final class SuggestionTextNormalizerTests: XCTestCase {
         )
 
         XCTAssertEqual(normalized, "finish")
+    }
+
+    func testRemovesSuffixEchoFromFillInMiddleCompletion() {
+        let normalized = SuggestionTextNormalizer.normalize(
+            rawText: "adiada para sexta-feira porque o prazo mudou.",
+            precedingText: "A reuniao foi ",
+            trailingText: " porque o prazo mudou."
+        )
+
+        XCTAssertEqual(normalized, "adiada para sexta-feira")
+    }
+
+    func testRemovesFillInMiddleMarkersBeforeCompletion() {
+        let normalized = SuggestionTextNormalizer.normalize(
+            rawText: "<|fim_middle|>\nadiada para sexta-feira",
+            precedingText: "A reuniao foi ",
+            trailingText: " porque o prazo mudou."
+        )
+
+        XCTAssertEqual(normalized, "adiada para sexta-feira")
+    }
+
+    func testRequestOverloadUsesPromptEchoCandidatesAndFimSuffix() {
+        let context = TextContext(
+            app: AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1),
+            focusedElementID: "field",
+            textBeforeCursor: "A reuniao foi ",
+            textAfterCursor: " porque o prazo mudou."
+        )
+        let request = CompletionRequestFactory().makeRequest(
+            for: context,
+            configuration: RemoteCompletionConfiguration(
+                baseURL: "http://127.0.0.1:8000",
+                apiKey: "test",
+                model: "default"
+            )
+        )
+
+        let normalized = SuggestionTextNormalizer.normalize(
+            rawText: "\(request.prompt)\n```text\nadiada para sexta-feira porque o prazo mudou.\n```",
+            request: request
+        )
+
+        XCTAssertEqual(normalized, "adiada para sexta-feira")
     }
 }

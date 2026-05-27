@@ -22,6 +22,9 @@ final class CompletionRequestFactoryTests: XCTestCase {
         XCTAssertEqual(request.model, "test-model")
         XCTAssertEqual(request.maxTokens, 12)
         XCTAssertEqual(request.temperature, 0.2)
+        XCTAssertEqual(request.mode, .continuation)
+        XCTAssertNil(request.truncatedTextAfterCursor)
+        XCTAssertFalse(request.fimSuffixInjected)
         XCTAssertTrue(request.prompt.contains("Text before cursor:\nCan you review"))
         XCTAssertEqual(request.promptEchoCandidates.first, request.prompt)
     }
@@ -42,6 +45,88 @@ final class CompletionRequestFactoryTests: XCTestCase {
         XCTAssertEqual(request.truncatedTextBeforeCursor, "6789")
         XCTAssertTrue(request.prompt.contains("Text before cursor:\n6789"))
         XCTAssertFalse(request.prompt.contains("Text before cursor:\n0123456789"))
+    }
+
+    func testRequestUsesFillInMiddleModeWhenSuffixIsUseful() {
+        let context = makeContext(
+            textBeforeCursor: "A reuniao foi ",
+            textAfterCursor: " porque o prazo mudou.",
+            fullTextWindow: "A reuniao foi  porque o prazo mudou."
+        )
+        let configuration = RemoteCompletionConfiguration(
+            baseURL: "http://127.0.0.1:8000",
+            apiKey: "test",
+            model: "test-model"
+        )
+
+        let request = CompletionRequestFactory().makeRequest(
+            for: context,
+            configuration: configuration
+        )
+
+        XCTAssertEqual(request.mode, .fillInMiddle)
+        XCTAssertEqual(request.truncatedTextAfterCursor, " porque o prazo mudou.")
+        XCTAssertEqual(request.truncatedFullTextWindow, "A reuniao foi  porque o prazo mudou.")
+        XCTAssertTrue(request.fimSuffixInjected)
+        XCTAssertTrue(request.prompt.contains("Request mode: fillInMiddle"))
+        XCTAssertTrue(request.prompt.contains("FIM suffix injected: true"))
+        XCTAssertTrue(request.prompt.contains("<|fim_prefix|>"))
+        XCTAssertTrue(request.prompt.contains("<|fim_suffix|>"))
+        XCTAssertTrue(request.prompt.contains("Text after cursor (suffix):\n porque o prazo mudou."))
+        XCTAssertTrue(request.promptEchoCandidates.contains(" porque o prazo mudou."))
+    }
+
+    func testRequestUsesFillInMiddleModeWhenSelectionIsUseful() {
+        let context = makeContext(
+            textBeforeCursor: "A reuniao foi ",
+            selectedText: "adiada",
+            fullTextWindow: "A reuniao foi adiada"
+        )
+        let configuration = RemoteCompletionConfiguration(
+            baseURL: "http://127.0.0.1:8000",
+            apiKey: "test",
+            model: "test-model"
+        )
+
+        let request = CompletionRequestFactory().makeRequest(
+            for: context,
+            configuration: configuration
+        )
+
+        XCTAssertEqual(request.mode, .fillInMiddle)
+        XCTAssertNil(request.truncatedTextAfterCursor)
+        XCTAssertEqual(request.truncatedSelectedText, "adiada")
+        XCTAssertFalse(request.fimSuffixInjected)
+        XCTAssertTrue(request.prompt.contains("Selected text to replace:\nadiada"))
+    }
+
+    func testRequestUsesSelectionReplacementWithSuffixContext() {
+        let context = makeContext(
+            textBeforeCursor: "A reuniao foi ",
+            textAfterCursor: " porque o prazo mudou.",
+            selectedText: "adiada",
+            fullTextWindow: "A reuniao foi adiada porque o prazo mudou."
+        )
+        let configuration = RemoteCompletionConfiguration(
+            baseURL: "http://127.0.0.1:8000",
+            apiKey: "test",
+            model: "test-model"
+        )
+
+        let request = CompletionRequestFactory().makeRequest(
+            for: context,
+            configuration: configuration
+        )
+
+        XCTAssertEqual(request.mode, .fillInMiddle)
+        XCTAssertEqual(request.truncatedTextBeforeCursor, "A reuniao foi ")
+        XCTAssertEqual(request.truncatedTextAfterCursor, " porque o prazo mudou.")
+        XCTAssertEqual(request.truncatedSelectedText, "adiada")
+        XCTAssertTrue(request.fimSuffixInjected)
+        XCTAssertTrue(request.prompt.contains("Text after cursor (suffix):\n porque o prazo mudou."))
+        XCTAssertTrue(request.prompt.contains("Selected text to replace:\nadiada"))
+        XCTAssertTrue(request.promptEchoCandidates.contains("adiada"))
+        XCTAssertTrue(request.promptEchoCandidates.contains(" porque o prazo mudou."))
     }
 
     func testRequestOmitsDisabledOptionalSources() {
@@ -109,7 +194,7 @@ final class CompletionRequestFactoryTests: XCTestCase {
         )
 
         XCTAssertNil(request.visualContext)
-        XCTAssertFalse(request.prompt.contains("Visual context:"))
+        XCTAssertFalse(request.prompt.contains("Visual context"))
         XCTAssertTrue(request.prompt.contains("Text before cursor:\nHello"))
     }
 
@@ -131,7 +216,8 @@ final class CompletionRequestFactoryTests: XCTestCase {
 
         XCTAssertEqual(request.visualContext, visualContext)
         XCTAssertEqual(request.allowedCaptureSources, Set([.accessibility, .screenOCR]))
-        XCTAssertTrue(request.prompt.contains("Visual context:\nThe visible document title is Budget Review."))
+        XCTAssertTrue(request.prompt.contains("Visual context (delimited):"))
+        XCTAssertTrue(request.prompt.contains("<visual_context>\nThe visible document title is Budget Review.\n</visual_context>"))
     }
 
     func testRequestDropsVisualContextWhenScreenContextDisabled() {
@@ -152,12 +238,90 @@ final class CompletionRequestFactoryTests: XCTestCase {
 
         XCTAssertNil(request.visualContext)
         XCTAssertEqual(request.allowedCaptureSources, Set([.accessibility]))
-        XCTAssertFalse(request.prompt.contains("Visual context:"))
+        XCTAssertFalse(request.prompt.contains("Visual context"))
         XCTAssertFalse(request.prompt.contains("Budget Review"))
+    }
+
+    func testRequestIncludesClipboardContextWhenAllowed() {
+        let context = makeContext(textBeforeCursor: "Please summarize the launch plan")
+        let clipboardContext = ClipboardContextSnapshot(
+            summary: "Launch plan\nUpdate onboarding",
+            status: .included,
+            captureSources: [.clipboard]
+        )
+        let configuration = RemoteCompletionConfiguration(
+            baseURL: "http://127.0.0.1:8000",
+            apiKey: "test",
+            model: "test-model"
+        )
+
+        let request = CompletionRequestFactory().makeRequest(
+            for: context,
+            configuration: configuration,
+            privacySettings: PrivacySettings(clipboardContextEnabled: true),
+            clipboardContext: clipboardContext
+        )
+
+        XCTAssertEqual(request.clipboardContext, clipboardContext)
+        XCTAssertTrue(request.allowedCaptureSources.contains(.clipboard))
+        XCTAssertTrue(request.prompt.contains("Clipboard context:\nLaunch plan\nUpdate onboarding"))
+    }
+
+    func testRequestOmitsClipboardContextWhenPrivacyOff() {
+        let context = makeContext(textBeforeCursor: "Please summarize the launch plan")
+        let clipboardContext = ClipboardContextSnapshot(
+            summary: "Launch plan\nUpdate onboarding",
+            status: .included,
+            captureSources: [.clipboard]
+        )
+        let configuration = RemoteCompletionConfiguration(
+            baseURL: "http://127.0.0.1:8000",
+            apiKey: "test",
+            model: "test-model"
+        )
+
+        let request = CompletionRequestFactory().makeRequest(
+            for: context,
+            configuration: configuration,
+            privacySettings: PrivacySettings(clipboardContextEnabled: false),
+            clipboardContext: clipboardContext
+        )
+
+        XCTAssertNil(request.clipboardContext)
+        XCTAssertFalse(request.allowedCaptureSources.contains(.clipboard))
+        XCTAssertFalse(request.prompt.contains("Clipboard context:"))
+        XCTAssertFalse(request.prompt.contains("Launch plan"))
+    }
+
+    func testRequestShowsClipboardOmissionReasonWithoutContent() {
+        let context = makeContext(textBeforeCursor: "Please summarize the launch plan")
+        let clipboardContext = ClipboardContextSnapshot(
+            summary: "",
+            status: .omittedNotRelevant,
+            captureSources: []
+        )
+        let configuration = RemoteCompletionConfiguration(
+            baseURL: "http://127.0.0.1:8000",
+            apiKey: "test",
+            model: "test-model"
+        )
+
+        let request = CompletionRequestFactory().makeRequest(
+            for: context,
+            configuration: configuration,
+            privacySettings: PrivacySettings(clipboardContextEnabled: true),
+            clipboardContext: clipboardContext
+        )
+
+        XCTAssertEqual(request.clipboardContext, clipboardContext)
+        XCTAssertTrue(request.prompt.contains("Clipboard context:\n[clipboard omitted: not relevant]"))
     }
 
     private func makeContext(
         textBeforeCursor: String,
+        textAfterCursor: String? = nil,
+        selectedText: String? = nil,
+        fullTextWindow: String? = nil,
         captureSources: Set<TextCaptureSource> = [.accessibility]
     ) -> TextContext {
         TextContext(
@@ -165,6 +329,9 @@ final class CompletionRequestFactoryTests: XCTestCase {
             domain: "example.com",
             focusedElementID: "field",
             textBeforeCursor: textBeforeCursor,
+            textAfterCursor: textAfterCursor,
+            selectedText: selectedText,
+            fullTextWindow: fullTextWindow,
             captureSources: captureSources
         )
     }

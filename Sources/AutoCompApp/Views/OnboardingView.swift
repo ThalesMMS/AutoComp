@@ -34,9 +34,9 @@ struct OnboardingView: View {
                 }
 
                 Button {
-                    permissions.openSettings(for: .accessibility)
+                    permissions.openSettings(for: nextIncompletePermission?.kind ?? .accessibility)
                 } label: {
-                    Label("Open Privacy Settings", systemImage: "gear")
+                    Label("Open Next Settings", systemImage: "gear")
                 }
 
                 if permissions.screenRecordingNeedsRelaunch {
@@ -68,6 +68,11 @@ struct OnboardingView: View {
         }
         .padding(28)
     }
+
+    private var nextIncompletePermission: PermissionPresentation? {
+        permissions.permissionPresentations.first { !$0.isComplete && $0.requirement == .required }
+            ?? permissions.permissionPresentations.first { !$0.isComplete }
+    }
 }
 
 private struct PermissionCard: View {
@@ -85,6 +90,12 @@ private struct PermissionCard: View {
                 Text(permission.title)
                     .font(.headline)
 
+                Text(permission.requirementTitle)
+                    .font(.caption.weight(.medium))
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(.quaternary, in: Capsule())
+
                 Spacer()
 
                 Text(permission.statusTitle)
@@ -93,6 +104,9 @@ private struct PermissionCard: View {
             }
 
             VStack(alignment: .leading, spacing: 3) {
+                Text(permission.requirementDetail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 Text("Reason")
                     .font(.caption.weight(.medium))
                 Text(permission.message)

@@ -12,7 +12,7 @@ final class InputSuppressionController {
     private var lastConsumedShortcutKeyCode: UInt16?
     private var lastConsumedShortcutEventTimestamp: CGEventTimestamp?
     private var suppressedKeyReleases: [UInt16: Date] = [:]
-    private var syntheticInputSuppressedUntil: Date = .distantPast
+    private var syntheticInputBudget = SyntheticInputBudget()
 
     init(
         shortcutGraceInterval: TimeInterval = 0.9,
@@ -44,6 +44,15 @@ final class InputSuppressionController {
         lock.unlock()
     }
 
+    func clearConsumedShortcut(keyCode: UInt16) {
+        lock.lock()
+        shortcutGraceUntil = .distantPast
+        lastConsumedShortcutKeyCode = nil
+        lastConsumedShortcutEventTimestamp = nil
+        suppressedKeyReleases[keyCode] = nil
+        lock.unlock()
+    }
+
     func reset() {
         lock.lock()
         suggestionActive = false
@@ -51,7 +60,7 @@ final class InputSuppressionController {
         lastConsumedShortcutKeyCode = nil
         lastConsumedShortcutEventTimestamp = nil
         suppressedKeyReleases = [:]
-        syntheticInputSuppressedUntil = .distantPast
+        syntheticInputBudget = SyntheticInputBudget()
         lock.unlock()
     }
 
@@ -88,27 +97,90 @@ final class InputSuppressionController {
         return true
     }
 
-    func recordSyntheticInput() {
+    func registerSyntheticInsertion(expectedKeyDownCount: Int, expectedKeyUpCount: Int) {
+        let keyDownCount = max(0, expectedKeyDownCount)
+        let keyUpCount = max(0, expectedKeyUpCount)
+        guard keyDownCount > 0 || keyUpCount > 0 else {
+            return
+        }
+
         lock.lock()
         let suppressUntil = now().addingTimeInterval(syntheticInputSuppressionInterval)
-        if suppressUntil > syntheticInputSuppressedUntil {
-            syntheticInputSuppressedUntil = suppressUntil
-        }
+        syntheticInputBudget.expectedKeyDownCount += keyDownCount
+        syntheticInputBudget.expectedKeyUpCount += keyUpCount
+        syntheticInputBudget.expiresAt = max(syntheticInputBudget.expiresAt, suppressUntil)
+        let remainingKeyDown = syntheticInputBudget.expectedKeyDownCount
+        let remainingKeyUp = syntheticInputBudget.expectedKeyUpCount
         lock.unlock()
+
+        GeometryDebug.log("synthetic-input registered keyDown=\(keyDownCount) keyUp=\(keyUpCount) remainingKeyDown=\(remainingKeyDown) remainingKeyUp=\(remainingKeyUp)")
     }
 
-    func shouldSuppressSyntheticInput(_ inputEvent: CapturedInputEvent) -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
+    func consumeIfSynthetic(event: CGEvent) -> Bool {
+        consumeIfSynthetic(type: event.type, event: event)
+    }
 
-        guard case .text = inputEvent,
-              now() <= syntheticInputSuppressedUntil else {
+    func consumeIfSynthetic(type: CGEventType, event: CGEvent) -> Bool {
+        guard type == .keyDown || type == .keyUp else {
             return false
         }
+
+        lock.lock()
+        let currentDate = now()
+        guard currentDate <= syntheticInputBudget.expiresAt else {
+            syntheticInputBudget = SyntheticInputBudget()
+            lock.unlock()
+            return false
+        }
+
+        var consumed = false
+        switch type {
+        case .keyDown where syntheticInputBudget.expectedKeyDownCount > 0:
+            syntheticInputBudget.expectedKeyDownCount -= 1
+            consumed = true
+        case .keyUp where syntheticInputBudget.expectedKeyUpCount > 0:
+            syntheticInputBudget.expectedKeyUpCount -= 1
+            consumed = true
+        default:
+            break
+        }
+
+        let remainingKeyDown = syntheticInputBudget.expectedKeyDownCount
+        let remainingKeyUp = syntheticInputBudget.expectedKeyUpCount
+        if remainingKeyDown == 0 && remainingKeyUp == 0 {
+            syntheticInputBudget = SyntheticInputBudget()
+        }
+        lock.unlock()
+
+        guard consumed else {
+            return false
+        }
+
+        let keyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
+        GeometryDebug.log("suppressed-synthetic-input type=\(type.debugName) keyCode=\(keyCode) remainingKeyDown=\(remainingKeyDown) remainingKeyUp=\(remainingKeyUp)")
         return true
     }
 
     private func pruneExpiredSuppressedKeyReleases(now: Date) {
         suppressedKeyReleases = suppressedKeyReleases.filter { $0.value >= now }
+    }
+}
+
+private struct SyntheticInputBudget {
+    var expectedKeyDownCount = 0
+    var expectedKeyUpCount = 0
+    var expiresAt: Date = .distantPast
+}
+
+private extension CGEventType {
+    var debugName: String {
+        switch self {
+        case .keyDown:
+            "keyDown"
+        case .keyUp:
+            "keyUp"
+        default:
+            "\(rawValue)"
+        }
     }
 }

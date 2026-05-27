@@ -4,6 +4,26 @@ import CoreGraphics
 import XCTest
 
 final class ContextGenerationTrackerTests: XCTestCase {
+    func testProducesStrictGenerationSignature() {
+        let tracker = ContextGenerationTracker()
+        let context = textContext(
+            focusedElementID: "field-a",
+            textBeforeCursor: "Please ",
+            selectedRange: NSRange(location: 7, length: 0),
+            focusedElementRect: CGRect(x: 200, y: 100, width: 600, height: 40),
+            caretRect: CGRect(x: 260, y: 110, width: 1, height: 18)
+        )
+
+        let signature: StrictGenerationSignature = tracker.signature(for: context)
+
+        XCTAssertEqual(signature.app, context.app)
+        XCTAssertEqual(signature.domain, context.domain)
+        XCTAssertEqual(signature.focusedElementID, "field-a")
+        XCTAssertEqual(signature.textBeforeCursor, "Please ")
+        XCTAssertEqual(signature.selectedRangeLocation, 7)
+        XCTAssertEqual(signature.selectedRangeLength, 0)
+    }
+
     func testMatchesWhenElementIDChangesButGeometryTextAndSelectionStayStable() {
         let tracker = ContextGenerationTracker()
         let requestedContext = textContext(
@@ -70,6 +90,86 @@ final class ContextGenerationTrackerTests: XCTestCase {
         )
 
         XCTAssertTrue(tracker.matches(liveContext, signature: tracker.signature(for: requestedContext)))
+    }
+
+    func testWebTrailingWhitespaceNormalizationKeepsGenerationFresh() {
+        let tracker = ContextGenerationTracker()
+        let requestedContext = textContext(
+            app: AppIdentity(bundleID: "com.google.Chrome", displayName: "Google Chrome", processID: 1),
+            domain: "docs.google.com",
+            focusedElementID: "docs-field-a",
+            textBeforeCursor: "Docs ",
+            selectedRange: NSRange(location: 5, length: 0),
+            focusedElementRect: CGRect(x: 450, y: 381, width: 626, height: 1),
+            caretRect: CGRect(x: 450, y: 381, width: 0, height: 17)
+        )
+        let liveContext = textContext(
+            app: AppIdentity(bundleID: "com.google.Chrome", displayName: "Google Chrome", processID: 1),
+            domain: "docs.google.com",
+            focusedElementID: "docs-field-b",
+            textBeforeCursor: "Docs",
+            selectedRange: NSRange(location: 4, length: 0),
+            focusedElementRect: CGRect(x: 450, y: 381, width: 626, height: 1),
+            caretRect: CGRect(x: 450, y: 381, width: 0, height: 17)
+        )
+
+        XCTAssertTrue(tracker.matches(liveContext, signature: tracker.signature(for: requestedContext)))
+    }
+
+    func testGoogleDocsScreenOCRFocusIdentityChurnKeepsGenerationFresh() {
+        let tracker = ContextGenerationTracker()
+        let requestedContext = textContext(
+            app: AppIdentity(bundleID: "com.google.Chrome", displayName: "Google Chrome", processID: 1),
+            domain: "docs.google.com",
+            focusedElementID: "77563-0x0000000c06d4c210",
+            textBeforeCursor: "sexta rodada setima rodada ",
+            selectedRange: NSRange(location: 27, length: 0),
+            focusedElementRect: CGRect(x: 430, y: 264, width: 626, height: 1),
+            caretRect: CGRect(x: 505, y: 278, width: 0, height: 17),
+            caretGeometryQuality: .screenOCR,
+            captureSources: [.accessibility, .screenOCR]
+        )
+        let liveContext = textContext(
+            app: AppIdentity(bundleID: "com.google.Chrome", displayName: "Google Chrome", processID: 1),
+            domain: "docs.google.com",
+            focusedElementID: "77563-0x0000000c06d4e100",
+            textBeforeCursor: "sexta rodada setima rodada ",
+            selectedRange: NSRange(location: 27, length: 0),
+            focusedElementRect: CGRect(x: 800, y: 640, width: 400, height: 12),
+            caretRect: CGRect(x: 900, y: 650, width: 0, height: 17),
+            caretGeometryQuality: .screenOCR,
+            captureSources: [.accessibility, .screenOCR]
+        )
+
+        XCTAssertTrue(tracker.matches(liveContext, signature: tracker.signature(for: requestedContext)))
+    }
+
+    func testNonGoogleDocsFocusIdentityChurnStillRejectsDifferentTarget() {
+        let tracker = ContextGenerationTracker()
+        let requestedContext = textContext(
+            app: AppIdentity(bundleID: "com.google.Chrome", displayName: "Google Chrome", processID: 1),
+            domain: "example.com",
+            focusedElementID: "field-a",
+            textBeforeCursor: "Example ",
+            selectedRange: NSRange(location: 8, length: 0),
+            focusedElementRect: CGRect(x: 100, y: 100, width: 300, height: 30),
+            caretRect: CGRect(x: 180, y: 106, width: 1, height: 18),
+            caretGeometryQuality: .screenOCR,
+            captureSources: [.accessibility, .screenOCR]
+        )
+        let liveContext = textContext(
+            app: AppIdentity(bundleID: "com.google.Chrome", displayName: "Google Chrome", processID: 1),
+            domain: "example.com",
+            focusedElementID: "field-b",
+            textBeforeCursor: "Example ",
+            selectedRange: NSRange(location: 8, length: 0),
+            focusedElementRect: CGRect(x: 100, y: 300, width: 300, height: 30),
+            caretRect: CGRect(x: 180, y: 306, width: 1, height: 18),
+            caretGeometryQuality: .screenOCR,
+            captureSources: [.accessibility, .screenOCR]
+        )
+
+        XCTAssertFalse(tracker.matches(liveContext, signature: tracker.signature(for: requestedContext)))
     }
 
     func testRejectsAppDomainTextAndSelectionChanges() {

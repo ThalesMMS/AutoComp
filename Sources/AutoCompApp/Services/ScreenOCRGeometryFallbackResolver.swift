@@ -5,14 +5,18 @@ import Vision
 
 final class ScreenOCRGeometryFallbackResolver: @unchecked Sendable {
     private let stateLock = NSLock()
-    private var lastStableContext: ScreenOCRGeometryFallback?
+    private var lastStableContext: ScreenOCRGeometryCandidate?
     private var lastRawText: String?
     private var repeatedRawTextCount = 0
 
     func resolve(searchRect: CGRect?, authoritativeText: String) async -> ScreenOCRGeometryFallback? {
-        guard CGPreflightScreenCaptureAccess(),
-              let screen = NSScreen.screens.first,
+        guard CGPreflightScreenCaptureAccess() else {
+            GeometryDebug.log("ax-fallback source=screenOCR-geometry status=screen-recording-off")
+            return nil
+        }
+        guard let screen = NSScreen.screens.first,
               let image = await captureScreenImage(in: screen.frame) else {
+            GeometryDebug.log("ax-fallback source=screenOCR-geometry status=screenshot-unavailable")
             return nil
         }
 
@@ -25,13 +29,14 @@ final class ScreenOCRGeometryFallbackResolver: @unchecked Sendable {
         do {
             try handler.perform([request])
         } catch {
+            GeometryDebug.log("ax-fallback source=screenOCR-geometry status=ocr-failed")
             return nil
         }
 
         let screenFrame = screen.frame
         let effectiveSearchRect = validatedSearchRect(searchRect, screenFrame: screenFrame)
         if let searchRect, effectiveSearchRect == nil {
-            GeometryDebug.log("ax-fallback source=screenOCR ignored-search-rect raw=\(searchRect)")
+            GeometryDebug.log("ax-fallback source=screenOCR-geometry ignored-search-rect raw=\(searchRect)")
         }
         let candidates = (request.results ?? []).compactMap { observation -> ScreenOCRLine? in
             guard let candidate = observation.topCandidates(1).first else {
@@ -87,13 +92,13 @@ final class ScreenOCRGeometryFallbackResolver: @unchecked Sendable {
             )
         )
 
-        let rawContext = ScreenOCRGeometryFallback(
+        let rawContext = ScreenOCRGeometryCandidate(
             textBeforeCursor: authoritativeText,
             focusedElementRect: focusedElementRect,
             caretRect: caretRect,
             previousGlyphRect: line.rect
         )
-        return stabilizedContext(rawContext)
+        return stabilizedContext(rawContext).fallback
     }
 
     private func validatedSearchRect(_ searchRect: CGRect?, screenFrame: CGRect) -> CGRect? {
@@ -225,7 +230,7 @@ final class ScreenOCRGeometryFallbackResolver: @unchecked Sendable {
             ?? text
     }
 
-    private func stabilizedContext(_ rawContext: ScreenOCRGeometryFallback) -> ScreenOCRGeometryFallback {
+    private func stabilizedContext(_ rawContext: ScreenOCRGeometryCandidate) -> ScreenOCRGeometryCandidate {
         stateLock.lock()
         defer { stateLock.unlock() }
 
@@ -271,7 +276,7 @@ final class ScreenOCRGeometryFallbackResolver: @unchecked Sendable {
         return stableContext.replacingGeometry(from: rawContext)
     }
 
-    private func isSameOCRLine(_ lhs: ScreenOCRGeometryFallback, _ rhs: ScreenOCRGeometryFallback) -> Bool {
+    private func isSameOCRLine(_ lhs: ScreenOCRGeometryCandidate, _ rhs: ScreenOCRGeometryCandidate) -> Bool {
         abs(lhs.caretRect.midX - rhs.caretRect.midX) <= 18
             && abs(lhs.caretRect.midY - rhs.caretRect.midY) <= 8
     }
@@ -371,13 +376,27 @@ final class ScreenOCRGeometryFallbackResolver: @unchecked Sendable {
 }
 
 struct ScreenOCRGeometryFallback {
+    let focusedElementRect: CGRect
+    let caretRect: CGRect
+    let previousGlyphRect: CGRect
+}
+
+private struct ScreenOCRGeometryCandidate {
     let textBeforeCursor: String
     let focusedElementRect: CGRect
     let caretRect: CGRect
     let previousGlyphRect: CGRect
 
-    func replacingTextBeforeCursor(_ textBeforeCursor: String) -> ScreenOCRGeometryFallback {
+    var fallback: ScreenOCRGeometryFallback {
         ScreenOCRGeometryFallback(
+            focusedElementRect: focusedElementRect,
+            caretRect: caretRect,
+            previousGlyphRect: previousGlyphRect
+        )
+    }
+
+    func replacingTextBeforeCursor(_ textBeforeCursor: String) -> ScreenOCRGeometryCandidate {
+        ScreenOCRGeometryCandidate(
             textBeforeCursor: textBeforeCursor,
             focusedElementRect: focusedElementRect,
             caretRect: caretRect,
@@ -385,8 +404,8 @@ struct ScreenOCRGeometryFallback {
         )
     }
 
-    func replacingGeometry(from other: ScreenOCRGeometryFallback) -> ScreenOCRGeometryFallback {
-        ScreenOCRGeometryFallback(
+    func replacingGeometry(from other: ScreenOCRGeometryCandidate) -> ScreenOCRGeometryCandidate {
+        ScreenOCRGeometryCandidate(
             textBeforeCursor: textBeforeCursor,
             focusedElementRect: other.focusedElementRect,
             caretRect: other.caretRect,

@@ -16,23 +16,35 @@ public struct CompletionRequestFactory: Sendable {
         for context: TextContext,
         configuration: RemoteCompletionConfiguration,
         privacySettings: PrivacySettings = PrivacySettings(),
-        visualContext: VisualContextSnapshot? = nil
+        visualContext: VisualContextSnapshot? = nil,
+        clipboardContext: ClipboardContextSnapshot? = nil
     ) -> CompletionRequest {
         let allowedVisualContext = allowedVisualContext(
             visualContext,
             privacySettings: privacySettings
         )
+        let allowedClipboardContext = allowedClipboardContext(
+            clipboardContext,
+            privacySettings: privacySettings
+        )
         let prompt = promptBuilder.prompt(
             for: context,
             privacySettings: privacySettings,
-            visualContext: allowedVisualContext
+            visualContext: allowedVisualContext,
+            clipboardContext: allowedClipboardContext
         )
-        let truncatedTextBeforeCursor = String(context.textBeforeCursor.suffix(promptBuilder.maxContextCharacters))
+        let requestMode = promptBuilder.mode(for: context)
+        let truncatedTextBeforeCursor = promptBuilder.truncatedTextBeforeCursor(for: context)
+        let truncatedTextAfterCursor = promptBuilder.truncatedTextAfterCursor(for: context)
+        let truncatedSelectedText = promptBuilder.truncatedSelectedText(for: context)
+        let truncatedFullTextWindow = promptBuilder.truncatedFullTextWindow(for: context)
         let allowedCaptureSources = allowedCaptureSources(
             from: context.captureSources,
             privacySettings: privacySettings
         ).union(
             allowedVisualContext?.captureSources ?? []
+        ).union(
+            allowedClipboardContext?.captureSources ?? []
         )
 
         return CompletionRequest(
@@ -40,14 +52,40 @@ public struct CompletionRequestFactory: Sendable {
             app: context.app,
             domain: context.domain,
             prompt: prompt,
+            mode: requestMode,
             truncatedTextBeforeCursor: truncatedTextBeforeCursor,
+            truncatedTextAfterCursor: truncatedTextAfterCursor,
+            truncatedSelectedText: truncatedSelectedText,
+            truncatedFullTextWindow: truncatedFullTextWindow,
+            fimSuffixInjected: requestMode == .fillInMiddle && truncatedTextAfterCursor != nil,
             allowedCaptureSources: allowedCaptureSources,
             model: configuration.model,
             maxTokens: configuration.maxTokens,
             temperature: temperature,
             visualContext: allowedVisualContext,
-            promptEchoCandidates: [prompt, truncatedTextBeforeCursor]
+            clipboardContext: allowedClipboardContext,
+            promptEchoCandidates: promptEchoCandidates(
+                prompt: prompt,
+                truncatedTextBeforeCursor: truncatedTextBeforeCursor,
+                truncatedTextAfterCursor: truncatedTextAfterCursor,
+                truncatedSelectedText: truncatedSelectedText,
+                clipboardSummary: allowedClipboardContext?.isIncluded == true
+                    ? allowedClipboardContext?.summary
+                    : nil
+            )
         )
+    }
+
+    private func promptEchoCandidates(
+        prompt: String,
+        truncatedTextBeforeCursor: String,
+        truncatedTextAfterCursor: String?,
+        truncatedSelectedText: String?,
+        clipboardSummary: String?
+    ) -> [String] {
+        [prompt, truncatedTextBeforeCursor, truncatedTextAfterCursor, truncatedSelectedText, clipboardSummary]
+            .compactMap { $0 }
+            .filter { !$0.isEmpty }
     }
 
     private func allowedCaptureSources(
@@ -56,7 +94,7 @@ public struct CompletionRequestFactory: Sendable {
     ) -> Set<TextCaptureSource> {
         Set(sources.filter { source in
             switch source {
-            case .accessibility:
+            case .accessibility, .keystrokeBufferLowTrust:
                 return true
             case .clipboard:
                 return privacySettings.clipboardContextEnabled
@@ -87,7 +125,18 @@ public struct CompletionRequestFactory: Sendable {
         return VisualContextSnapshot(
             summary: visualContext.summary,
             captureSources: allowedSources,
-            createdAt: visualContext.createdAt
+            createdAt: visualContext.createdAt,
+            stableFieldIdentity: visualContext.stableFieldIdentity
         )
+    }
+
+    private func allowedClipboardContext(
+        _ clipboardContext: ClipboardContextSnapshot?,
+        privacySettings: PrivacySettings
+    ) -> ClipboardContextSnapshot? {
+        guard privacySettings.clipboardContextEnabled else {
+            return nil
+        }
+        return clipboardContext
     }
 }

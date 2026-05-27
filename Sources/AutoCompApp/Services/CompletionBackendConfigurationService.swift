@@ -26,6 +26,13 @@ struct LocalLlamaDiagnostic: Equatable {
     var isUsable: Bool
 }
 
+struct AppleIntelligenceDiagnostic: Equatable {
+    var availabilityTitle: String
+    var requirementTitle: String
+    var fallbackTitle: String
+    var isUsable: Bool
+}
+
 struct CompletionBackendSettings: Equatable {
     var engineKind: CompletionEngineKind
     var remoteBaseURL: String
@@ -37,18 +44,20 @@ struct CompletionBackendSettings: Equatable {
     var localLastError: String?
     var fallbackToRemoteOnLocalFailure: Bool
     var fallbackToRemoteOnAppleIntelligenceFailure: Bool
+    var multiSuggestionEnabled: Bool
 
     init(
         engineKind: CompletionEngineKind = .remote,
         remoteBaseURL: String = "http://100.98.1.45:8000",
         remoteAPIKey: String = "",
-        remoteModel: String = "Qwen/Qwen3.6-35B-A3B",
+        remoteModel: String = "default",
         localModelPath: String = CompletionBackendSettings.defaultLocalModelPath,
         localMaxRAMBytes: UInt64 = 6_442_450_944,
         localRuntimeState: LocalLlamaRuntimeState = .unavailableInBuild,
         localLastError: String? = nil,
-        fallbackToRemoteOnLocalFailure: Bool = true,
-        fallbackToRemoteOnAppleIntelligenceFailure: Bool = true
+        fallbackToRemoteOnLocalFailure: Bool = false,
+        fallbackToRemoteOnAppleIntelligenceFailure: Bool = false,
+        multiSuggestionEnabled: Bool = true
     ) {
         self.engineKind = engineKind
         self.remoteBaseURL = remoteBaseURL
@@ -60,6 +69,7 @@ struct CompletionBackendSettings: Equatable {
         self.localLastError = localLastError
         self.fallbackToRemoteOnLocalFailure = fallbackToRemoteOnLocalFailure
         self.fallbackToRemoteOnAppleIntelligenceFailure = fallbackToRemoteOnAppleIntelligenceFailure
+        self.multiSuggestionEnabled = multiSuggestionEnabled
     }
 
     var summary: String {
@@ -73,9 +83,15 @@ struct CompletionBackendSettings: Equatable {
             }
             return "Local Llama backend unavailable: \(diagnostic.runtimeTitle); \(diagnostic.modelFileTitle)"
         case .appleIntelligence:
+            let diagnostic = appleIntelligenceDiagnostic()
+            if diagnostic.isUsable {
+                return fallbackToRemoteOnAppleIntelligenceFailure
+                    ? "Apple Intelligence backend available with remote fallback"
+                    : "Apple Intelligence backend available without fallback"
+            }
             return fallbackToRemoteOnAppleIntelligenceFailure
-                ? "Apple Intelligence backend with remote fallback"
-                : "Apple Intelligence backend without fallback"
+                ? "Apple Intelligence backend unavailable: \(diagnostic.requirementTitle); remote fallback enabled"
+                : "Apple Intelligence backend unavailable: \(diagnostic.requirementTitle); remote fallback disabled"
         }
     }
 
@@ -85,6 +101,57 @@ struct CompletionBackendSettings: Equatable {
             apiKey: remoteAPIKey,
             model: remoteModel
         )
+    }
+
+    var requestDestinationTitle: String {
+        switch engineKind {
+        case .remote:
+            return "Remote: \(remoteModel) at \(remoteBaseURL)"
+        case .localLlama:
+            let modelFileName = URL(fileURLWithPath: localModelPath).lastPathComponent
+            return "Local in-process: \(modelFileName.isEmpty ? localConfiguration.modelName : modelFileName)"
+        case .appleIntelligence:
+            return "Apple Intelligence on this Mac"
+        }
+    }
+
+    var dataLeavesDeviceTitle: String {
+        switch engineKind {
+        case .remote:
+            return "Yes, autocomplete text is sent to \(remoteBaseURL)."
+        case .localLlama:
+            return fallbackToRemoteOnLocalFailure
+                ? "Local first; text may be sent to \(remoteBaseURL) after a local failure."
+                : "No, local completion requests stay on this Mac."
+        case .appleIntelligence:
+            return fallbackToRemoteOnAppleIntelligenceFailure
+                ? "Apple first; text may be sent to \(remoteBaseURL) after an Apple Intelligence failure."
+                : "No remote endpoint while Apple Intelligence succeeds."
+        }
+    }
+
+    var remoteFallbackTitle: String {
+        switch engineKind {
+        case .remote:
+            return "Not applicable because the remote backend is selected."
+        case .localLlama:
+            return fallbackToRemoteOnLocalFailure ? "Enabled after local failure" : "Disabled"
+        case .appleIntelligence:
+            return fallbackToRemoteOnAppleIntelligenceFailure ? "Enabled after Apple Intelligence failure" : "Disabled"
+        }
+    }
+
+    var remoteFallbackWarning: String? {
+        switch engineKind {
+        case .remote:
+            return nil
+        case .localLlama where fallbackToRemoteOnLocalFailure:
+            return "Remote fallback is enabled: if local completion fails, autocomplete text may be sent to \(remoteBaseURL)."
+        case .appleIntelligence where fallbackToRemoteOnAppleIntelligenceFailure:
+            return "Remote fallback is enabled: if Apple Intelligence fails, autocomplete text may be sent to \(remoteBaseURL)."
+        case .localLlama, .appleIntelligence:
+            return nil
+        }
     }
 
     var localConfiguration: LocalLlamaConfiguration {
@@ -122,6 +189,19 @@ struct CompletionBackendSettings: Equatable {
         )
     }
 
+    func appleIntelligenceDiagnostic(
+        availability: AppleFoundationModelAvailability = SystemAppleFoundationModelBackend.availability()
+    ) -> AppleIntelligenceDiagnostic {
+        AppleIntelligenceDiagnostic(
+            availabilityTitle: availability.statusTitle,
+            requirementTitle: availability.detail,
+            fallbackTitle: fallbackToRemoteOnAppleIntelligenceFailure
+                ? "Remote fallback enabled"
+                : "Remote fallback disabled",
+            isUsable: availability.isAvailable
+        )
+    }
+
     static var defaultLocalModelPath: String {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("AutoComp", isDirectory: true)
@@ -133,33 +213,38 @@ struct CompletionBackendSettings: Equatable {
 
 struct CompletionBackendConfigurationService {
     private let defaults: UserDefaults
+    private let mirroredDefaults: [UserDefaults]
     private let keychainService: String
     private let keychainAccount: String
     private let defaultsPrefix = "completionBackend."
 
     init(
         defaults: UserDefaults = .standard,
+        mirroredDefaults: [UserDefaults]? = nil,
         keychainService: String = "com.autocomp.backend",
         keychainAccount: String = "remote-api-key"
     ) {
         self.defaults = defaults
+        self.mirroredDefaults = mirroredDefaults ?? Self.defaultMirroredDefaults(for: defaults)
         self.keychainService = keychainService
         self.keychainAccount = keychainAccount
     }
 
-    func load() -> CompletionBackendSettings {
+    func load(
+        localRuntimeState: LocalLlamaRuntimeState = CompletionBackendConfigurationService.localRuntimeState()
+    ) -> CompletionBackendSettings {
         let values = loadValues()
 
         return CompletionBackendSettings(
-            engineKind: CompletionEngineKind(rawValue: defaults.string(forKey: defaultsPrefix + "kind") ?? "") ?? .remote,
-            remoteBaseURL: defaults.string(forKey: defaultsPrefix + "remoteBaseURL")
+            engineKind: CompletionEngineKind(rawValue: string(forKey: defaultsPrefix + "kind") ?? "") ?? .remote,
+            remoteBaseURL: string(forKey: defaultsPrefix + "remoteBaseURL")
                 ?? values["AUTOCOMP_REMOTE_BASE_URL"]
                 ?? "http://100.98.1.45:8000",
             remoteAPIKey: loadRemoteAPIKey(defaultValue: values["AUTOCOMP_REMOTE_API_KEY"] ?? ""),
-            remoteModel: defaults.string(forKey: defaultsPrefix + "remoteModel")
+            remoteModel: string(forKey: defaultsPrefix + "remoteModel")
                 ?? values["AUTOCOMP_REMOTE_MODEL"]
-                ?? "Qwen/Qwen3.6-35B-A3B",
-            localModelPath: defaults.string(forKey: defaultsPrefix + "localModelPath")
+                ?? "default",
+            localModelPath: string(forKey: defaultsPrefix + "localModelPath")
                 ?? values["AUTOCOMP_LOCAL_MODEL_PATH"]
                 ?? CompletionBackendSettings.defaultLocalModelPath,
             localMaxRAMBytes: loadUInt64(
@@ -167,39 +252,54 @@ struct CompletionBackendConfigurationService {
                 environmentValue: values["AUTOCOMP_LOCAL_MAX_RAM_BYTES"],
                 defaultValue: 6_442_450_944
             ),
-            localRuntimeState: .unavailableInBuild,
-            localLastError: defaults.string(forKey: defaultsPrefix + "localLastError"),
+            localRuntimeState: localRuntimeState,
+            localLastError: string(forKey: defaultsPrefix + "localLastError"),
             fallbackToRemoteOnLocalFailure: loadBool(
                 key: defaultsPrefix + "fallbackToRemoteOnLocalFailure",
                 environmentValue: values["AUTOCOMP_LOCAL_FALLBACK_TO_REMOTE"],
-                defaultValue: true
+                defaultValue: false
             ),
             fallbackToRemoteOnAppleIntelligenceFailure: loadBool(
                 key: defaultsPrefix + "fallbackToRemoteOnAppleIntelligenceFailure",
                 environmentValue: values["AUTOCOMP_APPLE_INTELLIGENCE_FALLBACK_TO_REMOTE"],
+                defaultValue: false
+            ),
+            multiSuggestionEnabled: loadBool(
+                key: defaultsPrefix + "multiSuggestionEnabled",
+                environmentValue: values["AUTOCOMP_MULTI_SUGGESTION_ENABLED"],
                 defaultValue: true
             )
         )
     }
 
+    static func localRuntimeState() -> LocalLlamaRuntimeState {
+        #if canImport(AutoCompLlamaRuntime)
+        return .available
+        #else
+        return .unavailableInBuild
+        #endif
+    }
+
     func save(_ settings: CompletionBackendSettings) {
-        defaults.set(settings.engineKind.rawValue, forKey: defaultsPrefix + "kind")
-        defaults.set(settings.remoteBaseURL, forKey: defaultsPrefix + "remoteBaseURL")
-        defaults.set(settings.remoteModel, forKey: defaultsPrefix + "remoteModel")
-        defaults.set(settings.localModelPath, forKey: defaultsPrefix + "localModelPath")
-        defaults.set(settings.localMaxRAMBytes, forKey: defaultsPrefix + "localMaxRAMBytes")
+        set(settings.engineKind.rawValue, forKey: defaultsPrefix + "kind")
+        set(settings.remoteBaseURL, forKey: defaultsPrefix + "remoteBaseURL")
+        set(settings.remoteModel, forKey: defaultsPrefix + "remoteModel")
+        set(settings.localModelPath, forKey: defaultsPrefix + "localModelPath")
+        set(settings.localMaxRAMBytes, forKey: defaultsPrefix + "localMaxRAMBytes")
         if let localLastError = settings.localLastError, !localLastError.isEmpty {
-            defaults.set(localLastError, forKey: defaultsPrefix + "localLastError")
+            set(localLastError, forKey: defaultsPrefix + "localLastError")
         } else {
-            defaults.removeObject(forKey: defaultsPrefix + "localLastError")
+            removeObject(forKey: defaultsPrefix + "localLastError")
         }
-        defaults.set(settings.fallbackToRemoteOnLocalFailure, forKey: defaultsPrefix + "fallbackToRemoteOnLocalFailure")
-        defaults.set(settings.fallbackToRemoteOnAppleIntelligenceFailure, forKey: defaultsPrefix + "fallbackToRemoteOnAppleIntelligenceFailure")
+        set(settings.fallbackToRemoteOnLocalFailure, forKey: defaultsPrefix + "fallbackToRemoteOnLocalFailure")
+        set(settings.fallbackToRemoteOnAppleIntelligenceFailure, forKey: defaultsPrefix + "fallbackToRemoteOnAppleIntelligenceFailure")
+        set(settings.multiSuggestionEnabled, forKey: defaultsPrefix + "multiSuggestionEnabled")
+        synchronize()
         saveRemoteAPIKey(settings.remoteAPIKey)
     }
 
     private func loadUInt64(key: String, environmentValue: String?, defaultValue: UInt64) -> UInt64 {
-        if let object = defaults.object(forKey: key) as? NSNumber {
+        if let object = object(forKey: key) as? NSNumber {
             return object.uint64Value
         }
 
@@ -212,8 +312,8 @@ struct CompletionBackendConfigurationService {
     }
 
     private func loadBool(key: String, environmentValue: String?, defaultValue: Bool) -> Bool {
-        if defaults.object(forKey: key) != nil {
-            return defaults.bool(forKey: key)
+        if object(forKey: key) != nil {
+            return bool(forKey: key)
         }
 
         if let environmentValue {
@@ -228,6 +328,57 @@ struct CompletionBackendConfigurationService {
         }
 
         return defaultValue
+    }
+
+    private var readableDefaults: [UserDefaults] {
+        [defaults] + mirroredDefaults
+    }
+
+    private var writableDefaults: [UserDefaults] {
+        [defaults] + mirroredDefaults
+    }
+
+    private func string(forKey key: String) -> String? {
+        readableDefaults.lazy.compactMap { $0.string(forKey: key) }.first
+    }
+
+    private func object(forKey key: String) -> Any? {
+        readableDefaults.lazy.compactMap { $0.object(forKey: key) }.first
+    }
+
+    private func bool(forKey key: String) -> Bool {
+        readableDefaults.first { $0.object(forKey: key) != nil }?.bool(forKey: key) ?? false
+    }
+
+    private func set(_ value: Any?, forKey key: String) {
+        for defaults in writableDefaults {
+            defaults.set(value, forKey: key)
+        }
+    }
+
+    private func removeObject(forKey key: String) {
+        for defaults in writableDefaults {
+            defaults.removeObject(forKey: key)
+        }
+    }
+
+    private func synchronize() {
+        for defaults in writableDefaults {
+            defaults.synchronize()
+        }
+    }
+
+    private static func defaultMirroredDefaults(for defaults: UserDefaults) -> [UserDefaults] {
+        guard defaults === UserDefaults.standard else {
+            return []
+        }
+
+        return [
+            UserDefaults(suiteName: "com.autocomp.AutoComp"),
+            UserDefaults(suiteName: "AutoComp")
+        ]
+        .compactMap(\.self)
+        .filter { $0 !== defaults }
     }
 
     private func loadRemoteAPIKey(defaultValue: String) -> String {

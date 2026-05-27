@@ -4,13 +4,23 @@ import Foundation
 public enum SuggestionEligibilitySkipReason: String, Codable, CaseIterable, Sendable {
     case compatibility = "compatibility"
     case emptyContext = "empty-context"
+    case inputSourceNonASCII = "input-source-non-ascii"
+    case imeCompositionActive = "ime-composition-active"
+    case selectionActive = "selection-active"
     case sentenceComplete = "sentence-complete"
     case unchangedContext = "unchanged-context"
     case awaitingSpaceTrigger = "awaiting-space-trigger"
+    case manualOnlyWaitingForTrigger = "manual-only-waiting-for-trigger"
 }
 
 public enum SuggestionEligibilityTriggerReason: String, Codable, CaseIterable, Sendable {
+    case manual = "manual"
     case recentSpaceKey = "recent-space-key"
+}
+
+public enum SuggestionEligibilityInvocation: String, Codable, CaseIterable, Sendable {
+    case automatic
+    case manual
 }
 
 public enum SuggestionEligibilityLogKind: Equatable, Sendable {
@@ -88,6 +98,8 @@ public struct SuggestionEligibilityEvaluator: Sendable {
         previousContext: TextContext?,
         compatibilityDecision: CompatibilityDecision,
         lastSuggestionTriggerKeyAt: Date,
+        invocation: SuggestionEligibilityInvocation = .automatic,
+        inputMethodState: InputMethodState = .asciiCompatible,
         now: Date = Date()
     ) -> SuggestionEligibilityDecision {
         let trimmed = context.textBeforeCursor.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -106,6 +118,49 @@ public struct SuggestionEligibilityEvaluator: Sendable {
                 context: context,
                 statusMessage: statusMessage,
                 compatibilityDecision: compatibilityDecision
+            )
+        }
+
+        guard invocation == .manual || compatibilityDecision.allowsAutomaticSuggestions else {
+            return skip(
+                .manualOnlyWaitingForTrigger,
+                context: context,
+                statusMessage: "Manual-only waiting for trigger",
+                compatibilityDecision: compatibilityDecision
+            )
+        }
+
+        guard !inputMethodState.isComposingText else {
+            return skip(
+                .imeCompositionActive,
+                context: context,
+                statusMessage: "IME composition active"
+            )
+        }
+
+        guard invocation == .manual || inputMethodState.isASCIICompatible else {
+            return skip(
+                .inputSourceNonASCII,
+                context: context,
+                statusMessage: "IME: non-ASCII"
+            )
+        }
+
+        guard invocation == .manual || !hasActiveSelection(context) else {
+            return skip(
+                .selectionActive,
+                context: context,
+                statusMessage: "Selection active"
+            )
+        }
+
+        if invocation == .manual {
+            return SuggestionEligibilityDecision(
+                outcome: .eligible,
+                logs: [
+                    eligibleLog(context: context),
+                    triggerLog(.manual, context: context)
+                ]
             )
         }
 
@@ -136,15 +191,14 @@ public struct SuggestionEligibilityEvaluator: Sendable {
             return SuggestionEligibilityDecision(outcome: .eligible, logs: logs)
         }
 
+        if let previousContext,
+           isDelayedGoogleDocsTextProgression(context, from: previousContext) {
+            return SuggestionEligibilityDecision(outcome: .eligible, logs: logs)
+        }
+
         let hasRecentTriggerKey = now.timeIntervalSince(lastSuggestionTriggerKeyAt) <= suggestionTriggerKeyGraceInterval
         if hasRecentTriggerKey {
-            logs.append(
-                SuggestionEligibilityLogData(
-                    kind: .trigger(.recentSpaceKey),
-                    appDisplayName: context.app.displayName,
-                    bundleID: context.app.bundleID
-                )
-            )
+            logs.append(triggerLog(.recentSpaceKey, context: context))
             return SuggestionEligibilityDecision(outcome: .eligible, logs: logs)
         }
 
@@ -183,6 +237,17 @@ public struct SuggestionEligibilityEvaluator: Sendable {
         )
     }
 
+    private func triggerLog(
+        _ reason: SuggestionEligibilityTriggerReason,
+        context: TextContext
+    ) -> SuggestionEligibilityLogData {
+        SuggestionEligibilityLogData(
+            kind: .trigger(reason),
+            appDisplayName: context.app.displayName,
+            bundleID: context.app.bundleID
+        )
+    }
+
     private func skipLog(
         _ reason: SuggestionEligibilitySkipReason,
         context: TextContext,
@@ -205,6 +270,11 @@ public struct SuggestionEligibilityEvaluator: Sendable {
         return CharacterSet.whitespacesAndNewlines.contains(lastScalar)
     }
 
+    private func hasActiveSelection(_ context: TextContext) -> Bool {
+        (context.selectedRange?.length ?? 0) > 0
+            || context.selectedText?.isEmpty == false
+    }
+
     private func isSameInteractionTarget(_ context: TextContext, as previousContext: TextContext) -> Bool {
         guard context.app == previousContext.app,
               context.domain == previousContext.domain else {
@@ -225,6 +295,33 @@ public struct SuggestionEligibilityEvaluator: Sendable {
             context.focusedElementRect,
             previousContext.focusedElementRect
         )
+    }
+
+    private func isDelayedGoogleDocsTextProgression(
+        _ context: TextContext,
+        from previousContext: TextContext
+    ) -> Bool {
+        guard context.domain == previousContext.domain,
+              context.domain?.contains("docs.google.com") == true,
+              isGoogleDocsCapableBrowser(context.app.bundleID),
+              isGoogleDocsCapableBrowser(previousContext.app.bundleID),
+              context.textBeforeCursor != previousContext.textBeforeCursor,
+              context.textBeforeCursor.count > previousContext.textBeforeCursor.count else {
+            return false
+        }
+
+        return true
+    }
+
+    private func isGoogleDocsCapableBrowser(_ bundleID: String) -> Bool {
+        [
+            "com.apple.Safari",
+            "com.google.Chrome",
+            "com.brave.Browser",
+            "com.microsoft.edgemac",
+            "company.thebrowser.Browser",
+            "company.thebrowser.dia"
+        ].contains(bundleID)
     }
 
     private func approximatelySameRect(_ lhs: CGRect?, _ rhs: CGRect?) -> Bool {

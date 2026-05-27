@@ -1,147 +1,256 @@
-import AppKit
 import AutoCompCore
+import CoreGraphics
 import Foundation
-import ScreenCaptureKit
-import Vision
 
-struct VisualTextObservation: Equatable, Sendable {
-    let text: String
-    let captureSource: TextCaptureSource
-
-    init(text: String, captureSource: TextCaptureSource = .screenOCR) {
-        self.text = text
-        self.captureSource = captureSource
-    }
-}
-
-protocol VisualTextCapturing: Sendable {
-    func captureVisibleText() async -> [VisualTextObservation]
-}
-
-final class VisualContextCoordinator: VisualContextProvider, @unchecked Sendable {
+final class VisualContextCoordinator: StableFieldVisualContextProvider, VisualContextSessionClearing, @unchecked Sendable {
     private let privacyStore: PrivacySettingsStore
     private let visualTextCapturer: any VisualTextCapturing
+    private let visualContextSummarizer: any VisualContextSummarizing
     private let screenCaptureAllowed: () -> Bool
-    private let maxSummaryCharacters: Int
+    private let sessionTTL: TimeInterval
+    private let now: () -> Date
+    private let lock = NSLock()
+    private var activeSession: VisualContextSession?
 
     init(
         privacyStore: PrivacySettingsStore,
-        visualTextCapturer: any VisualTextCapturing = ScreenOCRVisualTextCapturer(),
+        visualTextCapturer: any VisualTextCapturing = VisualContextOCRCapturer(),
+        visualContextSummarizer: (any VisualContextSummarizing)? = nil,
         screenCaptureAllowed: @escaping () -> Bool = { CGPreflightScreenCaptureAccess() },
-        maxSummaryCharacters: Int = 700
+        maxSummaryCharacters: Int = 700,
+        maxSummaryLines: Int = 12,
+        sessionTTL: TimeInterval = 5,
+        now: @escaping () -> Date = { Date() }
     ) {
         self.privacyStore = privacyStore
         self.visualTextCapturer = visualTextCapturer
+        self.visualContextSummarizer = visualContextSummarizer ?? VisualContextSummarizer(
+            maxCharacters: maxSummaryCharacters,
+            maxLines: maxSummaryLines
+        )
         self.screenCaptureAllowed = screenCaptureAllowed
-        self.maxSummaryCharacters = max(80, maxSummaryCharacters)
+        self.sessionTTL = max(0.25, sessionTTL)
+        self.now = now
     }
 
     func currentVisualContext() async -> VisualContextSnapshot? {
+        await currentVisualContext(for: nil)
+    }
+
+    func currentVisualContext(for stableFieldIdentity: StableFieldIdentity?) async -> VisualContextSnapshot? {
         let settings = privacyStore.load()
-        guard settings.screenContextEnabled,
-              screenCaptureAllowed() else {
+        guard settings.screenContextEnabled else {
+            recordFailure(
+                for: stableFieldIdentity,
+                statusMessage: "Visual context disabled by privacy settings",
+                logStatus: "disabled-by-privacy"
+            )
             return nil
+        }
+
+        guard screenCaptureAllowed() else {
+            recordFailure(
+                for: stableFieldIdentity,
+                statusMessage: "Screen Recording permission is off",
+                logStatus: "screen-recording-off"
+            )
+            return nil
+        }
+
+        if let stableFieldIdentity,
+           let cachedSnapshot = cachedReadySnapshot(for: stableFieldIdentity) {
+            GeometryDebug.log("visual-context status=ready-cache source=visualContext-ocr stableField=\(Self.debugDescription(for: stableFieldIdentity))")
+            return cachedSnapshot
+        }
+
+        if let stableFieldIdentity {
+            beginSession(for: stableFieldIdentity)
+        } else {
+            GeometryDebug.log("visual-context status=unscoped-capture source=visualContext-ocr")
         }
 
         let observations = await visualTextCapturer.captureVisibleText()
-        var sources = Set<TextCaptureSource>()
-        var seenLines = Set<String>()
-        var lines: [String] = []
-
-        for observation in observations {
-            let line = normalizedLine(observation.text)
-            guard !line.isEmpty,
-                  seenLines.insert(line).inserted else {
-                continue
-            }
-            sources.insert(observation.captureSource)
-            lines.append(line)
+        guard sessionStillCurrent(for: stableFieldIdentity) else {
+            return nil
         }
+        updateSession(for: stableFieldIdentity, state: .ocr)
 
-        let summary = limitedSummary(from: lines)
-        guard !summary.isEmpty,
-              !sources.isEmpty else {
+        guard sessionStillCurrent(for: stableFieldIdentity) else {
+            return nil
+        }
+        updateSession(for: stableFieldIdentity, state: .summarizing)
+
+        guard let visualSummary = visualContextSummarizer.summarize(observations) else {
+            recordFailure(
+                for: stableFieldIdentity,
+                statusMessage: "Visual context unavailable",
+                logStatus: "empty"
+            )
             return nil
         }
 
-        return VisualContextSnapshot(summary: summary, captureSources: sources)
-    }
-
-    private func normalizedLine(_ text: String) -> String {
-        text
-            .components(separatedBy: .whitespacesAndNewlines)
-            .filter { !$0.isEmpty }
-            .joined(separator: " ")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private func limitedSummary(from lines: [String]) -> String {
-        var summary = ""
-        for line in lines {
-            let separator = summary.isEmpty ? "" : "\n"
-            let candidate = summary + separator + line
-            if candidate.count > maxSummaryCharacters {
-                let remaining = maxSummaryCharacters - summary.count - separator.count
-                if remaining > 0 {
-                    summary += separator + String(line.prefix(remaining))
-                }
-                break
-            }
-            summary = candidate
+        if let stableFieldIdentity {
+            GeometryDebug.log("visual-context source=visualContext-ocr stableField=\(Self.debugDescription(for: stableFieldIdentity))")
         }
-        return summary.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-}
-
-struct ScreenOCRVisualTextCapturer: VisualTextCapturing {
-    func captureVisibleText() async -> [VisualTextObservation] {
-        guard CGPreflightScreenCaptureAccess(),
-              let screen = NSScreen.screens.first,
-              let image = await captureScreenImage(in: screen.frame) else {
-            return []
-        }
-
-        let request = VNRecognizeTextRequest()
-        request.recognitionLevel = .accurate
-        request.usesLanguageCorrection = false
-        request.recognitionLanguages = ["pt-BR", "en-US"]
-
-        let handler = VNImageRequestHandler(cgImage: image)
-        do {
-            try handler.perform([request])
-        } catch {
-            return []
-        }
-
-        return (request.results ?? [])
-            .sorted { lhs, rhs in
-                if abs(lhs.boundingBox.midY - rhs.boundingBox.midY) > 0.01 {
-                    return lhs.boundingBox.midY > rhs.boundingBox.midY
-                }
-                return lhs.boundingBox.minX < rhs.boundingBox.minX
-            }
-            .compactMap { observation in
-                guard observation.boundingBox.width >= 0.01,
-                      observation.boundingBox.height >= 0.005,
-                      let candidate = observation.topCandidates(1).first else {
-                    return nil
-                }
-                let text = candidate.string.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !text.isEmpty else {
-                    return nil
-                }
-                return VisualTextObservation(text: text, captureSource: .screenOCR)
-            }
-    }
-
-    private func captureScreenImage(in rect: CGRect) async -> CGImage? {
-        guard #available(macOS 15.2, *) else {
+        let snapshot = VisualContextSnapshot(
+            summary: visualSummary.text,
+            captureSources: visualSummary.captureSources,
+            stableFieldIdentity: stableFieldIdentity
+        )
+        guard markReady(snapshot, for: stableFieldIdentity) else {
             return nil
         }
-        return await withCheckedContinuation { continuation in
-            SCScreenshotManager.captureImage(in: rect) { image, _ in
-                continuation.resume(returning: image)
-            }
+        return snapshot
+    }
+
+    func currentSession() -> VisualContextSession? {
+        lock.lock()
+        defer { lock.unlock() }
+        return activeSession
+    }
+
+    func clearVisualContextSession() {
+        lock.lock()
+        let hadSession = activeSession != nil
+        activeSession = nil
+        lock.unlock()
+
+        if hadSession {
+            GeometryDebug.log("visual-context status=cleared reason=backend-switch")
         }
+    }
+
+    private func cachedReadySnapshot(for identity: StableFieldIdentity) -> VisualContextSnapshot? {
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard let activeSession,
+              activeSession.identity == identity,
+              activeSession.state == .ready,
+              let snapshot = activeSession.snapshot else {
+            return nil
+        }
+
+        guard now().timeIntervalSince(activeSession.updatedAt) <= sessionTTL else {
+            self.activeSession = VisualContextSession(
+                identity: identity,
+                state: .expired,
+                snapshot: activeSession.snapshot,
+                statusMessage: "Visual context expired",
+                updatedAt: now()
+            )
+            GeometryDebug.log("visual-context status=expired source=visualContext-ocr stableField=\(Self.debugDescription(for: identity))")
+            return nil
+        }
+
+        return snapshot
+    }
+
+    private func beginSession(for identity: StableFieldIdentity) {
+        lock.lock()
+        activeSession = VisualContextSession(
+            identity: identity,
+            state: .capturing,
+            statusMessage: "Capturing visual context",
+            updatedAt: now()
+        )
+        lock.unlock()
+        GeometryDebug.log("visual-context status=capturing source=visualContext-ocr stableField=\(Self.debugDescription(for: identity))")
+    }
+
+    private func updateSession(
+        for identity: StableFieldIdentity?,
+        state: VisualContextSessionState
+    ) {
+        guard let identity else {
+            return
+        }
+
+        lock.lock()
+        guard activeSession?.identity == identity else {
+            lock.unlock()
+            return
+        }
+        activeSession = VisualContextSession(
+            identity: identity,
+            state: state,
+            snapshot: activeSession?.snapshot,
+            statusMessage: state.rawValue,
+            updatedAt: now()
+        )
+        lock.unlock()
+        GeometryDebug.log("visual-context status=\(state.rawValue) source=visualContext-ocr stableField=\(Self.debugDescription(for: identity))")
+    }
+
+    private func markReady(_ snapshot: VisualContextSnapshot, for identity: StableFieldIdentity?) -> Bool {
+        guard let identity else {
+            GeometryDebug.log("visual-context status=ready-unscoped source=visualContext-ocr length=\(snapshot.summary.count)")
+            return true
+        }
+
+        lock.lock()
+        guard activeSession?.identity == identity else {
+            lock.unlock()
+            GeometryDebug.log("visual-context status=stale-field source=visualContext-ocr stableField=\(Self.debugDescription(for: identity))")
+            return false
+        }
+        activeSession = VisualContextSession(
+            identity: identity,
+            state: .ready,
+            snapshot: snapshot,
+            statusMessage: "Visual context ready",
+            updatedAt: now()
+        )
+        lock.unlock()
+        GeometryDebug.log("visual-context status=ready source=visualContext-ocr stableField=\(Self.debugDescription(for: identity)) length=\(snapshot.summary.count)")
+        return true
+    }
+
+    private func recordFailure(
+        for identity: StableFieldIdentity?,
+        statusMessage: String,
+        logStatus: String
+    ) {
+        guard let identity else {
+            GeometryDebug.log("visual-context status=\(logStatus) source=visualContext-ocr")
+            return
+        }
+
+        lock.lock()
+        activeSession = VisualContextSession(
+            identity: identity,
+            state: .failed,
+            statusMessage: statusMessage,
+            updatedAt: now()
+        )
+        lock.unlock()
+        GeometryDebug.log("visual-context status=\(logStatus) source=visualContext-ocr stableField=\(Self.debugDescription(for: identity))")
+    }
+
+    private func sessionStillCurrent(for identity: StableFieldIdentity?) -> Bool {
+        guard let identity else {
+            return true
+        }
+
+        lock.lock()
+        let isCurrent = activeSession?.identity == identity
+        lock.unlock()
+
+        if !isCurrent {
+            GeometryDebug.log("visual-context status=stale-field source=visualContext-ocr stableField=\(Self.debugDescription(for: identity))")
+        }
+        return isCurrent
+    }
+
+    private static func debugDescription(for identity: StableFieldIdentity) -> String {
+        [
+            "bundle=\(identity.bundleID)",
+            "pid=\(identity.processID)",
+            "domain=\(identity.domain ?? "nil")",
+            "role=\(identity.role ?? "nil")",
+            "subrole=\(identity.subrole ?? "nil")",
+            "frame=\(String(describing: identity.roundedFocusedElementFrame))",
+            "seq=\(String(describing: identity.focusChangeSequence))"
+        ].joined(separator: " ")
     }
 }

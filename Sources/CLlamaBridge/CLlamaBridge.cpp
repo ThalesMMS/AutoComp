@@ -7,6 +7,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <exception>
+
 typedef struct AutoCompLlamaSamplingSignature {
     int32_t max_tokens;
     float temperature;
@@ -43,6 +45,32 @@ static void autocomp_llama_set_error(AutoCompLlamaError *error, int code, const 
     snprintf(error->message, sizeof(error->message), "%s", message);
 }
 
+static void autocomp_llama_set_exception_error(
+    AutoCompLlamaError *error,
+    int code,
+    const char *operation,
+    const char *details
+) {
+    char message[512];
+    snprintf(
+        message,
+        sizeof(message),
+        "%s threw a C++ exception: %s",
+        operation,
+        details != NULL ? details : "unknown exception"
+    );
+    autocomp_llama_set_error(error, code, message);
+}
+
+static void autocomp_llama_set_std_exception_error(
+    AutoCompLlamaError *error,
+    int code,
+    const char *operation,
+    const std::exception &exception
+) {
+    autocomp_llama_set_exception_error(error, code, operation, exception.what());
+}
+
 static void autocomp_llama_discard_log(enum ggml_log_level level, const char *text, void *user_data) {
     (void)level;
     (void)text;
@@ -60,13 +88,12 @@ static AutoCompLlamaSamplingSignature autocomp_llama_sampling_signature(
     int32_t max_tokens,
     float temperature
 ) {
-    AutoCompLlamaSamplingSignature signature = {
-        .max_tokens = max_tokens,
-        .temperature = autocomp_llama_sanitized_temperature(temperature),
-        .top_k = autocomp_llama_top_k,
-        .top_p = autocomp_llama_top_p,
-        .seed = autocomp_llama_seed
-    };
+    AutoCompLlamaSamplingSignature signature;
+    signature.max_tokens = max_tokens;
+    signature.temperature = autocomp_llama_sanitized_temperature(temperature);
+    signature.top_k = autocomp_llama_top_k;
+    signature.top_p = autocomp_llama_top_p;
+    signature.seed = autocomp_llama_seed;
     return signature;
 }
 
@@ -118,47 +145,194 @@ static void autocomp_llama_clear_cache(AutoCompLlamaModel *model, bool count_res
 
 static struct llama_context *autocomp_llama_create_context(
     struct llama_model *model,
-    uint32_t context_tokens
+    uint32_t context_tokens,
+    AutoCompLlamaError *error
 ) {
-    struct llama_context_params context_params = llama_context_default_params();
-    context_params.n_ctx = context_tokens;
-    context_params.n_batch = context_tokens;
-    context_params.n_ubatch = context_tokens;
+    try {
+        struct llama_context_params context_params = llama_context_default_params();
+        context_params.n_ctx = context_tokens;
+        context_params.n_batch = context_tokens;
+        context_params.n_ubatch = context_tokens;
 
-    struct llama_context *ctx = llama_init_from_model(model, context_params);
-    if (ctx != NULL) {
-        llama_set_n_threads(ctx, 4, 4);
+        struct llama_context *ctx = llama_init_from_model(model, context_params);
+        if (ctx != NULL) {
+            llama_set_n_threads(ctx, 4, 4);
+        }
+        return ctx;
+    } catch (const std::exception &exception) {
+        autocomp_llama_set_std_exception_error(error, 12, "llama_init_from_model", exception);
+        return NULL;
+    } catch (...) {
+        autocomp_llama_set_exception_error(error, 12, "llama_init_from_model", NULL);
+        return NULL;
     }
-    return ctx;
 }
 
-static char *autocomp_llama_format_chat_prompt(struct llama_model *model, const char *prompt) {
-    const char *chat_template = llama_model_chat_template(model, NULL);
-    if (chat_template == NULL) {
-        return NULL;
+static char *autocomp_llama_format_chat_prompt(
+    struct llama_model *model,
+    const char *prompt,
+    bool *failed,
+    AutoCompLlamaError *error
+) {
+    if (failed != NULL) {
+        *failed = false;
     }
 
-    const llama_chat_message message = {
-        .role = "user",
-        .content = prompt
-    };
-    int32_t length = llama_chat_apply_template(chat_template, &message, 1, true, NULL, 0);
-    if (length <= 0) {
-        return NULL;
-    }
+    try {
+        const char *chat_template = llama_model_chat_template(model, NULL);
+        if (chat_template == NULL) {
+            return NULL;
+        }
 
-    char *buffer = (char *)malloc((size_t)length + 1);
-    if (buffer == NULL) {
-        return NULL;
-    }
+        llama_chat_message message;
+        message.role = "user";
+        message.content = prompt;
+        int32_t length = llama_chat_apply_template(chat_template, &message, 1, true, NULL, 0);
+        if (length <= 0) {
+            return NULL;
+        }
 
-    int32_t written = llama_chat_apply_template(chat_template, &message, 1, true, buffer, length + 1);
-    if (written < 0) {
-        free(buffer);
+        char *buffer = (char *)malloc((size_t)length + 1);
+        if (buffer == NULL) {
+            return NULL;
+        }
+
+        int32_t written = llama_chat_apply_template(chat_template, &message, 1, true, buffer, length + 1);
+        if (written < 0) {
+            free(buffer);
+            return NULL;
+        }
+        buffer[written] = '\0';
+        return buffer;
+    } catch (const std::exception &exception) {
+        if (failed != NULL) {
+            *failed = true;
+        }
+        autocomp_llama_set_std_exception_error(error, 21, "llama_chat_apply_template", exception);
+        return NULL;
+    } catch (...) {
+        if (failed != NULL) {
+            *failed = true;
+        }
+        autocomp_llama_set_exception_error(error, 21, "llama_chat_apply_template", NULL);
         return NULL;
     }
-    buffer[written] = '\0';
-    return buffer;
+}
+
+static struct llama_model *autocomp_llama_load_model_from_file(
+    const char *path,
+    struct llama_model_params params,
+    AutoCompLlamaError *error
+) {
+    try {
+        return llama_model_load_from_file(path, params);
+    } catch (const std::exception &exception) {
+        autocomp_llama_set_std_exception_error(error, 2, "llama_model_load_from_file", exception);
+        return NULL;
+    } catch (...) {
+        autocomp_llama_set_exception_error(error, 2, "llama_model_load_from_file", NULL);
+        return NULL;
+    }
+}
+
+static bool autocomp_llama_tokenize(
+    const struct llama_vocab *vocab,
+    const char *text,
+    int32_t text_len,
+    llama_token *tokens,
+    int32_t n_tokens_max,
+    bool add_special,
+    bool parse_special,
+    int32_t *result,
+    AutoCompLlamaError *error,
+    int code
+) {
+    try {
+        *result = llama_tokenize(
+            vocab,
+            text,
+            text_len,
+            tokens,
+            n_tokens_max,
+            add_special,
+            parse_special
+        );
+        return true;
+    } catch (const std::exception &exception) {
+        autocomp_llama_set_std_exception_error(error, code, "llama_tokenize", exception);
+        return false;
+    } catch (...) {
+        autocomp_llama_set_exception_error(error, code, "llama_tokenize", NULL);
+        return false;
+    }
+}
+
+static bool autocomp_llama_decode(
+    struct llama_context *ctx,
+    struct llama_batch batch,
+    int32_t *result,
+    AutoCompLlamaError *error,
+    int code
+) {
+    try {
+        *result = llama_decode(ctx, batch);
+        return true;
+    } catch (const std::exception &exception) {
+        autocomp_llama_set_std_exception_error(error, code, "llama_decode", exception);
+        return false;
+    } catch (...) {
+        autocomp_llama_set_exception_error(error, code, "llama_decode", NULL);
+        return false;
+    }
+}
+
+static bool autocomp_llama_sample(
+    struct llama_sampler *sampler,
+    struct llama_context *ctx,
+    llama_token *token,
+    AutoCompLlamaError *error
+) {
+    try {
+        *token = llama_sampler_sample(sampler, ctx, -1);
+        return true;
+    } catch (const std::exception &exception) {
+        autocomp_llama_set_std_exception_error(error, 22, "llama_sampler_sample", exception);
+        return false;
+    } catch (...) {
+        autocomp_llama_set_exception_error(error, 22, "llama_sampler_sample", NULL);
+        return false;
+    }
+}
+
+static bool autocomp_llama_detokenize(
+    const struct llama_vocab *vocab,
+    const llama_token *tokens,
+    int32_t n_tokens,
+    char *text,
+    int32_t text_len_max,
+    bool remove_special,
+    bool unparse_special,
+    int32_t *result,
+    AutoCompLlamaError *error
+) {
+    try {
+        *result = llama_detokenize(
+            vocab,
+            tokens,
+            n_tokens,
+            text,
+            text_len_max,
+            remove_special,
+            unparse_special
+        );
+        return true;
+    } catch (const std::exception &exception) {
+        autocomp_llama_set_std_exception_error(error, 23, "llama_detokenize", exception);
+        return false;
+    } catch (...) {
+        autocomp_llama_set_exception_error(error, 23, "llama_detokenize", NULL);
+        return false;
+    }
 }
 
 AutoCompLlamaCacheDecision autocomp_llama_prompt_cache_decision(
@@ -171,10 +345,9 @@ AutoCompLlamaCacheDecision autocomp_llama_prompt_cache_decision(
     int32_t max_tokens,
     float temperature
 ) {
-    AutoCompLlamaCacheDecision decision = {
-        .can_reuse = false,
-        .common_prefix_tokens = 0
-    };
+    AutoCompLlamaCacheDecision decision;
+    decision.can_reuse = false;
+    decision.common_prefix_tokens = 0;
 
     if (cached_tokens == NULL || prompt_tokens == NULL || cached_token_count <= 0 || prompt_token_count <= 0) {
         return decision;
@@ -226,9 +399,11 @@ AutoCompLlamaModel *autocomp_llama_model_load(
     params.n_gpu_layers = 0;
     params.use_mmap = true;
 
-    struct llama_model *raw_model = llama_model_load_from_file(path, params);
+    struct llama_model *raw_model = autocomp_llama_load_model_from_file(path, params, error);
     if (raw_model == NULL) {
-        autocomp_llama_set_error(error, 2, "llama_model_load_from_file returned nil.");
+        if (error == NULL || error->message[0] == '\0') {
+            autocomp_llama_set_error(error, 2, "llama_model_load_from_file returned nil.");
+        }
         return NULL;
     }
 
@@ -274,13 +449,41 @@ char *autocomp_llama_model_generate(
 
     AutoCompLlamaSamplingSignature sampling = autocomp_llama_sampling_signature(max_tokens, temperature);
     const struct llama_vocab *vocab = llama_model_get_vocab(model->raw);
-    char *formatted_prompt = autocomp_llama_format_chat_prompt(model->raw, prompt);
+    if (vocab == NULL) {
+        autocomp_llama_set_error(error, 7, "Model vocabulary is unavailable.");
+        return NULL;
+    }
+    bool prompt_format_failed = false;
+    char *formatted_prompt = autocomp_llama_format_chat_prompt(
+        model->raw,
+        prompt,
+        &prompt_format_failed,
+        error
+    );
+    if (prompt_format_failed) {
+        return NULL;
+    }
     const char *prompt_to_tokenize = formatted_prompt != NULL ? formatted_prompt : prompt;
     const int32_t prompt_length = (int32_t)strlen(prompt_to_tokenize);
-    int32_t prompt_token_count = llama_tokenize(vocab, prompt_to_tokenize, prompt_length, NULL, 0, true, true);
+    int32_t prompt_token_count = 0;
+    if (!autocomp_llama_tokenize(
+        vocab,
+        prompt_to_tokenize,
+        prompt_length,
+        NULL,
+        0,
+        true,
+        true,
+        &prompt_token_count,
+        error,
+        8
+    )) {
+        free(formatted_prompt);
+        return NULL;
+    }
     if (prompt_token_count == INT32_MIN) {
         free(formatted_prompt);
-        autocomp_llama_set_error(error, 7, "Prompt tokenization overflowed.");
+        autocomp_llama_set_error(error, 8, "Prompt tokenization overflowed.");
         return NULL;
     }
     if (prompt_token_count < 0) {
@@ -288,30 +491,38 @@ char *autocomp_llama_model_generate(
     }
     if (prompt_token_count <= 0) {
         free(formatted_prompt);
-        autocomp_llama_set_error(error, 8, "Prompt produced no tokens.");
+        autocomp_llama_set_error(error, 9, "Prompt produced no tokens.");
         return NULL;
     }
 
     llama_token *prompt_tokens = (llama_token *)malloc((size_t)prompt_token_count * sizeof(llama_token));
     if (prompt_tokens == NULL) {
         free(formatted_prompt);
-        autocomp_llama_set_error(error, 9, "Could not allocate prompt tokens.");
+        autocomp_llama_set_error(error, 10, "Could not allocate prompt tokens.");
         return NULL;
     }
 
-    int32_t tokenized = llama_tokenize(
+    int32_t tokenized = 0;
+    bool did_tokenize = autocomp_llama_tokenize(
         vocab,
         prompt_to_tokenize,
         prompt_length,
         prompt_tokens,
         prompt_token_count,
         true,
-        true
+        true,
+        &tokenized,
+        error,
+        11
     );
     free(formatted_prompt);
+    if (!did_tokenize) {
+        free(prompt_tokens);
+        return NULL;
+    }
     if (tokenized < 0) {
         free(prompt_tokens);
-        autocomp_llama_set_error(error, 10, "Prompt tokenization failed.");
+        autocomp_llama_set_error(error, 11, "Prompt tokenization failed.");
         return NULL;
     }
     prompt_token_count = tokenized;
@@ -325,7 +536,7 @@ char *autocomp_llama_model_generate(
     }
     if ((uint32_t)(prompt_token_count + max_tokens) >= context_tokens) {
         free(prompt_tokens);
-        autocomp_llama_set_error(error, 11, "Prompt is too large for the local generation context.");
+        autocomp_llama_set_error(error, 12, "Prompt is too large for the local generation context.");
         return NULL;
     }
 
@@ -360,10 +571,12 @@ char *autocomp_llama_model_generate(
     } else {
         model->cache_misses += 1;
         autocomp_llama_clear_cache(model, true);
-        ctx = autocomp_llama_create_context(model->raw, context_tokens);
+        ctx = autocomp_llama_create_context(model->raw, context_tokens, error);
         if (ctx == NULL) {
             free(prompt_tokens);
-            autocomp_llama_set_error(error, 12, "llama_init_from_model returned nil.");
+            if (error == NULL || error->message[0] == '\0') {
+                autocomp_llama_set_error(error, 13, "llama_init_from_model returned nil.");
+            }
             return NULL;
         }
         model->cached_ctx = ctx;
@@ -375,11 +588,16 @@ char *autocomp_llama_model_generate(
         prompt_tokens + decode_start,
         prompt_token_count - decode_start
     );
-    int32_t decode_result = llama_decode(ctx, prompt_batch);
+    int32_t decode_result = 0;
+    if (!autocomp_llama_decode(ctx, prompt_batch, &decode_result, error, 14)) {
+        free(prompt_tokens);
+        autocomp_llama_clear_cache(model, true);
+        return NULL;
+    }
     if (decode_result != 0) {
         free(prompt_tokens);
         autocomp_llama_clear_cache(model, true);
-        autocomp_llama_set_error(error, 13, "llama_decode failed for the prompt.");
+        autocomp_llama_set_error(error, 14, "llama_decode failed for the prompt.");
         return NULL;
     }
 
@@ -394,7 +612,7 @@ char *autocomp_llama_model_generate(
     struct llama_sampler *sampler = llama_sampler_chain_init(sampler_params);
     if (sampler == NULL) {
         autocomp_llama_clear_cache(model, true);
-        autocomp_llama_set_error(error, 14, "Could not initialize sampler.");
+        autocomp_llama_set_error(error, 15, "Could not initialize sampler.");
         return NULL;
     }
     llama_sampler_chain_add(sampler, llama_sampler_init_top_k(sampling.top_k));
@@ -406,13 +624,19 @@ char *autocomp_llama_model_generate(
     if (generated_tokens == NULL) {
         llama_sampler_free(sampler);
         autocomp_llama_clear_cache(model, true);
-        autocomp_llama_set_error(error, 15, "Could not allocate generated tokens.");
+        autocomp_llama_set_error(error, 16, "Could not allocate generated tokens.");
         return NULL;
     }
 
     int32_t generated_count = 0;
     for (int32_t i = 0; i < max_tokens; i++) {
-        llama_token token = llama_sampler_sample(sampler, ctx, -1);
+        llama_token token = 0;
+        if (!autocomp_llama_sample(sampler, ctx, &token, error)) {
+            free(generated_tokens);
+            llama_sampler_free(sampler);
+            autocomp_llama_clear_cache(model, true);
+            return NULL;
+        }
         if (llama_vocab_is_eog(vocab, token)) {
             break;
         }
@@ -426,12 +650,17 @@ char *autocomp_llama_model_generate(
         }
 
         struct llama_batch next_batch = llama_batch_get_one(&token, 1);
-        decode_result = llama_decode(ctx, next_batch);
+        if (!autocomp_llama_decode(ctx, next_batch, &decode_result, error, 17)) {
+            free(generated_tokens);
+            llama_sampler_free(sampler);
+            autocomp_llama_clear_cache(model, true);
+            return NULL;
+        }
         if (decode_result != 0) {
             free(generated_tokens);
             llama_sampler_free(sampler);
             autocomp_llama_clear_cache(model, true);
-            autocomp_llama_set_error(error, 16, "llama_decode failed during generation.");
+            autocomp_llama_set_error(error, 17, "llama_decode failed during generation.");
             return NULL;
         }
     }
@@ -440,7 +669,7 @@ char *autocomp_llama_model_generate(
         free(generated_tokens);
         llama_sampler_free(sampler);
         autocomp_llama_clear_cache(model, true);
-        autocomp_llama_set_error(error, 17, "Generation produced no tokens.");
+        autocomp_llama_set_error(error, 18, "Generation produced no tokens.");
         return NULL;
     }
 
@@ -450,19 +679,28 @@ char *autocomp_llama_model_generate(
         free(generated_tokens);
         llama_sampler_free(sampler);
         autocomp_llama_clear_cache(model, true);
-        autocomp_llama_set_error(error, 18, "Could not allocate generated text.");
+        autocomp_llama_set_error(error, 19, "Could not allocate generated text.");
         return NULL;
     }
 
-    int32_t detokenized = llama_detokenize(
+    int32_t detokenized = 0;
+    if (!autocomp_llama_detokenize(
         vocab,
         generated_tokens,
         generated_count,
         text,
         text_capacity,
         false,
-        false
-    );
+        false,
+        &detokenized,
+        error
+    )) {
+        free(text);
+        free(generated_tokens);
+        llama_sampler_free(sampler);
+        autocomp_llama_clear_cache(model, true);
+        return NULL;
+    }
     if (detokenized < 0) {
         text_capacity = -detokenized + 1;
         char *larger_text = (char *)realloc(text, (size_t)text_capacity);
@@ -471,19 +709,27 @@ char *autocomp_llama_model_generate(
             free(generated_tokens);
             llama_sampler_free(sampler);
             autocomp_llama_clear_cache(model, true);
-            autocomp_llama_set_error(error, 19, "Could not grow generated text buffer.");
+            autocomp_llama_set_error(error, 20, "Could not grow generated text buffer.");
             return NULL;
         }
         text = larger_text;
-        detokenized = llama_detokenize(
+        if (!autocomp_llama_detokenize(
             vocab,
             generated_tokens,
             generated_count,
             text,
             text_capacity,
             false,
-            false
-        );
+            false,
+            &detokenized,
+            error
+        )) {
+            free(text);
+            free(generated_tokens);
+            llama_sampler_free(sampler);
+            autocomp_llama_clear_cache(model, true);
+            return NULL;
+        }
     }
 
     free(generated_tokens);
@@ -492,7 +738,7 @@ char *autocomp_llama_model_generate(
     if (detokenized < 0) {
         free(text);
         autocomp_llama_clear_cache(model, true);
-        autocomp_llama_set_error(error, 20, "Could not detokenize generated text.");
+        autocomp_llama_set_error(error, 21, "Could not detokenize generated text.");
         return NULL;
     }
 
@@ -506,13 +752,12 @@ void autocomp_llama_model_reset_cache(AutoCompLlamaModel *model) {
 }
 
 AutoCompLlamaCacheStats autocomp_llama_model_cache_stats(const AutoCompLlamaModel *model) {
-    AutoCompLlamaCacheStats stats = {
-        .hits = 0,
-        .misses = 0,
-        .resets = 0,
-        .retained_prompt_tokens = 0,
-        .context_tokens = 0
-    };
+    AutoCompLlamaCacheStats stats;
+    stats.hits = 0;
+    stats.misses = 0;
+    stats.resets = 0;
+    stats.retained_prompt_tokens = 0;
+    stats.context_tokens = 0;
     if (model == NULL) {
         return stats;
     }

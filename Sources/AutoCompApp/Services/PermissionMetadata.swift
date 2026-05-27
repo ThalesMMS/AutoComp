@@ -3,6 +3,15 @@ import Foundation
 enum PermissionRequirement: Equatable {
     case required
     case optional
+
+    var title: String {
+        switch self {
+        case .required:
+            return "Required"
+        case .optional:
+            return "Optional"
+        }
+    }
 }
 
 enum PermissionStatus: Equatable {
@@ -66,11 +75,22 @@ enum PermissionKind: String, CaseIterable, Identifiable {
     var baselineDescription: String {
         switch self {
         case .accessibility:
-            return "Required to read the active text field and insert accepted completions."
+            return "Required to read the active text field, caret position, and focused app so suggestions attach to the right place."
         case .inputMonitoring:
-            return "Required for Tab and Right Shift acceptance."
+            return "Required to detect acceptance shortcuts globally, including Tab and Right Shift."
         case .screenRecording:
-            return "Optional; improves visible context capture."
+            return "Optional; only needed for visual context or OCR geometry fallback. Text-field autocomplete works without it."
+        }
+    }
+
+    var requirementDetail: String {
+        switch self {
+        case .accessibility:
+            return "Blocking for focused text capture and insertion."
+        case .inputMonitoring:
+            return "Blocking for global shortcut acceptance."
+        case .screenRecording:
+            return "Optional for visual context and OCR geometry fallback only."
         }
     }
 
@@ -133,6 +153,9 @@ struct PermissionPresentation: Identifiable, Equatable {
     let title: String
     let systemImage: String
     let requirement: PermissionRequirement
+    let requirementTitle: String
+    let requirementDetail: String
+    let settingsLocation: String
     let status: PermissionStatus
     let statusTitle: String
     let message: String
@@ -154,6 +177,9 @@ enum PermissionPresentationFactory {
             title: kind.title,
             systemImage: kind.systemImage,
             requirement: kind.requirement,
+            requirementTitle: kind.requirement.title,
+            requirementDetail: kind.requirementDetail,
+            settingsLocation: kind.settingsLocation,
             status: status,
             statusTitle: status.displayTitle(requirement: kind.requirement),
             message: message(for: kind, status: status, state: state),
@@ -226,6 +252,9 @@ enum PermissionPresentationFactory {
         case .enabled:
             return "No action needed."
         case .missing:
+            if kind == .screenRecording {
+                return "Open \(kind.settingsLocation) only if visual context or OCR geometry fallback is needed, enable AutoComp, then recheck."
+            }
             return "Open \(kind.settingsLocation), enable AutoComp, then recheck."
         case .requesting:
             return "Approve AutoComp in \(kind.settingsLocation), then recheck."

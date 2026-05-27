@@ -8,6 +8,10 @@ let hasLlamaRuntime = FileManager.default.fileExists(atPath: "/opt/homebrew/incl
     && FileManager.default.fileExists(atPath: "/opt/homebrew/lib/libllama.dylib")
     && FileManager.default.fileExists(atPath: "/opt/homebrew/lib/libggml.dylib")
 
+let appDependencies: [Target.Dependency] = hasLlamaRuntime
+    ? ["AutoCompCore", "AutoCompLlamaRuntime"]
+    : ["AutoCompCore"]
+
 var products: [Product] = [
     .executable(name: "AutoComp", targets: ["AutoCompApp"]),
     .library(name: "AutoCompCore", targets: ["AutoCompCore"])
@@ -16,7 +20,7 @@ var products: [Product] = [
 var targets: [Target] = [
     .executableTarget(
         name: "AutoCompApp",
-        dependencies: ["AutoCompCore"]
+        dependencies: appDependencies
     ),
     .target(
         name: "AutoCompCore"
@@ -45,6 +49,9 @@ if hasLlamaRuntime {
         .target(
             name: "CLlamaBridge",
             cSettings: [
+                .unsafeFlags(["-I/opt/homebrew/include"], .when(platforms: [.macOS]))
+            ],
+            cxxSettings: [
                 .unsafeFlags(["-I/opt/homebrew/include"], .when(platforms: [.macOS]))
             ],
             linkerSettings: [

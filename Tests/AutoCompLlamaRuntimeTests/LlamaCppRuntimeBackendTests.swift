@@ -32,6 +32,33 @@ final class LlamaCppRuntimeBackendTests: XCTestCase {
         }
     }
 
+    func testModelAboveConfiguredMemoryLimitFailsBeforeLoading() async throws {
+        let modelURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("oversized-\(UUID().uuidString).gguf")
+        try Data(repeating: 0, count: 16).write(to: modelURL)
+        defer {
+            try? FileManager.default.removeItem(at: modelURL)
+        }
+        let backend = LlamaCppRuntimeBackend(loadVocabularyOnly: true)
+
+        do {
+            try await backend.loadModel(
+                configuration: LocalLlamaConfiguration(
+                    modelPath: modelURL.path,
+                    maxRAMBytes: 4
+                )
+            )
+            XCTFail("Expected memory limit error")
+        } catch let error as LocalLlamaError {
+            guard case .loadFailed(let reason) = error else {
+                return XCTFail("Expected load failure, got \(error)")
+            }
+            XCTAssertTrue(reason.contains("exceeds configured local memory limit"))
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
     func testPromptCacheCompatibilityHitsForSharedPrefix() {
         let decision = LlamaPromptCacheCompatibility.evaluate(
             cachedTokens: [10, 11, 12],

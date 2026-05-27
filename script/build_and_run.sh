@@ -13,8 +13,12 @@ APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
 APP_CONTENTS="$APP_BUNDLE/Contents"
 APP_MACOS="$APP_CONTENTS/MacOS"
 APP_RESOURCES="$APP_CONTENTS/Resources"
+APP_FRAMEWORKS="$APP_CONTENTS/Frameworks"
 APP_BINARY="$APP_MACOS/$APP_NAME"
 INFO_PLIST="$APP_CONTENTS/Info.plist"
+SPARKLE_FEED_URL="${AUTOCOMP_SPARKLE_FEED_URL:-}"
+SPARKLE_PUBLIC_KEY="${AUTOCOMP_SPARKLE_PUBLIC_KEY:-}"
+SPARKLE_FRAMEWORK_PATH="${AUTOCOMP_SPARKLE_FRAMEWORK_PATH:-}"
 
 if [[ -z "$SIGNING_IDENTITY" ]]; then
   SIGNING_IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null | awk -F '"' '/Apple Development/ { print $2; exit }')"
@@ -36,9 +40,30 @@ swift build
 BUILD_BINARY="$(swift build --show-bin-path)/$APP_NAME"
 
 rm -rf "$APP_BUNDLE"
-mkdir -p "$APP_MACOS" "$APP_RESOURCES"
+mkdir -p "$APP_MACOS" "$APP_RESOURCES" "$APP_FRAMEWORKS"
 cp "$BUILD_BINARY" "$APP_BINARY"
 chmod +x "$APP_BINARY"
+
+copy_sparkle_framework() {
+  local framework_path
+  framework_path="$SPARKLE_FRAMEWORK_PATH"
+  if [[ -z "$framework_path" ]]; then
+    framework_path="$(find "$ROOT_DIR/.build" -path "*/Sparkle.framework" -type d -print -quit 2>/dev/null || true)"
+  fi
+  if [[ -z "$framework_path" ]]; then
+    echo "Sparkle.framework not found. Set AUTOCOMP_SPARKLE_FRAMEWORK_PATH for local update testing." >&2
+    exit 1
+  fi
+  /usr/bin/ditto "$framework_path" "$APP_FRAMEWORKS/Sparkle.framework"
+}
+
+if [[ -n "$SPARKLE_FEED_URL" || -n "$SPARKLE_PUBLIC_KEY" || -n "$SPARKLE_FRAMEWORK_PATH" ]]; then
+  if [[ -z "$SPARKLE_FEED_URL" || -z "$SPARKLE_PUBLIC_KEY" ]]; then
+    echo "Set both AUTOCOMP_SPARKLE_FEED_URL and AUTOCOMP_SPARKLE_PUBLIC_KEY for local update testing." >&2
+    exit 1
+  fi
+  copy_sparkle_framework
+fi
 
 if [[ -d "$ROOT_DIR/Resources" ]]; then
   rsync -a --delete "$ROOT_DIR/Resources/" "$APP_RESOURCES/Resources/"
@@ -84,6 +109,13 @@ cat >"$INFO_PLIST" <<PLIST
 </plist>
 PLIST
 
+if [[ -n "$SPARKLE_FEED_URL" ]]; then
+  /usr/libexec/PlistBuddy -c "Add :SUFeedURL string $SPARKLE_FEED_URL" "$INFO_PLIST"
+fi
+if [[ -n "$SPARKLE_PUBLIC_KEY" ]]; then
+  /usr/libexec/PlistBuddy -c "Add :SUPublicEDKey string $SPARKLE_PUBLIC_KEY" "$INFO_PLIST"
+fi
+
 /usr/bin/codesign --force --deep --sign "$SIGNING_IDENTITY" "$APP_BUNDLE" >/dev/null
 
 open_app() {
@@ -91,7 +123,11 @@ open_app() {
 }
 
 open_app_with_args() {
-  /usr/bin/open -n "$APP_BUNDLE" --args "$@"
+  local args=("$@")
+  if [[ "${AUTOCOMP_SAFE_OVERLAY_MODE:-}" == "1" ]]; then
+    args+=(--safe-overlay-mode)
+  fi
+  /usr/bin/open -n "$APP_BUNDLE" --args "${args[@]}"
 }
 
 case "$MODE" in
@@ -134,8 +170,13 @@ case "$MODE" in
     sleep 1
     pgrep -f "$APP_BINARY" >/dev/null
     ;;
+  --ui-test-playground|ui-test-playground)
+    open_app_with_args --ui-test-playground
+    sleep 1
+    pgrep -f "$APP_BINARY" >/dev/null
+    ;;
   *)
-    echo "usage: $0 [run|--debug|--logs|--telemetry|--verify|--geometry-debug|--ui-test-settings|--ui-test-inline-preview|--ui-test-onboarding]" >&2
+    echo "usage: $0 [run|--debug|--logs|--telemetry|--verify|--geometry-debug|--ui-test-settings|--ui-test-inline-preview|--ui-test-onboarding|--ui-test-playground]" >&2
     exit 2
     ;;
 esac

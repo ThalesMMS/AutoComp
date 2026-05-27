@@ -15,11 +15,28 @@ public final class PrivacySettingsStore: @unchecked Sendable {
             return PrivacySettings()
         }
 
-        return settings
+        var migratedSettings = settings
+        migratedSettings.telemetryEnabled = false
+        return migratedSettings
     }
 
     public func save(_ settings: PrivacySettings) throws {
-        let data = try JSONEncoder().encode(settings)
+        var storedSettings = settings
+        storedSettings.telemetryEnabled = false
+        let data = try JSONEncoder().encode(storedSettings)
         defaults.set(data, forKey: key)
+    }
+
+    public func resetWritingPreferences() throws {
+        var settings = load()
+        settings.writingPreferences = WritingPreferences()
+        try save(settings)
+    }
+
+    public func resetLocalPrivacyDataState() throws {
+        var settings = load()
+        settings.telemetryEnabled = false
+        settings.writingPreferences = WritingPreferences()
+        try save(settings)
     }
 }

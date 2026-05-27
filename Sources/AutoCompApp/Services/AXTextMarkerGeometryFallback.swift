@@ -16,7 +16,15 @@ struct AXTextMarkerGeometryFallback {
     }
 
     static var defaultEnabled: Bool {
-        ProcessInfo.processInfo.environment["AUTOCOMP_AX_TEXT_MARKER_FALLBACK"] != "0"
+        isEnabledByDefault()
+    }
+
+    static func isEnabledByDefault(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        arguments: [String] = ProcessInfo.processInfo.arguments
+    ) -> Bool {
+        environment["AUTOCOMP_AX_TEXT_MARKER_FALLBACK"] != "0"
+            && !SafeOverlayMode.isEnabled(environment: environment, arguments: arguments)
     }
 
     static func isEligibleBrowser(bundleID: String) -> Bool {
@@ -33,8 +41,13 @@ struct AXTextMarkerGeometryFallback {
     static func gate(
         bundleID: String,
         geometry: AXTextGeometrySnapshot,
-        isEnabled: Bool
+        isEnabled: Bool,
+        isSafeOverlayModeEnabled: Bool = SafeOverlayMode.isEnabled
     ) -> AXTextMarkerFallbackGate {
+        guard !isSafeOverlayModeEnabled else {
+            return .rejected(reason: "safe-overlay-mode")
+        }
+
         guard isEnabled else {
             return .rejected(reason: "disabled")
         }
