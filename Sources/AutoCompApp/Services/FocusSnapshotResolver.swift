@@ -10,6 +10,7 @@ struct AXFocusSnapshot {
     let focusedElement: AXUIElement
     let focusedElementID: String
     let domain: String?
+    let domainResolution: BrowserDomainResolution
     let role: String?
     let subrole: String?
     let isGoogleDocsElement: Bool
@@ -117,7 +118,8 @@ struct FocusSnapshotResolver {
         }
 
         let displayName = app.localizedName ?? bundleID
-        let activeDomain = browserResolver.activeDomain(for: bundleID)
+        let activeDomainResolution = browserResolver.activeDomainResolution(for: bundleID)
+        let activeDomain = activeDomainResolution.domain
         let focusedElement = resolvedTextElement(
             from: axHelper.resolvedFocusedElement(from: focused),
             appElement: appElement,
@@ -176,6 +178,7 @@ struct FocusSnapshotResolver {
             focusedElement: focusedElement,
             focusedElementID: "\(app.processIdentifier)-\(Unmanaged.passUnretained(focusedElement).toOpaque())",
             domain: domain,
+            domainResolution: activeDomainResolution.resolvingEffectiveDomain(domain),
             role: role,
             subrole: subrole,
             isGoogleDocsElement: isGoogleDocsElement,

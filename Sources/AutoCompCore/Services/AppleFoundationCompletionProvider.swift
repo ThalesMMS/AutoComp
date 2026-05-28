@@ -51,15 +51,18 @@ public struct AppleFoundationModelAvailability: Equatable, Sendable {
 public struct AppleFoundationCompletionProvider: ClipboardContextAwareCompletionProvider {
     public let requestFactory: CompletionRequestFactory
     public let maxTokens: Int
+    public let stopSequences: CompletionStopSequences
     private let backend: AppleFoundationModelBackend
 
     public init(
         requestFactory: CompletionRequestFactory = CompletionRequestFactory(),
         maxTokens: Int = 32,
+        stopSequences: CompletionStopSequences = .conservativeDefault,
         backend: AppleFoundationModelBackend = SystemAppleFoundationModelBackend()
     ) {
         self.requestFactory = requestFactory
         self.maxTokens = maxTokens
+        self.stopSequences = stopSequences
         self.backend = backend
     }
 
@@ -93,7 +96,8 @@ public struct AppleFoundationCompletionProvider: ClipboardContextAwareCompletion
                 baseURL: "apple-foundation://system",
                 apiKey: "local",
                 model: "apple-foundation",
-                maxTokens: maxTokens
+                maxTokens: maxTokens,
+                stopSequences: stopSequences
             ),
             privacySettings: privacySettings,
             visualContext: visualContext,

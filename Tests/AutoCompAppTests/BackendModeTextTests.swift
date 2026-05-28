@@ -18,6 +18,8 @@ final class BackendModeTextTests: XCTestCase {
         XCTAssertTrue(readme.contains("Remote fallback is opt-in"))
         XCTAssertTrue(readme.contains("last backend used for a completion"))
         XCTAssertTrue(readme.contains("Settings > Privacy repeats the active backend privacy summary"))
+        XCTAssertTrue(readme.contains("Docs/ModelCompatibilityMatrix.md"))
+        XCTAssertTrue(readme.contains("avoid recommending FIM optimized behavior"))
         XCTAssertTrue(readme.contains("AUTOCOMP_LOCAL_MODEL_PATH"))
         XCTAssertTrue(readme.contains("Settings > Model shows the local runtime state"))
     }
@@ -27,6 +29,11 @@ final class BackendModeTextTests: XCTestCase {
             contentsOf: packageRoot().appendingPathComponent("Sources/AutoCompApp/Views/SettingsRootView.swift"),
             encoding: .utf8
         )
+        let consentSource = try String(
+            contentsOf: packageRoot().appendingPathComponent("Sources/AutoCompApp/Services/RemoteCompletionConsentStore.swift"),
+            encoding: .utf8
+        )
+        let combinedSource = settingsSource + consentSource
 
         XCTAssertTrue(settingsSource.contains("Local in-process completion is usable only when this build includes the runtime"))
         XCTAssertTrue(settingsSource.contains("Apple Intelligence diagnostics"))
@@ -36,6 +43,23 @@ final class BackendModeTextTests: XCTestCase {
         XCTAssertTrue(settingsSource.contains("Last local error"))
         XCTAssertTrue(settingsSource.contains("Remote fallback is enabled: if local completion fails"))
         XCTAssertTrue(settingsSource.contains("remote fallback is enabled after a local or Apple failure"))
+        XCTAssertTrue(settingsSource.contains("Section(\"Remote completion consent\")"))
+        XCTAssertTrue(settingsSource.contains("Section(\"Model compatibility evidence\")"))
+        XCTAssertTrue(settingsSource.contains("FIM behavior"))
+        XCTAssertTrue(settingsSource.contains("Endpoint type"))
+        XCTAssertTrue(combinedSource.contains("Text from the active field may be sent"))
+        XCTAssertTrue(settingsSource.contains("Reset Remote Completion Consent"))
+    }
+
+    func testCompletionProviderUsesRemoteConsentGate() throws {
+        let environmentSource = try String(
+            contentsOf: packageRoot().appendingPathComponent("Sources/AutoCompApp/App/AutoCompAppEnvironment.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(environmentSource.contains("RemoteCompletionConsentPolicy"))
+        XCTAssertTrue(environmentSource.contains("remoteConsentStore: remoteCompletionConsentStore"))
+        XCTAssertTrue(environmentSource.contains("remoteConsentChecker: usesInlinePreviewTestProvider"))
     }
 
     func testModelSettingsSeparatesBackendSelectionFromRemoteSettings() throws {

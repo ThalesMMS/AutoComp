@@ -178,8 +178,10 @@ final class MenuStatusSnapshotTests: XCTestCase {
             bundleID: "com.apple.TextEdit",
             domain: nil,
             focusedElementID: "field",
-            contextSource: "accessibility",
-            geometryQuality: "directCaret",
+            contextSource: "Accessibility",
+            geometryQuality: "direct",
+            contextTrust: "standard",
+            contextWarning: nil,
             hasCaretRect: true,
             hasFocusedElementRect: true
         )

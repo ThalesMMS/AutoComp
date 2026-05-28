@@ -88,10 +88,22 @@ struct AXHelper {
     }
 
     func isSecureField(_ element: AXUIElement) -> Bool {
-        let role = stringAttribute(kAXRoleAttribute, from: element) ?? ""
-        let subrole = stringAttribute(kAXSubroleAttribute, from: element) ?? ""
-        return role.localizedCaseInsensitiveContains("Secure")
-            || subrole.localizedCaseInsensitiveContains("Secure")
+        SecureFieldClassifier.isSecure(
+            SecureFieldMetadata(
+                role: stringAttribute(kAXRoleAttribute, from: element),
+                subrole: stringAttribute(kAXSubroleAttribute, from: element),
+                roleDescription: stringAttribute(kAXRoleDescriptionAttribute, from: element),
+                title: stringAttribute(kAXTitleAttribute, from: element),
+                description: stringAttribute(kAXDescriptionAttribute, from: element),
+                help: stringAttribute(kAXHelpAttribute, from: element),
+                identifier: stringAttribute("AXIdentifier", from: element),
+                placeholder: stringAttribute("AXPlaceholderValue", from: element),
+                domType: stringAttribute("AXDOMType", from: element),
+                domIdentifier: stringAttribute("AXDOMIdentifier", from: element),
+                domClassList: stringListAttribute("AXDOMClassList", from: element),
+                value: stringAttribute(kAXValueAttribute, from: element)
+            )
+        )
     }
 
     func readableText(from element: AXUIElement) -> String? {
@@ -253,6 +265,17 @@ struct AXHelper {
         return nil
     }
 
+    func capabilityPresence(for element: AXUIElement) -> AXElementCapabilityPresence {
+        AXElementCapabilityPresence(
+            hasAXValue: supportsAttribute(kAXValueAttribute, from: element),
+            hasAXSelectedTextRange: supportsAttribute(kAXSelectedTextRangeAttribute, from: element),
+            hasAXBoundsForRange: supportsParameterizedAttribute(
+                kAXBoundsForRangeParameterizedAttribute,
+                from: element
+            )
+        )
+    }
+
     func caretRect(for element: AXUIElement, selectedRange: NSRange?) -> CGRect? {
         guard let selectedRange else {
             return nil
@@ -400,6 +423,26 @@ struct AXHelper {
             return attributedString.string
         }
         return nil
+    }
+
+    private func supportsAttribute(_ attribute: String, from element: AXUIElement) -> Bool {
+        var namesRef: CFArray?
+        let status = AXUIElementCopyAttributeNames(element, &namesRef)
+        guard status == .success,
+              let namesRef else {
+            return false
+        }
+        return (namesRef as NSArray).contains(attribute)
+    }
+
+    private func supportsParameterizedAttribute(_ attribute: String, from element: AXUIElement) -> Bool {
+        var namesRef: CFArray?
+        let status = AXUIElementCopyParameterizedAttributeNames(element, &namesRef)
+        guard status == .success,
+              let namesRef else {
+            return false
+        }
+        return (namesRef as NSArray).contains(attribute)
     }
 
     private func nonEmpty(_ text: String) -> String? {

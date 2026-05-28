@@ -8,7 +8,8 @@ struct SuggestionDiagnosticsController {
         }
 
         let suffixLength = context.textAfterCursor.map { ($0 as NSString).length } ?? 0
-        return "app=\(context.app.displayName) bundle=\(context.app.bundleID) domain=\(context.domain ?? "nil") source=\(sourceDescription(context.captureSources)) len=\((context.textBeforeCursor as NSString).length) suffixLen=\(suffixLength) trailingWhitespace=\(trailingWhitespaceDescription(context.textBeforeCursor)) selectedRange=\(String(describing: context.selectedRange)) focusID=\(context.focusedElementID) geometry=\(context.caretGeometryQuality.rawValue)"
+        let captureDiagnostics = ContextCaptureDiagnostics(context: context)
+        return "app=\(context.app.displayName) bundle=\(context.app.bundleID) domain=\(context.domain ?? "nil") source=\(captureDiagnostics.contextSourceLogValue) trust=\(captureDiagnostics.trustTitle) len=\((context.textBeforeCursor as NSString).length) suffixLen=\(suffixLength) trailingWhitespace=\(trailingWhitespaceDescription(context.textBeforeCursor)) selectedRange=\(String(describing: context.selectedRange)) focusID=\(context.focusedElementID) geometry=\(captureDiagnostics.geometryQualityLogValue)"
     }
 
     func suggestionDescription(_ suggestion: Suggestion?) -> String {
@@ -67,10 +68,4 @@ struct SuggestionDiagnosticsController {
         return CharacterSet.whitespacesAndNewlines.contains(lastScalar) ? "true" : "false"
     }
 
-    private func sourceDescription(_ sources: Set<TextCaptureSource>) -> String {
-        sources
-            .map(\.rawValue)
-            .sorted()
-            .joined(separator: ",")
-    }
 }

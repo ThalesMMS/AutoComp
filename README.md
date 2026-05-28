@@ -42,13 +42,30 @@ Backend modes:
 
 - Remote OpenAI-compatible sends autocomplete text to the configured endpoint.
 - Apple Intelligence uses FoundationModels only when the framework is available and the OS supports it; otherwise the app reports the backend as unavailable. Remote fallback is opt-in. Settings > Model shows Apple availability, OS/SDK requirement text, fallback state, and the last Apple error.
-- Local in-process is available only in app builds that link the optional llama.cpp runtime and have a configured GGUF model file. The package builds the optional runtime and harness targets when Homebrew llama.cpp headers/libraries are present. Remote fallback is opt-in. Settings > Model shows the local runtime state, model path, load state, last local error, memory limit, and remote fallback state.
+- Local in-process is available only in app builds that link the optional llama.cpp runtime and have a configured GGUF model file. The default package build does not link that runtime. Set `AUTOCOMP_ENABLE_LLAMA_RUNTIME=1` to build it through `pkg-config llama`, or set both `AUTOCOMP_LLAMA_CFLAGS` and `AUTOCOMP_LLAMA_LIBS` to provide explicit compiler and linker flags. Remote fallback is opt-in. Settings > Model shows the local runtime state, model path, load state, last local error, memory limit, and remote fallback state.
 
 AutoComp's baseline is macOS 14+. Apple Intelligence remains conditional and may require a newer macOS release such as macOS 26. Local in-process completion is also conditional; the app should not be treated as local-capable unless Settings reports both runtime and model file availability.
 
-Settings > Model shows the selected engine, request destination, whether autocomplete text leaves this Mac, whether remote fallback is enabled, the last backend used for a completion, and the last local, Apple, or remote error. Settings > Privacy repeats the active backend privacy summary, and the Model Playground labels the destination before revealing the sensitive prompt preview. Enabling remote fallback displays an inline warning because a failed local or Apple request can be retried against the configured remote endpoint.
+Settings > Model shows the selected engine, request destination, `Data leaves this Mac`, whether `Remote fallback` is enabled, the last backend used for a completion, and the last Local Llama, Apple, or remote error. Settings > Privacy repeats the active backend privacy summary, and the Model Playground labels the destination before revealing the sensitive prompt preview. Enabling `Remote fallback` displays an inline warning because autocomplete text may be sent to the configured Remote OpenAI-compatible endpoint after a Local Llama or Apple Intelligence failure.
 
-Settings > Privacy includes a source policy table for AX text, clipboard context, Screen OCR, debug logs, and local productivity metrics. The same policy, including remote-backend exposure and retention limits, is documented in `Docs/PrivacyPolicy.md`.
+Backend/model behavior is tracked in `Docs/ModelCompatibilityMatrix.md`. Settings > Model uses that matrix to avoid recommending FIM optimized behavior, multi-completion behavior, or latency expectations until a row has publishable non-content evidence.
+
+To validate a local-runtime build environment before enabling it, run:
+
+```sh
+./script/check_llama_pkg_config.sh
+AUTOCOMP_ENABLE_LLAMA_RUNTIME=1 swift build
+```
+
+If `pkg-config llama` is unavailable or incomplete, provide the same flags manually:
+
+```sh
+AUTOCOMP_LLAMA_CFLAGS="-I/path/to/include" \
+AUTOCOMP_LLAMA_LIBS="-L/path/to/lib -llama -lggml" \
+swift build
+```
+
+Settings > Privacy includes a source policy table for AX text, clipboard context, Screen OCR, debug logs, and local productivity metrics. Local metrics can include redacted stage latency reports for bug reports, with numeric timings only. The same policy, including remote-backend exposure and retention limits, is documented in `Docs/PrivacyPolicy.md`.
 
 ## Architecture Policy
 
@@ -76,6 +93,14 @@ Run a release dry run before using signing credentials:
   --release-notes-url https://example.invalid/releases/v0.0.0
 ```
 
+Run the beta readiness gate before beta release builds:
+
+```sh
+./script/release_build.sh --beta-gate
+```
+
+Use `--skip-llama-build "reason"` or `--skip-ui-smoke "reason"` only when that host cannot run the conditional local-runtime or UI automation checks; the gate records those as structured skips.
+
 Real releases require `AUTOCOMP_RELEASE_SIGNING_IDENTITY`, `AUTOCOMP_NOTARY_PROFILE`, `AUTOCOMP_SPARKLE_FEED_URL`, `AUTOCOMP_SPARKLE_PUBLIC_KEY`, and a Sparkle private key available through `AUTOCOMP_SPARKLE_PRIVATE_KEY_FILE` or the local Keychain. Keep release secrets out of the repository. After publishing the DMG and appcast, verify an older installed app detects the update with `Check for Updates...`.
 
 ## Uninstall
@@ -89,5 +114,20 @@ Run a dry run before removing local state:
 The uninstall script removes installed AutoComp app bundles, preferences, caches, logs, Keychain items, and `~/Library/Application Support/AutoComp`, including optional local models and debug artifacts. It is idempotent. It does not modify macOS TCC permissions; revoke Accessibility, Input Monitoring, Screen Recording, Local Network, and Apple Events manually in System Settings > Privacy & Security when a full reset is required.
 
 ## QA
+
+Use the headless CI gate for deterministic build/test coverage that does not require macOS GUI permissions or real host apps:
+
+```sh
+./script/ci_headless.sh
+```
+
+The local-runtime build matrix is split into explicit legs:
+
+```sh
+./script/build_without_llama.sh
+./script/build_with_llama.sh
+```
+
+`build_with_llama.sh` requires `pkg-config llama` or explicit `AUTOCOMP_LLAMA_CFLAGS` and `AUTOCOMP_LLAMA_LIBS` values before it compiles the optional runtime targets. Set `AUTOCOMP_CI_RUN_LLAMA_MATRIX=1` to include that leg in `./script/ci_headless.sh`.
 
 Real-app validation coverage is documented in `Docs/AppQAMatrix.md`. Use `./script/qa_real_app_matrix.sh` to run and record the automated smoke coverage, or to record skipped UI smoke checks with an explicit host-environment reason.

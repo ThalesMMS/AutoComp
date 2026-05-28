@@ -4,6 +4,7 @@ import Foundation
 
 enum AcceptanceError: Error {
     case insertionFailed
+    case riskyHostReturnBlocked
 }
 
 enum AcceptanceInsertionStrategy: Equatable {
@@ -17,6 +18,7 @@ struct AcceptanceInsertionPolicy: Equatable {
     var keyboardEventUTF16Limit = 64
     var singleUnicodeIncompatibleBundleIDs: Set<String> = []
     var clipboardPreferredBundleIDs: Set<String> = []
+    var returnBlockedBundleIDs = RiskyHostAppPolicy.chatBundleIDs
 
     static var productionDefault: AcceptanceInsertionPolicy {
         AcceptanceInsertionPolicy(
@@ -42,6 +44,13 @@ struct AcceptanceInsertionPolicy: Equatable {
         }
 
         return .singleUnicodeEvent
+    }
+
+    func allowsInsertion(of text: String, bundleID: String?) -> Bool {
+        guard let bundleID, returnBlockedBundleIDs.contains(bundleID) else {
+            return true
+        }
+        return !RiskyHostAppPolicy.containsReturn(text)
     }
 }
 
@@ -90,18 +99,44 @@ final class CGEventAcceptanceKeyboardEventPoster: AcceptanceKeyboardEventPosting
     }
 }
 
-struct PreservedPasteboardItem: Equatable {
+struct PreservedPasteboardItem: Equatable, Codable {
     let dataByType: [NSPasteboard.PasteboardType: Data]
+
+    init(dataByType: [NSPasteboard.PasteboardType: Data]) {
+        self.dataByType = dataByType
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let encodedItems = try container.decode([String: Data].self)
+        self.dataByType = Dictionary(
+            uniqueKeysWithValues: encodedItems.map { key, data in
+                (NSPasteboard.PasteboardType(key), data)
+            }
+        )
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        let encodedItems = Dictionary(
+            uniqueKeysWithValues: dataByType.map { type, data in
+                (type.rawValue, data)
+            }
+        )
+        try container.encode(encodedItems)
+    }
 }
 
 protocol AcceptancePasteboard: AnyObject {
     func preservedItems() -> [PreservedPasteboardItem]?
     func clearContents()
-    func setString(_ text: String)
+    func setString(_ text: String, recoveryMarkerID: String?)
     func writeItems(_ items: [PreservedPasteboardItem])
+    func containsRecoveryMarker(id: String) -> Bool
 }
 
 final class SystemAcceptancePasteboard: AcceptancePasteboard {
+    private static let recoveryMarkerType = NSPasteboard.PasteboardType("com.autocomp.pending-pasteboard-insertion")
     private let pasteboard: NSPasteboard
 
     init(pasteboard: NSPasteboard = .general) {
@@ -124,8 +159,11 @@ final class SystemAcceptancePasteboard: AcceptancePasteboard {
         pasteboard.clearContents()
     }
 
-    func setString(_ text: String) {
+    func setString(_ text: String, recoveryMarkerID: String?) {
         pasteboard.setString(text, forType: .string)
+        if let recoveryMarkerID {
+            pasteboard.setString(recoveryMarkerID, forType: Self.recoveryMarkerType)
+        }
     }
 
     func writeItems(_ items: [PreservedPasteboardItem]) {
@@ -137,6 +175,10 @@ final class SystemAcceptancePasteboard: AcceptancePasteboard {
             return item
         }
         pasteboard.writeObjects(pasteboardItems)
+    }
+
+    func containsRecoveryMarker(id: String) -> Bool {
+        pasteboard.string(forType: Self.recoveryMarkerType) == id
     }
 }
 
@@ -154,6 +196,7 @@ final class AcceptanceService: TextInserter, ShortcutLeakRepairing {
     private let insertionPolicy: AcceptanceInsertionPolicy
     private let keyboardEventPoster: AcceptanceKeyboardEventPosting
     private let pasteboard: AcceptancePasteboard
+    private let pasteboardRecoveryStore: PasteboardInsertionRecoveryStore?
     private let frontmostBundleIDProvider: () -> String?
     private let clipboardRestoreDelay: TimeInterval
 
@@ -162,6 +205,7 @@ final class AcceptanceService: TextInserter, ShortcutLeakRepairing {
         insertionPolicy: AcceptanceInsertionPolicy = .productionDefault,
         keyboardEventPoster: AcceptanceKeyboardEventPosting = CGEventAcceptanceKeyboardEventPoster(),
         pasteboard: AcceptancePasteboard = SystemAcceptancePasteboard(),
+        pasteboardRecoveryStore: PasteboardInsertionRecoveryStore? = PasteboardInsertionRecoveryStore(),
         frontmostBundleIDProvider: @escaping () -> String? = {
             NSWorkspace.shared.frontmostApplication?.bundleIdentifier
         },
@@ -171,6 +215,7 @@ final class AcceptanceService: TextInserter, ShortcutLeakRepairing {
         self.insertionPolicy = insertionPolicy
         self.keyboardEventPoster = keyboardEventPoster
         self.pasteboard = pasteboard
+        self.pasteboardRecoveryStore = pasteboardRecoveryStore
         self.frontmostBundleIDProvider = frontmostBundleIDProvider
         self.clipboardRestoreDelay = clipboardRestoreDelay
     }
@@ -217,12 +262,33 @@ final class AcceptanceService: TextInserter, ShortcutLeakRepairing {
         return acceptedText
     }
 
+    func recoverPendingPasteboardInsertionIfNeeded() {
+        guard let snapshot = pasteboardRecoveryStore?.loadFreshSnapshot() else {
+            return
+        }
+
+        guard pasteboard.containsRecoveryMarker(id: snapshot.id) else {
+            try? pasteboardRecoveryStore?.delete(matchingID: snapshot.id)
+            GeometryDebug.log("pasteboard-recovery skipped reason=marker-mismatch")
+            return
+        }
+
+        restore(previousItems: snapshot.previousItems, recoveryID: snapshot.id)
+        GeometryDebug.log("pasteboard-recovery restored")
+    }
+
     private func insert(_ text: String) throws {
         guard !text.isEmpty else {
             return
         }
 
-        switch insertionPolicy.strategy(for: text, bundleID: frontmostBundleIDProvider()) {
+        let bundleID = frontmostBundleIDProvider()
+        guard insertionPolicy.allowsInsertion(of: text, bundleID: bundleID) else {
+            GeometryDebug.log("insertion blocked reason=chat-return bundle=\(bundleID ?? "nil") utf16Length=\(text.utf16.count)")
+            throw AcceptanceError.riskyHostReturnBlocked
+        }
+
+        switch insertionPolicy.strategy(for: text, bundleID: bundleID) {
         case .singleUnicodeEvent:
             if insertBySingleUnicodeCGEvent(text) {
                 return
@@ -269,11 +335,25 @@ final class AcceptanceService: TextInserter, ShortcutLeakRepairing {
 
     private func insertByClipboard(_ text: String) throws {
         let previousItems = pasteboard.preservedItems()
+        let recoveryID = UUID().uuidString
+        let recoverySnapshot = PasteboardInsertionRecoverySnapshot(
+            id: recoveryID,
+            createdAt: Date(),
+            previousItems: previousItems
+        )
+        let recoveryMarkerID: String?
+        do {
+            try pasteboardRecoveryStore?.save(recoverySnapshot)
+            recoveryMarkerID = pasteboardRecoveryStore == nil ? nil : recoveryID
+        } catch {
+            recoveryMarkerID = nil
+            GeometryDebug.log("pasteboard-recovery skipped reason=snapshot-save-failed")
+        }
         pasteboard.clearContents()
-        pasteboard.setString(text)
+        pasteboard.setString(text, recoveryMarkerID: recoveryMarkerID)
 
         guard keyboardEventPoster.postKey(0x09, flags: .maskCommand) else {
-            restore(previousItems: previousItems)
+            restore(previousItems: previousItems, recoveryID: recoveryMarkerID)
             throw AcceptanceError.insertionFailed
         }
 
@@ -281,18 +361,28 @@ final class AcceptanceService: TextInserter, ShortcutLeakRepairing {
         GeometryDebug.log("insertion-strategy strategy=clipboard utf16Length=\(text.utf16.count)")
 
         if clipboardRestoreDelay <= 0 {
-            restore(previousItems: previousItems)
+            restore(previousItems: previousItems, recoveryID: recoveryMarkerID)
         } else {
             DispatchQueue.main.asyncAfter(deadline: .now() + clipboardRestoreDelay) {
-                self.restore(previousItems: previousItems)
+                self.restore(previousItems: previousItems, recoveryID: recoveryMarkerID)
             }
         }
     }
 
-    private func restore(previousItems: [PreservedPasteboardItem]?) {
+    private func restore(previousItems: [PreservedPasteboardItem]?, recoveryID: String?) {
+        if let recoveryID,
+           !pasteboard.containsRecoveryMarker(id: recoveryID) {
+            try? pasteboardRecoveryStore?.delete(matchingID: recoveryID)
+            GeometryDebug.log("pasteboard-restore skipped reason=marker-mismatch")
+            return
+        }
+
         pasteboard.clearContents()
         if let previousItems {
             pasteboard.writeItems(previousItems)
+        }
+        if let recoveryID {
+            try? pasteboardRecoveryStore?.delete(matchingID: recoveryID)
         }
     }
 

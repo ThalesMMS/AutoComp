@@ -28,7 +28,11 @@ final class CompletionBackendConfigurationServiceTests: XCTestCase {
             localMaxRAMBytes: 1024,
             localLastError: "previous local failure",
             fallbackToRemoteOnLocalFailure: false,
-            multiSuggestionEnabled: false
+            multiSuggestionEnabled: false,
+            stopSequences: CompletionStopSequences(
+                continuation: ["\n"],
+                fillInMiddle: ["<|fim_suffix|>"]
+            )
         )
 
         service.save(settings)
@@ -38,9 +42,13 @@ final class CompletionBackendConfigurationServiceTests: XCTestCase {
         XCTAssertEqual(defaults.string(forKey: "completionBackend.kind"), CompletionEngineKind.remote.rawValue)
         XCTAssertEqual(defaults.string(forKey: "completionBackend.localLastError"), "previous local failure")
         XCTAssertFalse(defaults.bool(forKey: "completionBackend.multiSuggestionEnabled"))
+        XCTAssertEqual(defaults.array(forKey: "completionBackend.stopSequences.continuation") as? [String], ["\n"])
+        XCTAssertEqual(defaults.array(forKey: "completionBackend.stopSequences.fillInMiddle") as? [String], ["<|fim_suffix|>"])
         XCTAssertEqual(loaded.summary, "Remote backend: test-model at http://127.0.0.1:8000")
         XCTAssertEqual(loaded.requestDestinationTitle, "Remote: test-model at http://127.0.0.1:8000")
         XCTAssertTrue(loaded.dataLeavesDeviceTitle.contains("sent to http://127.0.0.1:8000"))
+        XCTAssertEqual(loaded.remoteConfiguration.stopSequences.continuation, ["\n"])
+        XCTAssertEqual(loaded.localConfiguration.stopSequences.fillInMiddle, ["<|fim_suffix|>"])
     }
 
     func testRemoteSettingsLoadLegacyDomainAndSaveToBothDomains() {
@@ -111,7 +119,7 @@ final class CompletionBackendConfigurationServiceTests: XCTestCase {
         XCTAssertFalse(settings.fallbackToRemoteOnAppleIntelligenceFailure)
         XCTAssertEqual(
             settings.summary,
-            "Local Llama backend unavailable: Unavailable: Local runtime is unavailable in this app build.; Missing at /tmp/model.gguf"
+            "Local Llama backend unavailable: Unavailable: Local runtime is unavailable in this app build.; Missing at /tmp/model.gguf; remote fallback enabled"
         )
     }
 
@@ -141,10 +149,10 @@ final class CompletionBackendConfigurationServiceTests: XCTestCase {
 
         XCTAssertEqual(available.localRuntimeState, .available)
         XCTAssertEqual(unavailable.localRuntimeState, .unavailableInBuild)
-        XCTAssertEqual(available.summary, "Local Llama backend: available at \(modelURL.path)")
+        XCTAssertEqual(available.summary, "Local Llama backend available without fallback at \(modelURL.path)")
         XCTAssertEqual(
             unavailable.summary,
-            "Local Llama backend unavailable: Unavailable: Local runtime is unavailable in this app build.; Found at \(modelURL.path)"
+            "Local Llama backend unavailable: Unavailable: Local runtime is unavailable in this app build.; Found at \(modelURL.path); remote fallback disabled"
         )
     }
 
@@ -170,8 +178,29 @@ final class CompletionBackendConfigurationServiceTests: XCTestCase {
 
         XCTAssertFalse(settings.fallbackToRemoteOnLocalFailure)
         XCTAssertFalse(settings.fallbackToRemoteOnAppleIntelligenceFailure)
+        XCTAssertFalse(settings.multiSuggestionEnabled)
         XCTAssertEqual(settings.remoteFallbackTitle, "Disabled")
-        XCTAssertEqual(settings.dataLeavesDeviceTitle, "No, local completion requests stay on this Mac.")
+        XCTAssertEqual(
+            settings.dataLeavesDeviceTitle,
+            "No remote endpoint; local completion is blocked until runtime and model prerequisites are met."
+        )
+    }
+
+    func testMultiSuggestionLoadsOnlyFromExplicitDebugEnvironmentFlag() {
+        let defaultsName = "CompletionBackendConfigurationServiceTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: defaultsName)!
+        defer {
+            defaults.removePersistentDomain(forName: defaultsName)
+        }
+        let service = CompletionBackendConfigurationService(
+            defaults: defaults,
+            keychainService: "com.autocomp.tests.\(UUID().uuidString)",
+            keychainAccount: "remote-api-key"
+        )
+
+        XCTAssertFalse(service.load(values: [:]).multiSuggestionEnabled)
+        XCTAssertTrue(service.load(values: ["AUTOCOMP_DEBUG_MULTI_SUGGESTION_ENABLED": "1"]).multiSuggestionEnabled)
+        XCTAssertTrue(service.load(values: ["AUTOCOMP_MULTI_SUGGESTION_ENABLED": "1"]).multiSuggestionEnabled)
     }
 
     func testRemoteFallbackWarningExplainsDataLeavingMac() {
@@ -186,6 +215,49 @@ final class CompletionBackendConfigurationServiceTests: XCTestCase {
             settings.remoteFallbackWarning,
             "Remote fallback is enabled: if local completion fails, autocomplete text may be sent to http://127.0.0.1:8000."
         )
+    }
+
+    func testStopSequenceBehaviorTitlesExposeUnsupportedFallbacks() {
+        XCTAssertEqual(
+            CompletionBackendSettings(engineKind: .remote).stopSequenceBehaviorTitle,
+            "Sent as OpenAI-compatible stop sequences."
+        )
+        XCTAssertEqual(
+            CompletionBackendSettings(engineKind: .localLlama).stopSequenceBehaviorTitle,
+            "Applied in the local generation loop when the runtime is available."
+        )
+        XCTAssertEqual(
+            CompletionBackendSettings(engineKind: .appleIntelligence).stopSequenceBehaviorTitle,
+            "Post-generation trimming fallback; Apple Intelligence does not expose stop sequences."
+        )
+        XCTAssertEqual(
+            CompletionBackendSettings().stopSequenceSummaryTitle,
+            "5 continuation, 5 FIM"
+        )
+    }
+
+    func testStopSequencesLoadFromEscapedEnvironmentValues() {
+        let defaultsName = "CompletionBackendConfigurationServiceTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: defaultsName)!
+        defer {
+            defaults.removePersistentDomain(forName: defaultsName)
+        }
+        let service = CompletionBackendConfigurationService(
+            defaults: defaults,
+            keychainService: "com.autocomp.tests.\(UUID().uuidString)",
+            keychainAccount: "remote-api-key"
+        )
+
+        let settings = service.load(
+            localRuntimeState: .unavailableInBuild,
+            values: [
+                "AUTOCOMP_STOP_SEQUENCES_CONTINUATION": "\\n||<|fim_middle|>",
+                "AUTOCOMP_STOP_SEQUENCES_FIM": "<|fim_suffix|>"
+            ]
+        )
+
+        XCTAssertEqual(settings.stopSequences.continuation, ["\n", "<|fim_middle|>"])
+        XCTAssertEqual(settings.stopSequences.fillInMiddle, ["<|fim_suffix|>"])
     }
 
     func testAppleIntelligenceDiagnosticReflectsAvailableBackendAndFallbackOff() {
@@ -230,14 +302,14 @@ final class CompletionBackendConfigurationServiceTests: XCTestCase {
             localRuntimeState: .unavailableInBuild
         )
 
-        XCTAssertEqual(available.summary, "Local Llama backend: available at \(modelURL.path)")
+        XCTAssertEqual(available.summary, "Local Llama backend available without fallback at \(modelURL.path)")
         XCTAssertEqual(
             missingModel.summary,
-            "Local Llama backend unavailable: Available; Missing at \(modelURL.appendingPathExtension("missing").path)"
+            "Local Llama backend unavailable: Available; Missing at \(modelURL.appendingPathExtension("missing").path); remote fallback disabled"
         )
         XCTAssertEqual(
             unavailableRuntime.summary,
-            "Local Llama backend unavailable: Unavailable: Local runtime is unavailable in this app build.; Found at \(modelURL.path)"
+            "Local Llama backend unavailable: Unavailable: Local runtime is unavailable in this app build.; Found at \(modelURL.path); remote fallback disabled"
         )
     }
 
@@ -259,6 +331,48 @@ final class CompletionBackendConfigurationServiceTests: XCTestCase {
         XCTAssertEqual(diagnostic.lastErrorTitle, "decode failed")
         XCTAssertEqual(diagnostic.fallbackTitle, "Remote fallback disabled")
         XCTAssertFalse(diagnostic.isUsable)
+    }
+
+    func testLocalDiagnosticReportsRuntimeLoadStatusForConfiguredModel() {
+        let settings = CompletionBackendSettings(
+            engineKind: .localLlama,
+            localModelPath: "/tmp/model.gguf",
+            localRuntimeState: .available
+        )
+
+        XCTAssertEqual(
+            settings.localDiagnostic(
+                fileExists: { _ in true },
+                loadStatus: LocalLlamaRuntimeStatus(state: .loaded, modelPath: "/tmp/model.gguf")
+            ).loadStateTitle,
+            "Loaded"
+        )
+        XCTAssertEqual(
+            settings.localDiagnostic(
+                fileExists: { _ in true },
+                loadStatus: LocalLlamaRuntimeStatus(state: .loading, modelPath: "/tmp/model.gguf")
+            ).loadStateTitle,
+            "Loading"
+        )
+
+        let failed = settings.localDiagnostic(
+            fileExists: { _ in true },
+            loadStatus: LocalLlamaRuntimeStatus(
+                state: .failed,
+                modelPath: "/tmp/model.gguf",
+                message: "Local model allocation failed: limit exceeded"
+            )
+        )
+        XCTAssertEqual(failed.loadStateTitle, "Failed")
+        XCTAssertEqual(failed.lastErrorTitle, "Local model allocation failed: limit exceeded")
+
+        XCTAssertEqual(
+            settings.localDiagnostic(
+                fileExists: { _ in true },
+                loadStatus: LocalLlamaRuntimeStatus(state: .loaded, modelPath: "/tmp/other.gguf")
+            ).loadStateTitle,
+            "Unloaded"
+        )
     }
 
     func testUnknownEngineKindFallsBackToRemote() {

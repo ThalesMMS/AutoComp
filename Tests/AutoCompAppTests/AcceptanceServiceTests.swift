@@ -130,6 +130,7 @@ final class AcceptanceServiceTests: XCTestCase {
         let poster = RecordingAcceptanceKeyboardEventPoster()
         let pasteboard = RecordingAcceptancePasteboard()
         let suppressionController = InputSuppressionController()
+        let recoveryStore = try makePasteboardRecoveryStore()
         let customType = NSPasteboard.PasteboardType("com.example.rich-text")
         let originalItems = [
             PreservedPasteboardItem(
@@ -144,6 +145,7 @@ final class AcceptanceServiceTests: XCTestCase {
             keyboardEventPoster: poster,
             inputSuppressionController: suppressionController,
             pasteboard: pasteboard,
+            pasteboardRecoveryStore: recoveryStore,
             clipboardRestoreDelay: 0
         )
         let longToken = String(repeating: "a", count: 65) + " "
@@ -162,6 +164,7 @@ final class AcceptanceServiceTests: XCTestCase {
         XCTAssertEqual(poster.keyEvents.first?.flags, .maskCommand)
         XCTAssertEqual(pasteboard.setStrings, [longToken])
         XCTAssertEqual(pasteboard.items, originalItems)
+        XCTAssertFalse(recoveryStore.hasPendingSnapshot())
         try assertSyntheticPairs(
             suppressionController,
             keyCode: 0x09,
@@ -170,19 +173,139 @@ final class AcceptanceServiceTests: XCTestCase {
         )
     }
 
+    func testPasteboardRecoveryRestoresMarkedSnapshotAfterRestart() throws {
+        let pasteboard = RecordingAcceptancePasteboard()
+        let recoveryStore = try makePasteboardRecoveryStore()
+        let customType = NSPasteboard.PasteboardType("com.example.rich-text")
+        let originalItems = [
+            PreservedPasteboardItem(dataByType: [
+                .string: Data("original rich value".utf8),
+                customType: Data([0x01, 0x02, 0x03])
+            ])
+        ]
+        try recoveryStore.save(PasteboardInsertionRecoverySnapshot(
+            id: "recovery-id",
+            createdAt: Date(),
+            previousItems: originalItems
+        ))
+        pasteboard.items = [
+            PreservedPasteboardItem(dataByType: [.string: Data("temporary insertion".utf8)])
+        ]
+        pasteboard.activeRecoveryMarkerID = "recovery-id"
+        let service = acceptanceService(
+            keyboardEventPoster: RecordingAcceptanceKeyboardEventPoster(),
+            pasteboard: pasteboard,
+            pasteboardRecoveryStore: recoveryStore
+        )
+
+        service.recoverPendingPasteboardInsertionIfNeeded()
+
+        XCTAssertEqual(pasteboard.items, originalItems)
+        XCTAssertNil(pasteboard.activeRecoveryMarkerID)
+        XCTAssertFalse(recoveryStore.hasPendingSnapshot())
+    }
+
+    func testPasteboardRecoveryDeletesSnapshotWhenMarkerIsMissing() throws {
+        let pasteboard = RecordingAcceptancePasteboard()
+        let recoveryStore = try makePasteboardRecoveryStore()
+        let userChangedItems = [
+            PreservedPasteboardItem(dataByType: [.string: Data("new user pasteboard".utf8)])
+        ]
+        try recoveryStore.save(PasteboardInsertionRecoverySnapshot(
+            id: "stale-id",
+            createdAt: Date(),
+            previousItems: [
+                PreservedPasteboardItem(dataByType: [.string: Data("old secret".utf8)])
+            ]
+        ))
+        pasteboard.items = userChangedItems
+        pasteboard.activeRecoveryMarkerID = nil
+        let service = acceptanceService(
+            keyboardEventPoster: RecordingAcceptanceKeyboardEventPoster(),
+            pasteboard: pasteboard,
+            pasteboardRecoveryStore: recoveryStore
+        )
+
+        service.recoverPendingPasteboardInsertionIfNeeded()
+
+        XCTAssertEqual(pasteboard.items, userChangedItems)
+        XCTAssertFalse(recoveryStore.hasPendingSnapshot())
+    }
+
+    func testPasteboardRecoveryDeletesExpiredSnapshotWithoutRestoringSensitiveMaterial() throws {
+        let pasteboard = RecordingAcceptancePasteboard()
+        let now = Date(timeIntervalSince1970: 1_000)
+        let recoveryStore = try makePasteboardRecoveryStore(
+            recoveryWindow: 30,
+            now: { now }
+        )
+        let currentItems = [
+            PreservedPasteboardItem(dataByType: [.string: Data("current pasteboard".utf8)])
+        ]
+        try recoveryStore.save(PasteboardInsertionRecoverySnapshot(
+            id: "expired-id",
+            createdAt: now.addingTimeInterval(-31),
+            previousItems: [
+                PreservedPasteboardItem(dataByType: [.string: Data("expired secret".utf8)])
+            ]
+        ))
+        pasteboard.items = currentItems
+        pasteboard.activeRecoveryMarkerID = "expired-id"
+        let service = acceptanceService(
+            keyboardEventPoster: RecordingAcceptanceKeyboardEventPoster(),
+            pasteboard: pasteboard,
+            pasteboardRecoveryStore: recoveryStore
+        )
+
+        service.recoverPendingPasteboardInsertionIfNeeded()
+
+        XCTAssertEqual(pasteboard.items, currentItems)
+        XCTAssertEqual(pasteboard.activeRecoveryMarkerID, "expired-id")
+        XCTAssertFalse(recoveryStore.hasPendingSnapshot())
+    }
+
+    func testChatAppInsertionRejectsReturnTextBeforePostingEvents() async throws {
+        let poster = RecordingAcceptanceKeyboardEventPoster()
+        let pasteboard = RecordingAcceptancePasteboard()
+        let service = acceptanceService(
+            keyboardEventPoster: poster,
+            pasteboard: pasteboard,
+            frontmostBundleID: "com.tinyspeck.slackmacgap"
+        )
+        var suggestion = Suggestion(
+            baseContextID: UUID(),
+            visibleText: "line one\nline two",
+            latencyMs: 20
+        )
+
+        do {
+            _ = try await service.acceptAll(from: &suggestion)
+            XCTFail("Expected chat Return insertion to be blocked")
+        } catch AcceptanceError.riskyHostReturnBlocked {
+            XCTAssertTrue(poster.unicodeStrings.isEmpty)
+            XCTAssertTrue(poster.keyEvents.isEmpty)
+            XCTAssertTrue(pasteboard.setStrings.isEmpty)
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
     private func acceptanceService(
         keyboardEventPoster: RecordingAcceptanceKeyboardEventPoster,
         inputSuppressionController: InputSuppressionController? = nil,
         pasteboard: RecordingAcceptancePasteboard = RecordingAcceptancePasteboard(),
+        pasteboardRecoveryStore: PasteboardInsertionRecoveryStore? = nil,
         insertionPolicy: AcceptanceInsertionPolicy = AcceptanceInsertionPolicy(),
-        clipboardRestoreDelay: TimeInterval = 0.2
+        clipboardRestoreDelay: TimeInterval = 0.2,
+        frontmostBundleID: String = "com.apple.TextEdit"
     ) -> AcceptanceService {
         AcceptanceService(
             inputSuppressionController: inputSuppressionController,
             insertionPolicy: insertionPolicy,
             keyboardEventPoster: keyboardEventPoster,
             pasteboard: pasteboard,
-            frontmostBundleIDProvider: { "com.apple.TextEdit" },
+            pasteboardRecoveryStore: pasteboardRecoveryStore,
+            frontmostBundleIDProvider: { frontmostBundleID },
             clipboardRestoreDelay: clipboardRestoreDelay
         )
     }
@@ -219,6 +342,22 @@ final class AcceptanceServiceTests: XCTestCase {
         event.flags = flags
         return event
     }
+
+    private func makePasteboardRecoveryStore(
+        recoveryWindow: TimeInterval = 5 * 60,
+        now: @escaping () -> Date = { Date() }
+    ) throws -> PasteboardInsertionRecoveryStore {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("autocomp-pasteboard-recovery-\(UUID().uuidString)", isDirectory: true)
+        addTeardownBlock {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        return PasteboardInsertionRecoveryStore(
+            directory: directory,
+            recoveryWindow: recoveryWindow,
+            now: now
+        )
+    }
 }
 
 private final class RecordingAcceptanceKeyboardEventPoster: AcceptanceKeyboardEventPosting {
@@ -247,6 +386,7 @@ private final class RecordingAcceptanceKeyboardEventPoster: AcceptanceKeyboardEv
 
 private final class RecordingAcceptancePasteboard: AcceptancePasteboard {
     var items: [PreservedPasteboardItem]?
+    var activeRecoveryMarkerID: String?
     private(set) var setStrings: [String] = []
 
     func preservedItems() -> [PreservedPasteboardItem]? {
@@ -255,10 +395,12 @@ private final class RecordingAcceptancePasteboard: AcceptancePasteboard {
 
     func clearContents() {
         items = []
+        activeRecoveryMarkerID = nil
     }
 
-    func setString(_ text: String) {
+    func setString(_ text: String, recoveryMarkerID: String?) {
         setStrings.append(text)
+        activeRecoveryMarkerID = recoveryMarkerID
         items = [
             PreservedPasteboardItem(dataByType: [.string: Data(text.utf8)])
         ]
@@ -266,5 +408,10 @@ private final class RecordingAcceptancePasteboard: AcceptancePasteboard {
 
     func writeItems(_ items: [PreservedPasteboardItem]) {
         self.items = items
+        activeRecoveryMarkerID = nil
+    }
+
+    func containsRecoveryMarker(id: String) -> Bool {
+        activeRecoveryMarkerID == id
     }
 }

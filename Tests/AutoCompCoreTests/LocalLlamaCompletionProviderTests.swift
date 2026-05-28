@@ -39,6 +39,31 @@ final class LocalLlamaCompletionProviderTests: XCTestCase {
         }
     }
 
+    func testRuntimeAllocationErrorIsSurfacedWithoutCrash() async throws {
+        let modelURL = try makeTemporaryModelFile()
+        let provider = LocalLlamaCompletionProvider(
+            configuration: LocalLlamaConfiguration(modelPath: modelURL.path),
+            runtime: LocalLlamaRuntimeCore(
+                backend: FakeLocalLlamaRuntimeBackend(
+                    loadError: LocalLlamaError.allocationFailed("Could not allocate model wrapper.")
+                )
+            )
+        )
+
+        do {
+            _ = try await provider.complete(context: makeContext())
+            XCTFail("Expected allocation error")
+        } catch let error as LocalLlamaError {
+            XCTAssertEqual(error, .allocationFailed("Could not allocate model wrapper."))
+            XCTAssertEqual(
+                error.errorDescription,
+                "Local model allocation failed: Could not allocate model wrapper."
+            )
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
     func testGeneratedTextIsNormalizedIntoSuggestion() async throws {
         let modelURL = try makeTemporaryModelFile()
         let backend = FakeLocalLlamaRuntimeBackend(rawText: "Completion:\n review this today\nignore")
@@ -77,6 +102,59 @@ final class LocalLlamaCompletionProviderTests: XCTestCase {
         XCTAssertEqual(suggestion.visibleText, "adiada para sexta-feira")
     }
 
+    func testLocalGenerationReceivesAndAppliesStopSequences() async throws {
+        let modelURL = try makeTemporaryModelFile()
+        let backend = FakeLocalLlamaRuntimeBackend(
+            rawText: "review this today\nignore this line",
+            appliesStopSequences: true
+        )
+        let provider = LocalLlamaCompletionProvider(
+            configuration: LocalLlamaConfiguration(
+                modelPath: modelURL.path,
+                stopSequences: CompletionStopSequences(
+                    continuation: ["\n"],
+                    fillInMiddle: ["<|fim_suffix|>"]
+                )
+            ),
+            runtime: LocalLlamaRuntimeCore(backend: backend)
+        )
+
+        let suggestion = try await provider.complete(context: makeContext())
+
+        XCTAssertEqual(suggestion.visibleText, "review this today")
+        let request = await backend.lastRequest()
+        XCTAssertEqual(request?.stopSequences, ["\n"])
+    }
+
+    func testLocalGenerationStopsByPromptTag() async throws {
+        let modelURL = try makeTemporaryModelFile()
+        let backend = FakeLocalLlamaRuntimeBackend(
+            rawText: "adiada para sexta-feira<|fim_suffix|> porque o prazo mudou.",
+            appliesStopSequences: true
+        )
+        let provider = LocalLlamaCompletionProvider(
+            configuration: LocalLlamaConfiguration(
+                modelPath: modelURL.path,
+                stopSequences: CompletionStopSequences(
+                    continuation: [],
+                    fillInMiddle: ["<|fim_suffix|>"]
+                )
+            ),
+            runtime: LocalLlamaRuntimeCore(backend: backend)
+        )
+
+        let suggestion = try await provider.complete(
+            context: makeContext(
+                textBeforeCursor: "A reuniao foi ",
+                textAfterCursor: " porque o prazo mudou."
+            )
+        )
+
+        XCTAssertEqual(suggestion.visibleText, "adiada para sexta-feira")
+        let request = await backend.lastRequest()
+        XCTAssertEqual(request?.stopSequences, ["<|fim_suffix|>"])
+    }
+
     func testRuntimeCoreSkipsSameModelReloadAndReloadsAfterModelChangeOrShutdown() async throws {
         let firstModelURL = try makeTemporaryModelFile()
         let secondModelURL = try makeTemporaryModelFile()
@@ -93,7 +171,88 @@ final class LocalLlamaCompletionProviderTests: XCTestCase {
         XCTAssertEqual(paths, [firstModelURL.path, secondModelURL.path, secondModelURL.path])
         let counts = await backend.counts()
         XCTAssertEqual(counts.load, 3)
-        XCTAssertEqual(counts.shutdown, 1)
+        XCTAssertEqual(counts.shutdown, 2)
+        let events = await backend.events()
+        XCTAssertEqual(events, [
+            "load:\(firstModelURL.path)",
+            "shutdown",
+            "load:\(secondModelURL.path)",
+            "shutdown",
+            "load:\(secondModelURL.path)"
+        ])
+    }
+
+    func testRuntimeCoreReportsLoadStateTransitions() async throws {
+        let modelURL = try makeTemporaryModelFile()
+        let backend = FakeLocalLlamaRuntimeBackend()
+        let runtime = LocalLlamaRuntimeCore(backend: backend)
+
+        let initialStatus = await runtime.status()
+        XCTAssertEqual(initialStatus, .unloaded)
+
+        try await runtime.load(configuration: LocalLlamaConfiguration(modelPath: modelURL.path))
+
+        let loadedStatus = await runtime.status()
+        XCTAssertEqual(
+            loadedStatus,
+            LocalLlamaRuntimeStatus(state: .loaded, modelPath: modelURL.path)
+        )
+
+        await runtime.shutdown()
+
+        let unloadedStatus = await runtime.status()
+        XCTAssertEqual(
+            unloadedStatus,
+            LocalLlamaRuntimeStatus(state: .unloaded, modelPath: modelURL.path)
+        )
+    }
+
+    func testRuntimeCoreReportsFailedLoadState() async throws {
+        let modelURL = try makeTemporaryModelFile()
+        let runtime = LocalLlamaRuntimeCore(
+            backend: FakeLocalLlamaRuntimeBackend(loadError: LocalLlamaError.loadFailed("bad model"))
+        )
+
+        do {
+            try await runtime.load(configuration: LocalLlamaConfiguration(modelPath: modelURL.path))
+            XCTFail("Expected load failure")
+        } catch let error as LocalLlamaError {
+            XCTAssertEqual(error, .loadFailed("bad model"))
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        let failedStatus = await runtime.status()
+        XCTAssertEqual(
+            failedStatus,
+            LocalLlamaRuntimeStatus(
+                state: .failed,
+                modelPath: modelURL.path,
+                message: "Local model failed to load: bad model"
+            )
+        )
+    }
+
+    func testProviderRecordsRuntimeLoadStates() async throws {
+        let modelURL = try makeTemporaryModelFile()
+        let recorder = RuntimeStatusRecorder()
+        let provider = LocalLlamaCompletionProvider(
+            configuration: LocalLlamaConfiguration(modelPath: modelURL.path),
+            runtime: LocalLlamaRuntimeCore(backend: FakeLocalLlamaRuntimeBackend()),
+            runtimeStatusRecorder: { status in
+                await recorder.record(status)
+            }
+        )
+
+        _ = try await provider.complete(context: makeContext())
+        await provider.shutdown()
+
+        let statuses = await recorder.statuses()
+        XCTAssertEqual(statuses, [
+            LocalLlamaRuntimeStatus(state: .loading, modelPath: modelURL.path),
+            LocalLlamaRuntimeStatus(state: .loaded, modelPath: modelURL.path),
+            LocalLlamaRuntimeStatus(state: .unloaded, modelPath: modelURL.path)
+        ])
     }
 
     func testPromptCacheHintTrackerResetsWhenFieldChanges() async throws {
@@ -185,21 +344,25 @@ final class LocalLlamaCompletionProviderTests: XCTestCase {
 private actor FakeLocalLlamaRuntimeBackend: LocalLlamaRuntimeBackend {
     let rawText: String
     let loadError: Error?
+    let appliesStopSequences: Bool
     private(set) var loadCount = 0
     private(set) var generateCount = 0
     private(set) var shutdownCount = 0
     private(set) var resetCount = 0
     private var paths: [String] = []
+    private var runtimeEvents: [String] = []
     private var storedRequest: CompletionRequest?
 
-    init(rawText: String = "review this", loadError: Error? = nil) {
+    init(rawText: String = "review this", loadError: Error? = nil, appliesStopSequences: Bool = false) {
         self.rawText = rawText
         self.loadError = loadError
+        self.appliesStopSequences = appliesStopSequences
     }
 
     func loadModel(configuration: LocalLlamaConfiguration) async throws {
         loadCount += 1
         paths.append(configuration.modelPath)
+        runtimeEvents.append("load:\(configuration.modelPath)")
         if let loadError {
             throw loadError
         }
@@ -208,6 +371,9 @@ private actor FakeLocalLlamaRuntimeBackend: LocalLlamaRuntimeBackend {
     func generateCompletion(for request: CompletionRequest) async throws -> String {
         generateCount += 1
         storedRequest = request
+        if appliesStopSequences {
+            return CompletionStopSequenceTrimmer.trim(rawText, stopSequences: request.stopSequences)
+        }
         return rawText
     }
 
@@ -227,6 +393,7 @@ private actor FakeLocalLlamaRuntimeBackend: LocalLlamaRuntimeBackend {
 
     func shutdown() async {
         shutdownCount += 1
+        runtimeEvents.append("shutdown")
     }
 
     func counts() -> (load: Int, generate: Int, shutdown: Int, reset: Int) {
@@ -237,7 +404,23 @@ private actor FakeLocalLlamaRuntimeBackend: LocalLlamaRuntimeBackend {
         paths
     }
 
+    func events() -> [String] {
+        runtimeEvents
+    }
+
     func lastRequest() -> CompletionRequest? {
         storedRequest
+    }
+}
+
+private actor RuntimeStatusRecorder {
+    private var recordedStatuses: [LocalLlamaRuntimeStatus] = []
+
+    func record(_ status: LocalLlamaRuntimeStatus) {
+        recordedStatuses.append(status)
+    }
+
+    func statuses() -> [LocalLlamaRuntimeStatus] {
+        recordedStatuses
     }
 }

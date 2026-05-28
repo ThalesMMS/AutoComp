@@ -6,6 +6,9 @@ public enum BackendConnectivityIssue: Equatable, Sendable {
     case offline
     case localNetworkDenied
     case unauthorized
+    case modelNotFound
+    case rateLimited
+    case streamingUnsupported
     case timeout
     case httpStatus(Int)
     case malformedResponse
@@ -24,6 +27,12 @@ public enum BackendConnectivityIssue: Equatable, Sendable {
             return "Local Network access appears blocked. Enable AutoComp in Privacy & Security > Local Network, then retry."
         case .unauthorized:
             return "Remote backend rejected the API key with 401 Unauthorized. Check the API key in Settings > Model."
+        case .modelNotFound:
+            return "Remote backend could not find the configured model. Check the model name in Settings > Model."
+        case .rateLimited:
+            return "Remote backend is rate-limiting requests with HTTP 429. Wait before retrying or reduce request frequency."
+        case .streamingUnsupported:
+            return "Remote backend returned a streaming response, but AutoComp requires non-streaming chat completions."
         case .timeout:
             return "Remote backend timed out. Check that the server is reachable and responding quickly."
         case .httpStatus(let statusCode):
@@ -49,6 +58,12 @@ public enum BackendConnectivityIssue: Equatable, Sendable {
             return "Local Network"
         case .unauthorized:
             return "Unauthorized"
+        case .modelNotFound:
+            return "Model not found"
+        case .rateLimited:
+            return "Rate limited"
+        case .streamingUnsupported:
+            return "Streaming response"
         case .timeout:
             return "Timeout"
         case .httpStatus(let statusCode):
@@ -72,6 +87,12 @@ public enum BackendConnectivityIssue: Equatable, Sendable {
             return "local-network-denied"
         case .unauthorized:
             return "unauthorized"
+        case .modelNotFound:
+            return "model-not-found"
+        case .rateLimited:
+            return "rate-limited"
+        case .streamingUnsupported:
+            return "streaming-unsupported"
         case .timeout:
             return "timeout"
         case .httpStatus(let statusCode):
@@ -91,7 +112,9 @@ public enum BackendConnectivityIssue: Equatable, Sendable {
             return true
         case .httpStatus(let statusCode):
             return (500..<600).contains(statusCode)
-        case .missingAPIKey, .invalidEndpoint, .unauthorized, .malformedResponse, .emptyResponse:
+        case .rateLimited:
+            return true
+        case .missingAPIKey, .invalidEndpoint, .unauthorized, .modelNotFound, .streamingUnsupported, .malformedResponse, .emptyResponse:
             return false
         }
     }
@@ -112,6 +135,10 @@ public enum RemoteCompletionError: LocalizedError, Equatable, Sendable {
             return .missingAPIKey
         case .badStatus(401, _):
             return .unauthorized
+        case .badStatus(404, _):
+            return .httpStatus(404)
+        case .badStatus(429, _):
+            return .rateLimited
         case .badStatus(let statusCode, _):
             return .httpStatus(statusCode)
         case .connectivity(let issue):
@@ -132,19 +159,22 @@ public struct RemoteCompletionConfiguration: Codable, Equatable, Sendable {
     public var model: String
     public var maxTokens: Int
     public var timeoutSeconds: TimeInterval
+    public var stopSequences: CompletionStopSequences
 
     public init(
         baseURL: String,
         apiKey: String,
         model: String,
         maxTokens: Int = 32,
-        timeoutSeconds: TimeInterval = 2.5
+        timeoutSeconds: TimeInterval = 2.5,
+        stopSequences: CompletionStopSequences = .conservativeDefault
     ) {
         self.baseURL = baseURL
         self.apiKey = apiKey
         self.model = model
         self.maxTokens = maxTokens
         self.timeoutSeconds = timeoutSeconds
+        self.stopSequences = stopSequences
     }
 }
 
@@ -270,8 +300,11 @@ public struct RemoteCompletionProvider: ClipboardContextAwareCompletionProvider,
         } catch {
             throw RemoteCompletionError.connectivity(.malformedResponse)
         }
+        if decoded.isStreamingChunk {
+            throw RemoteCompletionError.connectivity(.streamingUnsupported)
+        }
         let suggestions = decoded.choices.compactMap { choice -> Suggestion? in
-            let rawText = choice.message.content ?? ""
+            let rawText = choice.message?.content ?? choice.text ?? ""
             let text = SuggestionTextNormalizer.normalize(
                 rawText: rawText,
                 request: completionRequest
@@ -436,6 +469,8 @@ private struct RemoteChatRequest: Codable {
     let maxTokens: Int
     let temperature: Double
     let n: Int?
+    let stream: Bool
+    let stop: [String]?
     let chatTemplateKwargs: ChatTemplateKwargs
 
     init(completionRequest: CompletionRequest, suggestionCount: Int = 1, messages: [RemoteChatMessage]) {
@@ -444,6 +479,8 @@ private struct RemoteChatRequest: Codable {
         self.maxTokens = completionRequest.maxTokens
         self.temperature = completionRequest.temperature
         self.n = suggestionCount > 1 ? suggestionCount : nil
+        self.stream = false
+        self.stop = completionRequest.stopSequences.isEmpty ? nil : completionRequest.stopSequences
         self.chatTemplateKwargs = ChatTemplateKwargs(enableThinking: false)
     }
 
@@ -453,6 +490,8 @@ private struct RemoteChatRequest: Codable {
         case maxTokens = "max_tokens"
         case temperature
         case n
+        case stream
+        case stop
         case chatTemplateKwargs = "chat_template_kwargs"
     }
 }
@@ -471,11 +510,19 @@ private struct ChatTemplateKwargs: Codable {
 }
 
 private struct RemoteChatResponse: Codable {
+    let object: String?
     let choices: [RemoteChatChoice]
+
+    var isStreamingChunk: Bool {
+        object?.localizedCaseInsensitiveContains("chunk") == true
+            || choices.contains { $0.delta != nil }
+    }
 }
 
 private struct RemoteChatChoice: Codable {
-    let message: RemoteChatMessage
+    let message: RemoteChatMessage?
+    let text: String?
+    let delta: RemoteChatMessage?
 }
 
 private extension Array where Element == Suggestion {

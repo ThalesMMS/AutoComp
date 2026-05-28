@@ -337,6 +337,9 @@ final class SuggestionEngineAcceptanceTests: XCTestCase {
     }
 
     func testManualTriggerUsesLowTrustBufferWhenContextReadFails() async throws {
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "AutoCompLowTrustFallback-\(UUID().uuidString)"))
+        let privacyStore = PrivacySettingsStore(defaults: defaults, key: "privacy")
+        try privacyStore.save(PrivacySettings(clipboardContextEnabled: true, screenContextEnabled: true))
         let app = AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1)
         let context = TextContext(
             app: app,
@@ -345,7 +348,15 @@ final class SuggestionEngineAcceptanceTests: XCTestCase {
         )
         let contextProvider = MutableFailingContextProvider(context: context)
         await contextProvider.fail(with: .noReadableText)
-        let completionProvider = RecordingContextCompletionProvider(visibleText: "lease continue")
+        let completionProvider = RecordingClipboardContextCompletionProvider()
+        let visualContextProvider = StaticVisualContextProvider(
+            snapshot: VisualContextSnapshot(summary: "Visual OCR summary")
+        )
+        let clipboardContext = ClipboardContextSnapshot(
+            summary: "Clipboard summary",
+            status: .included,
+            captureSources: [.clipboard]
+        )
         let presenter = RecordingSuggestionPresenter()
         let fallback = KeystrokeBufferFallback(
             frontmostAppProvider: { app },
@@ -355,22 +366,43 @@ final class SuggestionEngineAcceptanceTests: XCTestCase {
         let engine = SuggestionEngine(
             contextProvider: contextProvider,
             completionProvider: completionProvider,
+            visualContextProvider: visualContextProvider,
+            clipboardContextProvider: StaticClipboardContextProvider(snapshot: clipboardContext),
             presenter: presenter,
+            privacyStore: privacyStore,
             keystrokeBufferFallback: fallback
         )
 
         await engine.triggerManualSuggestion()
         try await Task.sleep(nanoseconds: 100_000_000)
 
-        let recordedContexts = await completionProvider.recordedContexts()
-        XCTAssertEqual(recordedContexts.count, 1)
-        XCTAssertEqual(recordedContexts.first?.textBeforeCursor, "p")
-        XCTAssertEqual(recordedContexts.first?.captureSources, [.keystrokeBufferLowTrust])
-        XCTAssertEqual(engine.diagnostics.focus?.contextSource, "keystrokeBufferLowTrust")
+        let recordedContext = await completionProvider.recordedContext()
+        let recordedVisualContext = await completionProvider.recordedVisualContext()
+        let recordedClipboardContext = await completionProvider.recordedClipboardContext()
+        XCTAssertEqual(recordedContext?.textBeforeCursor, "p")
+        XCTAssertEqual(recordedContext?.captureSources, [.keystrokeBufferLowTrust])
+        XCTAssertNil(recordedVisualContext)
+        XCTAssertNil(recordedClipboardContext)
+        XCTAssertEqual(engine.diagnostics.focus?.contextSource, "Keystroke buffer")
+        XCTAssertEqual(engine.diagnostics.focus?.geometryQuality, "unavailable")
+        XCTAssertEqual(engine.diagnostics.focus?.contextTrust, "low-trust")
         XCTAssertTrue(engine.diagnostics.menuRows.contains {
-            $0.id == "contextSource" && $0.value == "keystrokeBufferLowTrust"
+            $0.id == "contextSource" && $0.value == "Keystroke buffer"
         })
-        XCTAssertEqual(presenter.lastSuggestion?.visibleText, "lease continue")
+        XCTAssertTrue(engine.diagnostics.menuRows.contains {
+            $0.id == "contextWarning"
+                && $0.value == "Low-trust fallback: visual and clipboard context isolated."
+        })
+        XCTAssertTrue(engine.diagnostics.menuRows.contains {
+            $0.id == "supplementalContext" && $0.value == "none (low-trust isolation)"
+        })
+        XCTAssertTrue(engine.diagnostics.menuRows.contains {
+            $0.id == "visualContext" && $0.value == "none"
+        })
+        XCTAssertTrue(engine.diagnostics.menuRows.contains {
+            $0.id == "clipboardContext" && $0.value == "none"
+        })
+        XCTAssertEqual(presenter.lastSuggestion?.visibleText, "continue this")
         engine.stop()
     }
 
@@ -403,6 +435,49 @@ final class SuggestionEngineAcceptanceTests: XCTestCase {
         XCTAssertEqual(recordedContexts.count, 0)
         XCTAssertNil(engine.currentSuggestion)
         XCTAssertEqual(fallback.bufferedText, "")
+        engine.stop()
+    }
+
+    func testSecureFieldRevalidationBlocksBackendOverlayAndShortcutAcceptance() async throws {
+        let app = AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1)
+        let context = TextContext(
+            app: app,
+            focusedElementID: "normal-field",
+            textBeforeCursor: "normal text "
+        )
+        let contextProvider = MutableFailingContextProvider(context: context)
+        let completionProvider = RecordingContextCompletionProvider(visibleText: "suggestion")
+        let presenter = RecordingSuggestionPresenter()
+        let engine = SuggestionEngine(
+            contextProvider: contextProvider,
+            completionProvider: completionProvider,
+            presenter: presenter
+        )
+
+        await engine.triggerManualSuggestion()
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        var recordedContexts = await completionProvider.recordedContexts()
+        XCTAssertEqual(recordedContexts.count, 1)
+        XCTAssertNotNil(engine.currentSuggestion)
+        XCTAssertEqual(presenter.lastSuggestion?.visibleText, "suggestion")
+
+        await contextProvider.fail(with: .secureOrUnsupportedField)
+        let inserter = RecordingTextInserter()
+        let outcome = await engine.acceptNextWord(using: inserter)
+
+        XCTAssertEqual(outcome, .passedThrough)
+        XCTAssertEqual(inserter.insertedText, "")
+        recordedContexts = await completionProvider.recordedContexts()
+        XCTAssertEqual(recordedContexts.count, 1)
+        XCTAssertNil(engine.currentSuggestion)
+        XCTAssertNil(presenter.lastSuggestion)
+        XCTAssertEqual(engine.diagnostics.focusFailure?.status, .blocked)
+        XCTAssertEqual(engine.diagnostics.lastDecision?.reason, .secureField)
+        XCTAssertFalse(engine.diagnostics.menuRows.contains {
+            $0.value.localizedCaseInsensitiveContains("normal text")
+                || $0.value.localizedCaseInsensitiveContains("suggestion")
+        })
         engine.stop()
     }
 
@@ -453,7 +528,8 @@ final class SuggestionEngineAcceptanceTests: XCTestCase {
         let engine = SuggestionEngine(
             contextProvider: MutableContextProvider(context: context),
             completionProvider: completionProvider,
-            presenter: presenter
+            presenter: presenter,
+            multiSuggestionEnabled: true
         )
 
         await engine.triggerManualSuggestion()
@@ -472,6 +548,45 @@ final class SuggestionEngineAcceptanceTests: XCTestCase {
         XCTAssertEqual(inserter.insertedText, " first option")
         XCTAssertNil(engine.currentSuggestion)
         XCTAssertNil(presenter.lastSuggestion)
+        engine.stop()
+    }
+
+    func testMultiSuggestionSelectionUpdatesVisibleAlternativeAndStatus() async throws {
+        let app = AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1)
+        let context = TextContext(
+            app: app,
+            focusedElementID: "textedit-field",
+            textBeforeCursor: "Please"
+        )
+        let completionProvider = RecordingMultipleCompletionProvider(visibleTexts: [
+            " first option",
+            " second option",
+            " third option"
+        ])
+        let presenter = RecordingSuggestionPresenter()
+        let engine = SuggestionEngine(
+            contextProvider: MutableContextProvider(context: context),
+            completionProvider: completionProvider,
+            presenter: presenter,
+            multiSuggestionEnabled: true
+        )
+
+        await engine.triggerManualSuggestion()
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        XCTAssertTrue(engine.isMultiSuggestionPopupVisible)
+        XCTAssertEqual(engine.statusMessage, "Suggesting in TextEdit; alternative 1 of 3")
+
+        engine.selectNextAlternative()
+        XCTAssertEqual(engine.currentSuggestion?.selectedAlternativeIndex, 1)
+        XCTAssertEqual(engine.currentSuggestion?.visibleText, " second option")
+        XCTAssertEqual(engine.statusMessage, "Alternative 2 of 3 selected")
+        XCTAssertEqual(presenter.lastSuggestion?.selectedAlternativeIndex, 1)
+
+        engine.selectPreviousAlternative()
+        XCTAssertEqual(engine.currentSuggestion?.selectedAlternativeIndex, 0)
+        XCTAssertEqual(engine.currentSuggestion?.visibleText, " first option")
+        XCTAssertEqual(engine.statusMessage, "Alternative 1 of 3 selected")
         engine.stop()
     }
 
@@ -509,7 +624,7 @@ final class SuggestionEngineAcceptanceTests: XCTestCase {
         engine.stop()
     }
 
-    func testDisabledMultiSuggestionSettingKeepsManualTriggerSingleSuggestion() async throws {
+    func testDefaultMultiSuggestionSettingKeepsManualTriggerSingleSuggestion() async throws {
         let app = AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1)
         let context = TextContext(
             app: app,
@@ -525,8 +640,7 @@ final class SuggestionEngineAcceptanceTests: XCTestCase {
         let engine = SuggestionEngine(
             contextProvider: MutableContextProvider(context: context),
             completionProvider: completionProvider,
-            presenter: presenter,
-            multiSuggestionEnabled: false
+            presenter: presenter
         )
 
         await engine.triggerManualSuggestion()
@@ -847,6 +961,88 @@ final class SuggestionEngineAcceptanceTests: XCTestCase {
         engine.stop()
     }
 
+    func testChatAcceptanceBlocksReturnBearingSuggestionBeforeInsertion() async throws {
+        let app = AppIdentity(bundleID: "com.tinyspeck.slackmacgap", displayName: "Slack", processID: 1)
+        let context = TextContext(
+            app: app,
+            focusedElementID: "slack-composer",
+            stableFieldIdentity: StableFieldIdentity(app: app, role: "AXTextArea"),
+            textBeforeCursor: "Please ",
+            selectedRange: NSRange(location: 7, length: 0)
+        )
+        let contextProvider = MutableContextProvider(context: context)
+        let completionProvider = CountingCompletionProvider(
+            suggestion: Suggestion(
+                baseContextID: context.id,
+                visibleText: "line one\nline two",
+                latencyMs: 25
+            )
+        )
+        let presenter = RecordingSuggestionPresenter()
+        let engine = SuggestionEngine(
+            contextProvider: contextProvider,
+            completionProvider: completionProvider,
+            presenter: presenter
+        )
+
+        await engine.triggerManualSuggestion()
+        try await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertEqual(presenter.lastSuggestion?.visibleText, "line one\nline two")
+
+        let inserter = RecordingTextInserter()
+        let outcome = await engine.acceptAll(using: inserter)
+
+        XCTAssertEqual(outcome, .passedThrough)
+        XCTAssertEqual(inserter.insertedText, "")
+        XCTAssertNil(engine.currentSuggestion)
+        XCTAssertNil(presenter.lastSuggestion)
+        XCTAssertEqual(engine.statusMessage, "Risky host app blocked")
+        XCTAssertEqual(engine.diagnostics.lastDecision?.summary, "blocked: blocked-risky-host-app")
+        engine.stop()
+    }
+
+    func testRiskyHostAcceptanceBlocksUnclearEditableTarget() async throws {
+        let app = AppIdentity(bundleID: "com.microsoft.VSCode", displayName: "VS Code", processID: 1)
+        let context = TextContext(
+            app: app,
+            focusedElementID: "unknown-pane",
+            textBeforeCursor: "Please "
+        )
+        let contextProvider = MutableContextProvider(context: context)
+        let completionProvider = CountingCompletionProvider(
+            suggestion: Suggestion(
+                baseContextID: context.id,
+                visibleText: "continue this",
+                latencyMs: 25
+            )
+        )
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "RiskyHostAcceptance-\(UUID().uuidString)"))
+        let compatibilitySettings = CompatibilitySettingsStore(defaults: defaults)
+        compatibilitySettings.setMode(.manualOnly, for: "com.microsoft.VSCode")
+        let presenter = RecordingSuggestionPresenter()
+        let engine = SuggestionEngine(
+            contextProvider: contextProvider,
+            completionProvider: completionProvider,
+            presenter: presenter,
+            compatibilitySettings: compatibilitySettings
+        )
+
+        await engine.triggerManualSuggestion()
+        try await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertEqual(presenter.lastSuggestion?.visibleText, "continue this")
+
+        let inserter = RecordingTextInserter()
+        let outcome = await engine.acceptNextWord(using: inserter)
+
+        XCTAssertEqual(outcome, .passedThrough)
+        XCTAssertEqual(inserter.insertedText, "")
+        XCTAssertNil(engine.currentSuggestion)
+        XCTAssertNil(presenter.lastSuggestion)
+        XCTAssertEqual(engine.statusMessage, "Risky host app blocked")
+        XCTAssertEqual(engine.diagnostics.lastDecision?.summary, "blocked: blocked-risky-host-app")
+        engine.stop()
+    }
+
     func testRecentSpaceKeyCanTriggerWhenFirstObservedContextAlreadyEndsWithSpace() async throws {
         let app = AppIdentity(bundleID: "com.google.Chrome", displayName: "Google Chrome", processID: 1)
         let initialContext = TextContext(
@@ -952,7 +1148,10 @@ final class SuggestionEngineAcceptanceTests: XCTestCase {
         engine.recordCapturedInputEvent(.text(keyCode: CapturedInputEventAdapter.spaceKeyCode, isSuggestionTrigger: true))
         try await Task.sleep(nanoseconds: 700_000_000)
 
-        XCTAssertEqual(metrics.latencies, [25])
+        XCTAssertEqual(metrics.completionLatencyReports.count, 1)
+        XCTAssertNotNil(metrics.completionLatencyReports.first?.axCaptureMs)
+        XCTAssertNotNil(metrics.completionLatencyReports.first?.debounceMs)
+        XCTAssertNotNil(metrics.completionLatencyReports.first?.backendMs)
 
         let inserter = RecordingTextInserter()
         await engine.acceptNextWord(using: inserter)
@@ -960,6 +1159,7 @@ final class SuggestionEngineAcceptanceTests: XCTestCase {
 
         XCTAssertEqual(metrics.acceptedTexts, ["complete "])
         XCTAssertEqual(metrics.dismissedSuggestions, 1)
+        XCTAssertEqual(metrics.insertionLatencies.count, 1)
     }
 
     func testAcceptNextWordPassesThroughWhenLiveContextChangedTargets() async throws {
@@ -1353,7 +1553,7 @@ final class SuggestionEngineAcceptanceTests: XCTestCase {
         engine.stop()
     }
 
-    func testDiagnosticsRecordCompletionSuccessWithPrivacyAllowedOutput() async throws {
+    func testDiagnosticsRecordCompletionSuccessWithPrivacyAllowedOutputSummaries() async throws {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: "AutoCompDiagnostics-\(UUID().uuidString)"))
         let privacyStore = PrivacySettingsStore(defaults: defaults, key: "privacy")
         try privacyStore.save(PrivacySettings(collectionEnabled: true))
@@ -1382,8 +1582,14 @@ final class SuggestionEngineAcceptanceTests: XCTestCase {
         XCTAssertEqual(engine.diagnostics.focus?.appDisplayName, "TextEdit")
         XCTAssertEqual(engine.diagnostics.eligibility?.outcome, "eligible")
         XCTAssertEqual(engine.diagnostics.backend.status, .success)
-        XCTAssertEqual(engine.diagnostics.output.rawPreview, "Completion:  continue this")
-        XCTAssertEqual(engine.diagnostics.output.normalizedPreview, "continue this")
+        XCTAssertEqual(
+            engine.diagnostics.output.rawPreview,
+            AutoCompLogger.redactedSummary(for: "Completion:\n continue this").description
+        )
+        XCTAssertEqual(
+            engine.diagnostics.output.normalizedPreview,
+            AutoCompLogger.redactedSummary(for: "continue this").description
+        )
         engine.stop()
     }
 
@@ -3291,8 +3497,18 @@ private actor RecordingVisualContextCompletionProvider: VisualContextAwareComple
 }
 
 private actor RecordingClipboardContextCompletionProvider: ClipboardContextAwareCompletionProvider {
+    private var storedContext: TextContext?
+    private var storedVisualContext: VisualContextSnapshot?
     private var storedClipboardContext: ClipboardContextSnapshot?
     private var storedPrivacySettings: PrivacySettings?
+
+    func recordedContext() -> TextContext? {
+        storedContext
+    }
+
+    func recordedVisualContext() -> VisualContextSnapshot? {
+        storedVisualContext
+    }
 
     func recordedClipboardContext() -> ClipboardContextSnapshot? {
         storedClipboardContext
@@ -3330,6 +3546,8 @@ private actor RecordingClipboardContextCompletionProvider: ClipboardContextAware
         visualContext: VisualContextSnapshot?,
         clipboardContext: ClipboardContextSnapshot?
     ) async throws -> Suggestion {
+        storedContext = context
+        storedVisualContext = visualContext
         storedPrivacySettings = privacySettings
         storedClipboardContext = clipboardContext
         return Suggestion(baseContextID: context.id, visibleText: "continue this", latencyMs: 12)
@@ -3474,6 +3692,8 @@ private final class RecordingProductivityMetrics: ProductivityMetricsRecording {
     private(set) var acceptedTexts: [String] = []
     private(set) var dismissedSuggestions = 0
     private(set) var latencies: [Int] = []
+    private(set) var completionLatencyReports: [CompletionLatencyReport] = []
+    private(set) var insertionLatencies: [Int] = []
 
     func recordAcceptedText(_ text: String) {
         acceptedTexts.append(text)
@@ -3485,6 +3705,17 @@ private final class RecordingProductivityMetrics: ProductivityMetricsRecording {
 
     func recordBackendLatency(_ latencyMs: Int) {
         latencies.append(latencyMs)
+    }
+
+    func recordCompletionLatency(_ report: CompletionLatencyReport) {
+        completionLatencyReports.append(report)
+        if let backendMs = report.backendMs {
+            latencies.append(backendMs)
+        }
+    }
+
+    func recordInsertionLatency(_ latencyMs: Int) {
+        insertionLatencies.append(latencyMs)
     }
 }
 

@@ -1,0 +1,11 @@
+{
+  "id": "cmpl-text",
+  "object": "text_completion",
+  "choices": [
+    {
+      "index": 0,
+      "text": "review this today.",
+      "finish_reason": "stop"
+    }
+  ]
+}

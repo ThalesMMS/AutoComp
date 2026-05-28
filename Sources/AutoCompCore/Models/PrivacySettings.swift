@@ -1,5 +1,22 @@
 import Foundation
 
+public enum PrivacyCollectionRuleSource: String, Codable, Equatable, Sendable {
+    case collectionDisabled = "collection-disabled"
+    case domainRule = "domain-rule"
+    case appRule = "app-rule"
+    case defaultAllow = "default-allow"
+}
+
+public struct PrivacyCollectionDecision: Equatable, Sendable {
+    public let allowed: Bool
+    public let ruleSource: PrivacyCollectionRuleSource
+
+    public init(allowed: Bool, ruleSource: PrivacyCollectionRuleSource) {
+        self.allowed = allowed
+        self.ruleSource = ruleSource
+    }
+}
+
 public struct PrivacySettings: Codable, Equatable, Sendable {
     public var collectionEnabled: Bool
     public var clipboardContextEnabled: Bool
@@ -61,19 +78,23 @@ public struct PrivacySettings: Codable, Equatable, Sendable {
     }
 
     public func allowsCollection(appBundleID: String, domain: String?) -> Bool {
+        collectionDecision(appBundleID: appBundleID, domain: domain).allowed
+    }
+
+    public func collectionDecision(appBundleID: String, domain: String?) -> PrivacyCollectionDecision {
         guard collectionEnabled else {
-            return false
+            return PrivacyCollectionDecision(allowed: false, ruleSource: .collectionDisabled)
         }
 
         if let domainRule = collectionRule(forDomain: domain) {
-            return domainRule
+            return PrivacyCollectionDecision(allowed: domainRule, ruleSource: .domainRule)
         }
 
         if let appRule = perAppRules[appBundleID] {
-            return appRule
+            return PrivacyCollectionDecision(allowed: appRule, ruleSource: .appRule)
         }
 
-        return true
+        return PrivacyCollectionDecision(allowed: true, ruleSource: .defaultAllow)
     }
 
     public func collectionRule(forDomain domain: String?) -> Bool? {

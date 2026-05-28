@@ -22,7 +22,7 @@ final class PermissionService: ObservableObject {
 
     init() {
         refresh()
-        startRefreshing()
+        startMonitoring()
     }
 
     isolated deinit {
@@ -30,6 +30,13 @@ final class PermissionService: ObservableObject {
         if let appActivationObserver {
             NotificationCenter.default.removeObserver(appActivationObserver)
         }
+    }
+
+    var diagnostics: PermissionServiceDiagnostics {
+        PermissionServiceDiagnostics(
+            refreshTimerActive: refreshTimer != nil,
+            appActivationObserverActive: appActivationObserver != nil
+        )
     }
 
     func refresh() {
@@ -152,20 +159,34 @@ final class PermissionService: ObservableObject {
         openSettings(for: .screenRecording)
     }
 
-    private func startRefreshing() {
-        refreshTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                self?.refresh()
+    func startMonitoring() {
+        if refreshTimer == nil {
+            refreshTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+                Task { @MainActor in
+                    self?.refresh()
+                }
             }
         }
-        appActivationObserver = NotificationCenter.default.addObserver(
-            forName: NSApplication.didBecomeActiveNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor in
-                self?.refresh()
+
+        if appActivationObserver == nil {
+            appActivationObserver = NotificationCenter.default.addObserver(
+                forName: NSApplication.didBecomeActiveNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in
+                    self?.refresh()
+                }
             }
+        }
+    }
+
+    func stopMonitoring() {
+        refreshTimer?.invalidate()
+        refreshTimer = nil
+        if let appActivationObserver {
+            NotificationCenter.default.removeObserver(appActivationObserver)
+            self.appActivationObserver = nil
         }
     }
 
@@ -239,4 +260,13 @@ private struct PermissionDebugState: Equatable {
     let screenRecordingAllowed: Bool
     let runtimeBundleID: String
     let runtimeExecutablePath: String
+}
+
+struct PermissionServiceDiagnostics: Equatable {
+    let refreshTimerActive: Bool
+    let appActivationObserverActive: Bool
+
+    var activeObserverSetCount: Int {
+        refreshTimerActive || appActivationObserverActive ? 1 : 0
+    }
 }

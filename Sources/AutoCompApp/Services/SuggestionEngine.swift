@@ -35,6 +35,19 @@ private enum AcceptanceCommandAction {
     }
 }
 
+private struct RiskyHostAcceptanceBlock: Equatable {
+    let reason: String
+    let statusMessage: String
+    let diagnosticAction: String
+}
+
+private struct CompletionLatencySeed: Sendable {
+    var startedAt: ContinuousClock.Instant
+    var axCaptureMs: Int?
+    var geometryMs: Int?
+    var debounceMs: Int?
+}
+
 enum SuggestionAcceptanceCommandOutcome: Equatable {
     case accepted
     case passedThrough
@@ -114,7 +127,7 @@ final class SuggestionEngine: ObservableObject {
         compatibilitySettings: CompatibilitySettingsStore = CompatibilitySettingsStore(),
         privacyStore: PrivacySettingsStore = PrivacySettingsStore(),
         productivityMetrics: ProductivityMetricsRecording? = nil,
-        multiSuggestionEnabled: Bool = true,
+        multiSuggestionEnabled: Bool = CompletionBackendSettings.defaultMultiSuggestionEnabled,
         eligibilityEvaluator: SuggestionEligibilityEvaluator = SuggestionEligibilityEvaluator(),
         inputMethodStateProvider: @escaping @Sendable () -> InputMethodState = { .asciiCompatible },
         keystrokeBufferFallback: KeystrokeBufferFallback? = nil,
@@ -199,6 +212,18 @@ final class SuggestionEngine: ObservableObject {
         }
     }
 
+    var isMultiSuggestionPopupVisible: Bool {
+        isMultiSuggestionEnabled && (currentSuggestion?.hasMultipleAlternatives == true)
+    }
+
+    func selectNextAlternative() {
+        selectAlternative(offset: 1)
+    }
+
+    func selectPreviousAlternative() {
+        selectAlternative(offset: -1)
+    }
+
     func recordSuggestionTriggerKey(_ event: CapturedInputEvent) {
         recordCapturedInputEvent(event)
     }
@@ -247,10 +272,19 @@ final class SuggestionEngine: ObservableObject {
         diagnostics.recordInputMethod(inputMethodState)
 
         do {
+            let focusCaptureStartedAt = ContinuousClock.now
             let context = try await focusProvider.currentContext()
+            let latencySeed = makeCompletionLatencySeed(
+                startedAt: focusCaptureStartedAt,
+                fallbackAXCaptureMs: elapsedMs(since: focusCaptureStartedAt)
+            )
             transientFocusFailureStartedAt = nil
             recordTrustedContext(context)
-            runManualSuggestion(for: context, inputMethodState: inputMethodState)
+            runManualSuggestion(
+                for: context,
+                inputMethodState: inputMethodState,
+                latencySeed: latencySeed
+            )
         } catch {
             if runManualFallbackSuggestion(after: error, inputMethodState: inputMethodState) {
                 return
@@ -275,16 +309,18 @@ final class SuggestionEngine: ObservableObject {
         }
 
         transientFocusFailureStartedAt = nil
-        GeometryDebug.log("manual-trigger fallback=contextSource=\(TextCaptureSource.keystrokeBufferLowTrust.rawValue) originalError=\((error as? LocalizedError)?.errorDescription ?? error.localizedDescription) context=\(debugContext(context))")
+        let captureDiagnostics = ContextCaptureDiagnostics(context: context)
+        GeometryDebug.log("manual-trigger fallback=low-trust source=\(captureDiagnostics.contextSourceLogValue) geometry=\(captureDiagnostics.geometryQualityLogValue) originalError=\((error as? LocalizedError)?.errorDescription ?? error.localizedDescription) context=\(debugContext(context))")
         runManualSuggestion(for: context, inputMethodState: inputMethodState)
         return true
     }
 
     private func runManualSuggestion(
         for context: TextContext,
-        inputMethodState: InputMethodState
+        inputMethodState: InputMethodState,
+        latencySeed: CompletionLatencySeed? = nil
     ) {
-        diagnostics.recordFocus(context: context)
+        recordFocusDiagnostics(context)
         let decision = eligibilityDecision(
             for: context,
             previousObservedContext: currentContext,
@@ -305,7 +341,7 @@ final class SuggestionEngine: ObservableObject {
         acceptanceSessionController.clearAll()
         currentSuggestion = nil
         presenter.hide()
-        requestCompletion(for: context, invocation: .manual)
+        requestCompletion(for: context, invocation: .manual, latencySeed: latencySeed)
     }
 
     func updateCompletionProvider(
@@ -393,6 +429,7 @@ final class SuggestionEngine: ObservableObject {
         }
 
         do {
+            let insertionStartedAt = ContinuousClock.now
             guard let result = try await acceptanceController.acceptNextWord(
                 currentSuggestion: currentSuggestion,
                 currentContext: liveContext,
@@ -401,8 +438,10 @@ final class SuggestionEngine: ObservableObject {
                 GeometryDebug.log("acceptance passed-through action=\(action.debugName) reason=no-token context=\(debugContext(liveContext)) current=\(debugSuggestionState())")
                 return .passedThrough
             }
+            let insertionMs = elapsedMs(since: insertionStartedAt)
             GeometryDebug.log("acceptance accepted action=\(action.debugName) acceptedLength=\((result.acceptedText as NSString).length) context=\(debugContext(liveContext)) current=\(debugSuggestionState(result.currentSuggestion))")
             productivityMetrics?.recordAcceptedText(result.acceptedText)
+            recordInsertionLatency(insertionMs)
             if result.shouldHidePresenter {
                 GeometryDebug.log("completed-accept-all state=\(result.completedAcceptAllStateArmed ? "armed" : "nil") source=accept-next-word acceptedLength=\((result.acceptedText as NSString).length)")
             }
@@ -435,6 +474,7 @@ final class SuggestionEngine: ObservableObject {
         }
 
         do {
+            let insertionStartedAt = ContinuousClock.now
             guard let result = try await acceptanceController.acceptAll(
                 currentSuggestion: currentSuggestion,
                 currentContext: liveContext,
@@ -443,8 +483,10 @@ final class SuggestionEngine: ObservableObject {
                 GeometryDebug.log("acceptance passed-through action=\(action.debugName) reason=no-token context=\(debugContext(liveContext)) current=\(debugSuggestionState())")
                 return .passedThrough
             }
+            let insertionMs = elapsedMs(since: insertionStartedAt)
             GeometryDebug.log("acceptance accepted action=\(action.debugName) acceptedLength=\((result.acceptedText as NSString).length) context=\(debugContext(liveContext)) current=\(debugSuggestionState(result.currentSuggestion))")
             productivityMetrics?.recordAcceptedText(result.acceptedText)
+            recordInsertionLatency(insertionMs)
             GeometryDebug.log("completed-accept-all state=\(result.completedAcceptAllStateArmed ? "armed" : "nil") acceptedLength=\((result.acceptedText as NSString).length)")
             currentSuggestion = nil
             presenter.hide()
@@ -470,7 +512,7 @@ final class SuggestionEngine: ObservableObject {
             liveContext = try await focusProvider.currentContext()
             transientFocusFailureStartedAt = nil
             recordTrustedContext(liveContext)
-            diagnostics.recordFocus(context: liveContext)
+            recordFocusDiagnostics(liveContext)
         } catch {
             diagnostics.recordFocusFailure(error)
             statusMessage = "Suggestion unavailable"
@@ -484,6 +526,14 @@ final class SuggestionEngine: ObservableObject {
             currentSuggestion: currentSuggestion
         ) {
         case .valid:
+            if let block = riskyHostAcceptanceBlock(action: action, context: liveContext) {
+                currentContext = liveContext
+                statusMessage = block.statusMessage
+                diagnostics.recordRiskyHostAppBlock(action: block.diagnosticAction)
+                GeometryDebug.log("acceptance passed-through action=\(action.debugName) reason=\(block.reason) context=\(debugContext(liveContext)) current=\(debugSuggestionState())")
+                hideSuggestion(reason: "acceptance-\(block.reason)", context: liveContext)
+                return nil
+            }
             currentContext = liveContext
             return liveContext
         case .passedThrough(let reason):
@@ -492,6 +542,54 @@ final class SuggestionEngine: ObservableObject {
             GeometryDebug.log("acceptance passed-through action=\(action.debugName) reason=\(reason.rawValue) context=\(debugContext(liveContext)) current=\(debugSuggestionState())")
             hideSuggestion(reason: "acceptance-\(reason.rawValue)", context: liveContext)
             return nil
+        }
+    }
+
+    private func riskyHostAcceptanceBlock(
+        action: AcceptanceCommandAction,
+        context: TextContext
+    ) -> RiskyHostAcceptanceBlock? {
+        guard let category = RiskyHostAppPolicy.category(
+            bundleID: context.app.bundleID,
+            domain: context.domain
+        ) else {
+            return nil
+        }
+
+        guard RiskyHostAppPolicy.isClearlyEditableTarget(context) else {
+            return RiskyHostAcceptanceBlock(
+                reason: "blocked-risky-host-app",
+                statusMessage: "Risky host app blocked",
+                diagnosticAction: "Acceptance blocked because the target was not clearly editable in \(category.rawValue)."
+            )
+        }
+
+        guard category == .chat,
+              let acceptedText = pendingAcceptedText(action: action) else {
+            return nil
+        }
+
+        if RiskyHostAppPolicy.containsReturn(acceptedText) {
+            return RiskyHostAcceptanceBlock(
+                reason: "blocked-risky-host-app",
+                statusMessage: "Risky host app blocked",
+                diagnosticAction: "Acceptance blocked because chat insertion contained Return."
+            )
+        }
+
+        return nil
+    }
+
+    private func pendingAcceptedText(action: AcceptanceCommandAction) -> String? {
+        guard var suggestion = currentSuggestion else {
+            return nil
+        }
+
+        switch action {
+        case .nextWord:
+            return suggestion.acceptNextWord()
+        case .fullSuggestion:
+            return suggestion.acceptAll()
         }
     }
 
@@ -519,10 +617,15 @@ final class SuggestionEngine: ObservableObject {
         do {
             let inputMethodState = inputMethodStateProvider()
             diagnostics.recordInputMethod(inputMethodState)
+            let focusCaptureStartedAt = ContinuousClock.now
             let context = try await focusProvider.currentContext()
+            let latencySeed = makeCompletionLatencySeed(
+                startedAt: focusCaptureStartedAt,
+                fallbackAXCaptureMs: elapsedMs(since: focusCaptureStartedAt)
+            )
             transientFocusFailureStartedAt = nil
             recordTrustedContext(context)
-            diagnostics.recordFocus(context: context)
+            recordFocusDiagnostics(context)
             GeometryDebug.log("refresh source=\(source.debugName) context=\(debugContext(context)) previous=\(debugContext(currentContext)) current=\(debugSuggestionState())")
 
             if handleAppSwitchIfNeeded(context: context, source: source) {
@@ -622,7 +725,12 @@ final class SuggestionEngine: ObservableObject {
 
             if let emojiSuggestion = emojiService.suggestion(for: context.textBeforeCursor, contextID: context.id) {
                 GeometryDebug.log("completion-path source=emoji context=\(debugContext(context))")
-                publish(emojiSuggestion, context: context)
+                publish(
+                    emojiSuggestion,
+                    context: context,
+                    latencyReport: completionLatencyReport(from: latencySeed),
+                    latencyStartedAt: latencySeed.startedAt
+                )
                 return
             }
 
@@ -630,7 +738,8 @@ final class SuggestionEngine: ObservableObject {
             // stop typing before requesting a new completion.
             hideSuggestion(reason: "eligible-new-context", context: context)
             let debounceInterval = predictionController.debounceInterval
-            let debounceWorkID = predictionController.replaceDebouncedWork { [weak self, debounceInterval] workID in
+            let debounceStartedAt = ContinuousClock.now
+            let debounceWorkID = predictionController.replaceDebouncedWork { [weak self, debounceInterval, latencySeed, debounceStartedAt] workID in
                 try? await Task.sleep(nanoseconds: UInt64(debounceInterval * 1_000_000_000))
                 guard !Task.isCancelled else { return }
                 guard let engine = self else { return }
@@ -640,7 +749,13 @@ final class SuggestionEngine: ObservableObject {
                         return
                     }
                     GeometryDebug.log("completion-debounce fired workID=\(workID) generation=\(workID) source=\(source.debugName) context=\(engine.debugContext(context))")
-                    engine.requestCompletion(for: context, invocation: .automatic)
+                    var firedLatencySeed = latencySeed
+                    firedLatencySeed.debounceMs = debounceStartedAt.duration(to: .now).appMilliseconds
+                    engine.requestCompletion(
+                        for: context,
+                        invocation: .automatic,
+                        latencySeed: firedLatencySeed
+                    )
                 }
             }
             GeometryDebug.log("completion-debounce scheduled workID=\(debounceWorkID) generation=\(debounceWorkID) source=\(source.debugName) interval=\(debounceInterval) context=\(debugContext(context))")
@@ -694,6 +809,20 @@ final class SuggestionEngine: ObservableObject {
         dismissedContext = nil
         GeometryDebug.log("suggestion-hide reason=app-switch source=\(source.debugName) previous=\(debugContext(previousContext)) context=\(debugContext(context))")
         return source.shouldStopAfterAppSwitchClear
+    }
+
+    private func recordFocusDiagnostics(_ context: TextContext) {
+        diagnostics.recordFocus(
+            context: context,
+            domainResolution: domainResolution(for: context)
+        )
+    }
+
+    private func domainResolution(for context: TextContext) -> BrowserDomainResolution {
+        if let reported = (focusProvider as? DomainResolutionReporting)?.lastDomainResolution {
+            return reported.resolvingEffectiveDomain(context.domain)
+        }
+        return .inferred(domain: context.domain)
     }
 
     private func eligibilityDecision(
@@ -761,9 +890,56 @@ final class SuggestionEngine: ObservableObject {
         keystrokeBufferFallback?.observeTrustedContext(context)
     }
 
+    private func makeCompletionLatencySeed(
+        startedAt: ContinuousClock.Instant,
+        fallbackAXCaptureMs: Int
+    ) -> CompletionLatencySeed {
+        let focusLatency = (focusProvider as? FocusContextLatencyReporting)?.lastFocusContextLatencyReport
+        return CompletionLatencySeed(
+            startedAt: startedAt,
+            axCaptureMs: focusLatency?.axCaptureMs ?? fallbackAXCaptureMs,
+            geometryMs: focusLatency?.geometryMs,
+            debounceMs: nil
+        )
+    }
+
+    private func completionLatencyReport(from seed: CompletionLatencySeed?) -> CompletionLatencyReport {
+        CompletionLatencyReport(
+            axCaptureMs: seed?.axCaptureMs,
+            geometryMs: seed?.geometryMs,
+            debounceMs: seed?.debounceMs
+        )
+    }
+
+    private func elapsedMs(since startedAt: ContinuousClock.Instant) -> Int {
+        max(0, startedAt.duration(to: .now).appMilliseconds)
+    }
+
+    private func recordCompletionLatency(_ report: CompletionLatencyReport) {
+        guard privacyStore.load().productivityMetricsEnabled else {
+            diagnostics.recordLatency(nil)
+            return
+        }
+        guard !report.isEmpty else {
+            return
+        }
+        diagnostics.recordLatency(report)
+        productivityMetrics?.recordCompletionLatency(report)
+    }
+
+    private func recordInsertionLatency(_ latencyMs: Int) {
+        guard privacyStore.load().productivityMetricsEnabled else {
+            diagnostics.recordLatency(nil)
+            return
+        }
+        diagnostics.recordInsertionLatency(latencyMs)
+        productivityMetrics?.recordInsertionLatency(latencyMs)
+    }
+
     private func requestCompletion(
         for context: TextContext,
-        invocation: CompletionInvocation = .automatic
+        invocation: CompletionInvocation = .automatic,
+        latencySeed: CompletionLatencySeed? = nil
     ) {
         backendStatusSummary = backendHealthMonitor.refresh()
         if invocation == .automatic,
@@ -793,6 +969,8 @@ final class SuggestionEngine: ObservableObject {
         diagnostics.recordBackendRequest(policy: routingPolicy())
         let requestedSignature = contextGenerationTracker.signature(for: context)
         let providerGeneration = providerLifecycleGeneration
+        let latencyStartedAt = latencySeed?.startedAt ?? ContinuousClock.now
+        let initialLatencyReport = completionLatencyReport(from: latencySeed)
         predictionController.replaceGenerationWork { [weak self] workID in
             GeometryDebug.log("completion-request workID=\(workID) generation=\(workID) app=\(context.app.displayName) bundle=\(context.app.bundleID) context=\(context.geometryDebugDescription)")
             guard let engine = self else { return }
@@ -811,9 +989,17 @@ final class SuggestionEngine: ObservableObject {
                 return
             }
             do {
+                var latencyReport = initialLatencyReport
                 let privacySettings = engine.privacyStore.load()
                 let isLowTrustRequest = engine.isLowTrustContext(context)
-                let visualContext = isLowTrustRequest ? nil : await engine.currentVisualContext(for: context)
+                let visualContext: VisualContextSnapshot?
+                if isLowTrustRequest || engine.visualContextProvider == nil {
+                    visualContext = nil
+                } else {
+                    let visualContextStartedAt = ContinuousClock.now
+                    visualContext = await engine.currentVisualContext(for: context)
+                    latencyReport.visualContextMs = visualContextStartedAt.duration(to: .now).appMilliseconds
+                }
                 guard !Task.isCancelled else {
                     await MainActor.run {
                         engine.recordAutocompleteDebug(
@@ -898,12 +1084,28 @@ final class SuggestionEngine: ObservableObject {
                         return
                     }
                 }
-                let clipboardContext = isLowTrustRequest
-                    ? nil
-                    : engine.clipboardContextProvider?.currentClipboardContext(
+                let clipboardContext: ClipboardContextSnapshot?
+                if isLowTrustRequest || engine.clipboardContextProvider == nil {
+                    clipboardContext = nil
+                } else {
+                    let clipboardFilterStartedAt = ContinuousClock.now
+                    clipboardContext = engine.clipboardContextProvider?.currentClipboardContext(
                         for: context,
                         privacySettings: privacySettings
                     )
+                    latencyReport.clipboardFilterMs = clipboardFilterStartedAt.duration(to: .now).appMilliseconds
+                }
+                await MainActor.run {
+                    guard engine.predictionController.isCurrent(workID) else {
+                        return
+                    }
+                    engine.diagnostics.recordSupplementalContext(
+                        context: context,
+                        visualContext: visualContext,
+                        clipboardContext: clipboardContext
+                    )
+                }
+                let backendStartedAt = ContinuousClock.now
                 let suggestions = try await engine.completeSuggestions(
                     context: context,
                     privacySettings: privacySettings,
@@ -911,8 +1113,10 @@ final class SuggestionEngine: ObservableObject {
                     clipboardContext: clipboardContext,
                     invocation: invocation
                 )
+                latencyReport.backendMs = backendStartedAt.duration(to: .now).appMilliseconds
                 let promptCacheStats = await engine.promptCacheStatsIfAvailable()
                 let suggestion = engine.preparedSuggestion(from: suggestions, context: context)
+                let completionLatencyReport = latencyReport
                 await MainActor.run {
                     guard engine.predictionController.isCurrent(workID) else {
                         return
@@ -940,7 +1144,12 @@ final class SuggestionEngine: ObservableObject {
                         }
 
                         GeometryDebug.log("completion-success revalidation=skipped-low-trust context=\(engine.debugContext(context)) suggestion=\(engine.debugSuggestionState(suggestion))")
-                        let result = engine.publish(suggestion, context: context)
+                        let result = engine.publish(
+                            suggestion,
+                            context: context,
+                            latencyReport: completionLatencyReport,
+                            latencyStartedAt: latencyStartedAt
+                        )
                         engine.recordAutocompleteDebugPublication(
                             result,
                             context: context,
@@ -1017,7 +1226,12 @@ final class SuggestionEngine: ObservableObject {
                     }
 
                     GeometryDebug.log("completion-success context=\(engine.debugContext(liveContext)) suggestion=\(engine.debugSuggestionState(suggestion))")
-                    let result = engine.publish(suggestion, context: liveContext)
+                    let result = engine.publish(
+                        suggestion,
+                        context: liveContext,
+                        latencyReport: completionLatencyReport,
+                        latencyStartedAt: latencyStartedAt
+                    )
                     engine.recordAutocompleteDebugPublication(
                         result,
                         context: context,
@@ -1121,6 +1335,26 @@ final class SuggestionEngine: ObservableObject {
             return nil
         }
         return await provider.promptCacheStats()
+    }
+
+    private func selectAlternative(offset: Int) {
+        guard isMultiSuggestionEnabled,
+              var suggestion = currentSuggestion,
+              suggestion.hasMultipleAlternatives,
+              let context = currentContext else {
+            statusMessage = "Suggestion unavailable"
+            GeometryDebug.log("multi-suggestion-navigation ignored reason=unavailable")
+            return
+        }
+
+        guard suggestion.selectAlternative(offset: offset) else {
+            return
+        }
+
+        currentSuggestion = suggestion
+        statusMessage = "Alternative \(suggestion.selectedAlternativeIndex + 1) of \(suggestion.alternatives.count) selected"
+        presenter.update(suggestion, for: context, mode: displayMode(for: context))
+        GeometryDebug.log("multi-suggestion-navigation selected=\(suggestion.selectedAlternativeIndex) count=\(suggestion.alternatives.count)")
     }
 
     private func shouldRequestMultipleSuggestions(
@@ -1404,10 +1638,20 @@ final class SuggestionEngine: ObservableObject {
     }
 
     @discardableResult
-    private func publish(_ suggestion: Suggestion, context: TextContext) -> SuggestionPublicationResult {
+    private func publish(
+        _ suggestion: Suggestion,
+        context: TextContext,
+        latencyReport: CompletionLatencyReport? = nil,
+        latencyStartedAt: ContinuousClock.Instant? = nil
+    ) -> SuggestionPublicationResult {
         let mode = displayMode(for: context)
         let privacy = privacyStore.load()
-        let collectionAllowed = privacy.allowsCollection(appBundleID: context.app.bundleID, domain: context.domain)
+        let privacyDecision = privacy.collectionDecision(
+            appBundleID: context.app.bundleID,
+            domain: context.domain
+        )
+        diagnostics.recordPrivacy(privacyDecision)
+        let collectionAllowed = privacyDecision.allowed
         GeometryDebug.log("suggestion-publication attempt context=\(debugContext(context)) mode=\(mode.rawValue) raw=\(debugSuggestionState(suggestion))")
         let result = publicationController.publish(
             suggestion,
@@ -1417,11 +1661,19 @@ final class SuggestionEngine: ObservableObject {
         )
         logPublicationResult(result)
 
+        var completedLatencyReport = latencyReport ?? CompletionLatencyReport()
+        if completedLatencyReport.backendMs == nil {
+            completedLatencyReport.backendMs = result.lastLatencyMs
+        }
+        completedLatencyReport.normalizationMs = result.normalizationMs
+        completedLatencyReport.overlayMs = result.overlayMs
+        if completedLatencyReport.totalMs == nil, let latencyStartedAt {
+            completedLatencyReport.totalMs = elapsedMs(since: latencyStartedAt)
+        }
+        recordCompletionLatency(completedLatencyReport)
+
         switch result.outcome {
         case .published(let suggestion):
-            if let latencyMs = result.lastLatencyMs {
-                productivityMetrics?.recordBackendLatency(latencyMs)
-            }
             diagnostics.recordBackendSuccess(
                 rawText: suggestion.rawText,
                 normalizedText: suggestion.visibleText,

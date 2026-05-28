@@ -23,6 +23,23 @@ final class PrivacySettingsTests: XCTestCase {
 
         XCTAssertFalse(settings.allowsCollection(appBundleID: "com.google.Chrome", domain: "example.com"))
         XCTAssertTrue(settings.allowsCollection(appBundleID: "com.google.Chrome", domain: "other.example"))
+        XCTAssertEqual(
+            settings.collectionDecision(appBundleID: "com.google.Chrome", domain: "example.com"),
+            PrivacyCollectionDecision(allowed: false, ruleSource: .domainRule)
+        )
+    }
+
+    func testUnknownDomainDoesNotApplyStoredDomainPrivacyRulesAsKnown() {
+        let settings = PrivacySettings(
+            collectionEnabled: true,
+            perAppRules: ["com.google.Chrome": true],
+            perDomainRules: ["docs.google.com": false]
+        )
+
+        let decision = settings.collectionDecision(appBundleID: "com.google.Chrome", domain: nil)
+
+        XCTAssertTrue(decision.allowed)
+        XCTAssertEqual(decision.ruleSource, .appRule)
     }
 
     func testBrowserDomainRulesNormalizeAndUseMostSpecificMatch() {

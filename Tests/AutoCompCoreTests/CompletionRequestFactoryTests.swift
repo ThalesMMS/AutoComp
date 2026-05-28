@@ -317,6 +317,112 @@ final class CompletionRequestFactoryTests: XCTestCase {
         XCTAssertTrue(request.prompt.contains("Clipboard context:\n[clipboard omitted: not relevant]"))
     }
 
+    func testRequestEchoCandidatesUseTruncatedClipboardTextInjectedIntoPrompt() {
+        let context = makeContext(textBeforeCursor: "Please summarize")
+        let clipboardContext = ClipboardContextSnapshot(
+            summary: "CLIPBOARD-CONTEXT-LONG",
+            status: .included,
+            captureSources: [.clipboard]
+        )
+        let configuration = RemoteCompletionConfiguration(
+            baseURL: "http://127.0.0.1:8000",
+            apiKey: "test",
+            model: "test-model"
+        )
+        let factory = CompletionRequestFactory(
+            promptBuilder: PromptBuilder(budgets: PromptInputBudgets(
+                continuationPrefixCharacters: 40,
+                fimPrefixCharacters: 40,
+                fimSuffixCharacters: 40,
+                selectionCharacters: 40,
+                clipboardCharacters: 4,
+                visualContextCharacters: 40,
+                fullTextWindowCharacters: 40
+            ))
+        )
+
+        let request = factory.makeRequest(
+            for: context,
+            configuration: configuration,
+            privacySettings: PrivacySettings(clipboardContextEnabled: true),
+            clipboardContext: clipboardContext
+        )
+
+        XCTAssertEqual(request.clipboardContext?.summary, "CLIP")
+        XCTAssertTrue(request.prompt.contains("Clipboard context:\nCLIP"))
+        XCTAssertTrue(request.promptEchoCandidates.contains("CLIP"))
+        XCTAssertFalse(request.prompt.contains("CLIPBOARD-CONTEXT-LONG"))
+        XCTAssertFalse(request.promptEchoCandidates.contains("CLIPBOARD-CONTEXT-LONG"))
+    }
+
+    func testRequestStoresVisualContextAfterVisualBudget() {
+        let context = makeContext(
+            textBeforeCursor: "Please summarize",
+            captureSources: [.accessibility, .screenOCR]
+        )
+        let visualContext = VisualContextSnapshot(
+            summary: "VISIBLE-CONTEXT-LONG",
+            captureSources: [.screenOCR]
+        )
+        let configuration = RemoteCompletionConfiguration(
+            baseURL: "http://127.0.0.1:8000",
+            apiKey: "test",
+            model: "test-model"
+        )
+        let factory = CompletionRequestFactory(
+            promptBuilder: PromptBuilder(budgets: PromptInputBudgets(
+                continuationPrefixCharacters: 40,
+                fimPrefixCharacters: 40,
+                fimSuffixCharacters: 40,
+                selectionCharacters: 40,
+                clipboardCharacters: 40,
+                visualContextCharacters: 7,
+                fullTextWindowCharacters: 40
+            ))
+        )
+
+        let request = factory.makeRequest(
+            for: context,
+            configuration: configuration,
+            privacySettings: PrivacySettings(screenContextEnabled: true),
+            visualContext: visualContext
+        )
+
+        XCTAssertEqual(request.visualContext?.summary, "VISIBLE")
+        XCTAssertTrue(request.prompt.contains("<visual_context>\nVISIBLE\n</visual_context>"))
+        XCTAssertFalse(request.prompt.contains("VISIBLE-CONTEXT-LONG"))
+    }
+
+    func testRequestResolvesStopSequencesForContinuationAndFillInMiddleModes() {
+        let configuration = RemoteCompletionConfiguration(
+            baseURL: "http://127.0.0.1:8000",
+            apiKey: "test",
+            model: "test-model",
+            stopSequences: CompletionStopSequences(
+                continuation: ["\n"],
+                fillInMiddle: ["<|fim_suffix|>"]
+            )
+        )
+        let factory = CompletionRequestFactory()
+
+        let continuation = factory.makeRequest(
+            for: makeContext(textBeforeCursor: "Please "),
+            configuration: configuration
+        )
+        let fim = factory.makeRequest(
+            for: makeContext(
+                textBeforeCursor: "A reuniao foi ",
+                textAfterCursor: " porque o prazo mudou."
+            ),
+            configuration: configuration
+        )
+
+        XCTAssertEqual(continuation.mode, .continuation)
+        XCTAssertEqual(continuation.stopSequences, ["\n"])
+        XCTAssertEqual(fim.mode, .fillInMiddle)
+        XCTAssertEqual(fim.stopSequences, ["<|fim_suffix|>"])
+    }
+
     private func makeContext(
         textBeforeCursor: String,
         textAfterCursor: String? = nil,

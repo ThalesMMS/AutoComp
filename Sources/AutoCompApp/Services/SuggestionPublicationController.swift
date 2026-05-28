@@ -27,6 +27,8 @@ struct SuggestionPublicationResult: Equatable, Sendable {
     let outcome: SuggestionPublicationOutcome
     let statusMessage: String?
     let lastLatencyMs: Int?
+    let normalizationMs: Int?
+    let overlayMs: Int?
     let logs: [SuggestionPublicationLogData]
 
     var publishedSuggestion: Suggestion? {
@@ -51,13 +53,17 @@ final class SuggestionPublicationController {
         displayMode: SuggestionDisplayMode,
         collectionAllowed: Bool
     ) -> SuggestionPublicationResult {
+        let normalizationStartedAt = ContinuousClock.now
         let normalizedSuggestion = self.normalizedSuggestion(suggestion, for: context)
+        let normalizationMs = normalizationStartedAt.duration(to: .now).appMilliseconds
         guard !normalizedSuggestion.visibleText.isEmpty else {
             presenter.hide()
             return SuggestionPublicationResult(
                 outcome: .rejected(.emptyAfterNormalization),
                 statusMessage: nil,
                 lastLatencyMs: nil,
+                normalizationMs: normalizationMs,
+                overlayMs: nil,
                 logs: [
                     log(
                         kind: .rejected(.emptyAfterNormalization),
@@ -69,15 +75,24 @@ final class SuggestionPublicationController {
             )
         }
 
+        let overlayStartedAt = ContinuousClock.now
         presenter.show(normalizedSuggestion, for: context, mode: displayMode)
-        let statusMessage = collectionAllowed
-            ? "Suggesting in \(context.app.displayName); collection enabled"
-            : "Suggesting in \(context.app.displayName)"
+        let overlayMs = overlayStartedAt.duration(to: .now).appMilliseconds
+        var statusParts = ["Suggesting in \(context.app.displayName)"]
+        if normalizedSuggestion.hasMultipleAlternatives {
+            statusParts.append("alternative \(normalizedSuggestion.selectedAlternativeIndex + 1) of \(normalizedSuggestion.alternatives.count)")
+        }
+        if collectionAllowed {
+            statusParts.append("collection enabled")
+        }
+        let statusMessage = statusParts.joined(separator: "; ")
 
         return SuggestionPublicationResult(
             outcome: .published(normalizedSuggestion),
             statusMessage: statusMessage,
             lastLatencyMs: normalizedSuggestion.latencyMs,
+            normalizationMs: normalizationMs,
+            overlayMs: overlayMs,
             logs: [
                 log(
                     kind: .published,

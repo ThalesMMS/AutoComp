@@ -33,3 +33,17 @@ public struct CompletionRoutingPolicy: Equatable, Sendable {
 public protocol CompletionRoutingProviding {
     var routingPolicy: CompletionRoutingPolicy { get }
 }
+
+public enum RemoteCompletionConsentScope: String, Codable, Equatable, Hashable, Sendable {
+    case remoteBackend
+    case remoteFallback
+
+    public var displayName: String {
+        switch self {
+        case .remoteBackend:
+            return "Remote completion"
+        case .remoteFallback:
+            return "Remote fallback"
+        }
+    }
+}

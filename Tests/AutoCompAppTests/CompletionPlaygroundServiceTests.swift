@@ -57,6 +57,64 @@ final class CompletionPlaygroundServiceTests: XCTestCase {
         XCTAssertEqual(preview.remoteFallbackTitle, "Enabled after local failure")
     }
 
+    func testPromptPreviewShowsCountsWithoutSensitiveContentWhenDebugOff() throws {
+        let preview = CompletionPlaygroundService().preview(
+            prefix: "SECRET_PREFIX_123",
+            suffix: "SECRET_SUFFIX_123",
+            settings: CompletionBackendSettings(remoteModel: "test-model")
+        )
+
+        let promptPreview = try XCTUnwrap(preview.promptPreview(options: .normal))
+
+        XCTAssertTrue(promptPreview.contains("Sensitive prompt content hidden until local debug opt-in is enabled."))
+        XCTAssertTrue(promptPreview.contains("Mode: Fill in middle"))
+        XCTAssertTrue(promptPreview.contains("Prompt size: chars="))
+        XCTAssertTrue(promptPreview.contains("Text before cursor: chars=17"))
+        XCTAssertTrue(promptPreview.contains("Text after cursor: chars=17"))
+        XCTAssertTrue(promptPreview.contains("Capture sources: count=1"))
+        XCTAssertTrue(promptPreview.contains("Echo candidates: count="))
+        XCTAssertFalse(promptPreview.contains("SECRET_PREFIX_123"))
+        XCTAssertFalse(promptPreview.contains("SECRET_SUFFIX_123"))
+    }
+
+    func testFillInMiddlePromptPreviewShowsOnlyRedactionMetadataWhenDebugOff() throws {
+        let preview = CompletionPlaygroundService().preview(
+            prefix: "PRIVATE_FIM_PREFIX",
+            suffix: "PRIVATE_FIM_SUFFIX",
+            settings: CompletionBackendSettings(remoteModel: "test-model")
+        )
+
+        let promptPreview = try XCTUnwrap(preview.promptPreview(options: .normal))
+
+        XCTAssertEqual(preview.request.mode, .fillInMiddle)
+        XCTAssertTrue(promptPreview.contains("Sensitive prompt content hidden until local debug opt-in is enabled."))
+        XCTAssertTrue(promptPreview.contains("Mode: Fill in middle"))
+        XCTAssertTrue(promptPreview.contains("Prompt size: chars="))
+        XCTAssertTrue(promptPreview.contains("Text before cursor: chars=18"))
+        XCTAssertTrue(promptPreview.contains("Text after cursor: chars=18"))
+        XCTAssertTrue(promptPreview.contains("Echo candidates: count="))
+        XCTAssertFalse(promptPreview.contains("Text before cursor (prefix):"))
+        XCTAssertFalse(promptPreview.contains("Text after cursor (suffix):"))
+        XCTAssertFalse(promptPreview.contains("<|fim_suffix|>"))
+        XCTAssertFalse(promptPreview.contains("PRIVATE_FIM_PREFIX"))
+        XCTAssertFalse(promptPreview.contains("PRIVATE_FIM_SUFFIX"))
+    }
+
+    func testPromptPreviewShowsFullPromptWhenSensitiveDebugOptIn() throws {
+        let preview = CompletionPlaygroundService().preview(
+            prefix: "SECRET_PREFIX_123",
+            suffix: "SECRET_SUFFIX_123",
+            settings: CompletionBackendSettings(remoteModel: "test-model")
+        )
+
+        let promptPreview = try XCTUnwrap(preview.promptPreview(
+            options: AutoCompDebugOptions(localDebugOptIn: true)
+        ))
+
+        XCTAssertTrue(promptPreview.contains("Text before cursor (prefix):\nSECRET_PREFIX_123"))
+        XCTAssertTrue(promptPreview.contains("Text after cursor (suffix):\nSECRET_SUFFIX_123"))
+    }
+
     func testCompletionReturnsPromptRawNormalizedAndLatency() async throws {
         let service = CompletionPlaygroundService()
         let provider = RecordingPlaygroundCompletionProvider()

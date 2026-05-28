@@ -80,6 +80,134 @@ final class KeyboardShortcutServiceTests: XCTestCase {
         XCTAssertNotNil(service.handle(type: .flagsChanged, event: event))
     }
 
+    @MainActor
+    func testConsumedConfiguredShortcutsDoNotLeakKeyDownOrReleaseAndRunOnce() async throws {
+        for leakCase in ShortcutLeakCase.consumedDefaults {
+            let service = KeyboardShortcutService()
+            var commands: [KeyboardShortcutCommand] = []
+            service.configureHandlers(
+                onCommand: { command in
+                    commands.append(command)
+                },
+                shouldInterceptCommand: { command in
+                    switch command {
+                    case .selectPreviousSuggestion, .selectNextSuggestion:
+                        return leakCase.popupVisible
+                    case .acceptNextWord, .acceptFullSuggestion, .manualTrigger, .dismissSuggestion, .toggleAutocomplete:
+                        return true
+                    }
+                }
+            )
+            service.setSuggestionActive(leakCase.suggestionActive)
+
+            let press = try leakCase.makePressEvent()
+            XCTAssertNil(
+                service.handle(type: leakCase.pressType, event: press),
+                "\(leakCase.command.rawValue) key press should be consumed"
+            )
+
+            let release = try leakCase.makeReleaseEvent()
+            XCTAssertNil(
+                service.handle(type: leakCase.releaseType, event: release),
+                "\(leakCase.command.rawValue) release should be consumed after the shortcut press"
+            )
+
+            try await waitForShortcutDispatch()
+            XCTAssertEqual(commands, [leakCase.command], "\(leakCase.command.rawValue) should dispatch exactly once")
+        }
+    }
+
+    @MainActor
+    func testConfiguredShortcutsPassThroughWhenInterceptionDeclinesCommand() async throws {
+        for command in KeyboardShortcutCommand.allCases {
+            let leakCase = ShortcutLeakCase(command: command, suggestionActive: true)
+            let service = KeyboardShortcutService()
+            var commands: [KeyboardShortcutCommand] = []
+            service.configureHandlers(
+                onCommand: { command in
+                    commands.append(command)
+                },
+                shouldInterceptCommand: { _ in false }
+            )
+            service.setSuggestionActive(true)
+
+            let press = try leakCase.makePressEvent()
+            XCTAssertNotNil(
+                service.handle(type: leakCase.pressType, event: press),
+                "\(command.rawValue) key press should pass through when interception is declined"
+            )
+
+            let release = try leakCase.makeReleaseEvent()
+            XCTAssertNotNil(
+                service.handle(type: leakCase.releaseType, event: release),
+                "\(command.rawValue) release should pass through when the press was not consumed"
+            )
+
+            try await waitForShortcutDispatch()
+            XCTAssertEqual(commands, [], "\(command.rawValue) should not dispatch when passed through")
+        }
+    }
+
+    @MainActor
+    func testSuggestionScopedShortcutsPassThroughWhenNoSuggestionIsArmed() async throws {
+        for command in ShortcutLeakCase.suggestionScopedCommands {
+            let leakCase = ShortcutLeakCase(command: command, suggestionActive: false, popupVisible: false)
+            let service = KeyboardShortcutService()
+            var commands: [KeyboardShortcutCommand] = []
+            service.configureHandlers(
+                onCommand: { command in
+                    commands.append(command)
+                }
+            )
+            service.setSuggestionActive(false)
+
+            let press = try leakCase.makePressEvent()
+            XCTAssertNotNil(
+                service.handle(type: leakCase.pressType, event: press),
+                "\(command.rawValue) key press should pass through without an armed suggestion"
+            )
+
+            let release = try leakCase.makeReleaseEvent()
+            XCTAssertNotNil(
+                service.handle(type: leakCase.releaseType, event: release),
+                "\(command.rawValue) release should pass through when the press was not consumed"
+            )
+
+            try await waitForShortcutDispatch()
+            XCTAssertEqual(commands, [], "\(command.rawValue) should not dispatch without an armed suggestion")
+        }
+    }
+
+    @MainActor
+    func testRightShiftReleaseSuppressionIsConsumedOnceSoPassThroughShiftCannotGetStuck() async throws {
+        let service = KeyboardShortcutService()
+        var commands: [KeyboardShortcutCommand] = []
+        service.configureHandlers(
+            onCommand: { command in
+                commands.append(command)
+            }
+        )
+        service.setSuggestionActive(true)
+
+        let consumedPress = try ShortcutLeakCase.acceptFullSuggestion.makePressEvent()
+        XCTAssertNil(service.handle(type: .flagsChanged, event: consumedPress))
+
+        let consumedRelease = try ShortcutLeakCase.acceptFullSuggestion.makeReleaseEvent()
+        XCTAssertNil(service.handle(type: .flagsChanged, event: consumedRelease))
+
+        service.setSuggestionActive(false)
+        service.clearShortcutGrace()
+
+        let passThroughPress = try ShortcutLeakCase.acceptFullSuggestion.makePressEvent()
+        XCTAssertNotNil(service.handle(type: .flagsChanged, event: passThroughPress))
+
+        let passThroughRelease = try ShortcutLeakCase.acceptFullSuggestion.makeReleaseEvent()
+        XCTAssertNotNil(service.handle(type: .flagsChanged, event: passThroughRelease))
+
+        try await waitForShortcutDispatch()
+        XCTAssertEqual(commands, [.acceptFullSuggestion])
+    }
+
     func testLeftShiftPassesThroughWhenSuggestionIsActive() throws {
         let service = KeyboardShortcutService()
         service.configureHandlers(onTab: {}, onAcceptAll: {})
@@ -110,6 +238,45 @@ final class KeyboardShortcutServiceTests: XCTestCase {
         let result = service.handle(type: .keyDown, event: event)
 
         XCTAssertNotNil(result)
+    }
+
+    @MainActor
+    func testAlternativeSelectionShortcutsAreConsumedOnlyWhenPopupIsAvailable() async throws {
+        let service = KeyboardShortcutService()
+        var popupAvailable = false
+        var commands: [KeyboardShortcutCommand] = []
+        service.configureHandlers(
+            onCommand: { command in
+                commands.append(command)
+            },
+            shouldInterceptCommand: { command in
+                switch command {
+                case .selectPreviousSuggestion, .selectNextSuggestion:
+                    return popupAvailable
+                case .acceptNextWord, .acceptFullSuggestion, .manualTrigger, .dismissSuggestion, .toggleAutocomplete:
+                    return true
+                }
+            }
+        )
+        service.setSuggestionActive(true)
+
+        let firstNext = try XCTUnwrap(CGEvent(keyboardEventSource: nil, virtualKey: 30, keyDown: true))
+        firstNext.flags = .maskAlternate
+        XCTAssertNotNil(service.handle(type: .keyDown, event: firstNext))
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(commands, [])
+
+        popupAvailable = true
+        let secondNext = try XCTUnwrap(CGEvent(keyboardEventSource: nil, virtualKey: 30, keyDown: true))
+        secondNext.flags = .maskAlternate
+        XCTAssertNil(service.handle(type: .keyDown, event: secondNext))
+
+        let previous = try XCTUnwrap(CGEvent(keyboardEventSource: nil, virtualKey: 33, keyDown: true))
+        previous.flags = .maskAlternate
+        XCTAssertNil(service.handle(type: .keyDown, event: previous))
+
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(commands, [.selectNextSuggestion, .selectPreviousSuggestion])
     }
 
     @MainActor
@@ -514,6 +681,89 @@ final class KeyboardShortcutServiceTests: XCTestCase {
 
         try await Task.sleep(nanoseconds: 50_000_000)
         XCTAssertEqual(capturedEvents, [.text(keyCode: 49, isSuggestionTrigger: true)])
+    }
+
+    @MainActor
+    private func waitForShortcutDispatch() async throws {
+        try await Task.sleep(nanoseconds: 50_000_000)
+    }
+}
+
+private struct ShortcutLeakCase {
+    let command: KeyboardShortcutCommand
+    let suggestionActive: Bool
+    let popupVisible: Bool
+
+    init(
+        command: KeyboardShortcutCommand,
+        suggestionActive: Bool,
+        popupVisible: Bool = false
+    ) {
+        self.command = command
+        self.suggestionActive = suggestionActive
+        self.popupVisible = popupVisible
+    }
+
+    static let acceptFullSuggestion = ShortcutLeakCase(
+        command: .acceptFullSuggestion,
+        suggestionActive: true
+    )
+
+    static let suggestionScopedCommands: [KeyboardShortcutCommand] = [
+        .acceptNextWord,
+        .acceptFullSuggestion,
+        .dismissSuggestion,
+        .selectNextSuggestion,
+        .selectPreviousSuggestion
+    ]
+
+    static let consumedDefaults: [ShortcutLeakCase] = [
+        ShortcutLeakCase(command: .acceptNextWord, suggestionActive: true),
+        ShortcutLeakCase(command: .acceptFullSuggestion, suggestionActive: true),
+        ShortcutLeakCase(command: .manualTrigger, suggestionActive: false),
+        ShortcutLeakCase(command: .dismissSuggestion, suggestionActive: true),
+        ShortcutLeakCase(command: .toggleAutocomplete, suggestionActive: false),
+        ShortcutLeakCase(command: .selectNextSuggestion, suggestionActive: true, popupVisible: true),
+        ShortcutLeakCase(command: .selectPreviousSuggestion, suggestionActive: true, popupVisible: true)
+    ]
+
+    private var binding: KeyboardShortcutBinding {
+        KeyboardShortcutSettings.defaults[command]
+    }
+
+    var pressType: CGEventType {
+        switch binding.trigger {
+        case .keyDown:
+            return .keyDown
+        case .flagsChanged:
+            return .flagsChanged
+        }
+    }
+
+    var releaseType: CGEventType {
+        switch binding.trigger {
+        case .keyDown:
+            return .keyUp
+        case .flagsChanged:
+            return .flagsChanged
+        }
+    }
+
+    func makePressEvent() throws -> CGEvent {
+        try makeEvent(keyDown: true, flags: binding.modifiers.cgEventFlags)
+    }
+
+    func makeReleaseEvent() throws -> CGEvent {
+        let releaseFlags: CGEventFlags = binding.trigger == .flagsChanged ? [] : binding.modifiers.cgEventFlags
+        return try makeEvent(keyDown: false, flags: releaseFlags)
+    }
+
+    private func makeEvent(keyDown: Bool, flags: CGEventFlags) throws -> CGEvent {
+        let event = try XCTUnwrap(
+            CGEvent(keyboardEventSource: nil, virtualKey: CGKeyCode(binding.keyCode), keyDown: keyDown)
+        )
+        event.flags = flags
+        return event
     }
 }
 

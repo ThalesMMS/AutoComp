@@ -42,6 +42,7 @@ final class AppQAMatrixTests: XCTestCase {
             "Slack",
             "Discord or generic Electron app",
             "Telegram",
+            "blocked-risky-host-app",
             "manual-only-waiting-for-trigger",
             "ime-composition-active",
             "input-source-non-ascii",
@@ -49,6 +50,11 @@ final class AppQAMatrixTests: XCTestCase {
             "stale-visual-context",
             "source=visualContext-ocr",
             "source=screenOCR-geometry",
+            "source=<accessibility|ocr-geometry|visual-ocr|keystroke-buffer>",
+            "quality=<direct|glyph|line|element|ocr|unavailable>",
+            "trust=<standard|low-trust>",
+            "redacted settings export",
+            "API keys, prompts, field text, OCR text, clipboard text",
             "visual-context status=screen-recording-off source=visualContext-ocr",
             "Code editors disabled by default",
             "Xcode",
@@ -70,14 +76,21 @@ final class AppQAMatrixTests: XCTestCase {
         )
 
         XCTAssertTrue(document.contains("./script/ui_inline_preview_smoke_test.sh"))
+        XCTAssertTrue(document.contains("./script/ci_ui_optional.sh --allow-skip"))
+        XCTAssertTrue(document.contains("ci-ui-optional-results.tsv"))
+        XCTAssertTrue(document.contains("Accessibility, Input Monitoring, AppleEvents"))
         XCTAssertTrue(document.contains("./script/qa_real_app_matrix.sh --safe-overlay-mode"))
         XCTAssertTrue(document.contains("./script/ui_smoke_test.sh"))
+        XCTAssertTrue(document.contains("./script/ui_playground_smoke_test.sh"))
+        XCTAssertTrue(document.contains("multiSuggestion=disabled"))
+        XCTAssertTrue(document.contains("AUTOCOMP_DEBUG_MULTI_SUGGESTION_ENABLED=1"))
         XCTAssertTrue(document.contains("./script/uninstall.sh --dry-run"))
         XCTAssertTrue(document.contains("--skip-ui"))
         XCTAssertTrue(document.contains("--reason"))
         XCTAssertTrue(document.contains("dist/qa/"))
         XCTAssertTrue(document.contains("redacted command logs"))
-        XCTAssertTrue(document.contains("prompt preview appears only after local debug opt-in"))
+        XCTAssertTrue(document.contains("redacted prompt sizes and counts by default"))
+        XCTAssertTrue(document.contains("Sensitive prompt content appears only after local debug opt-in"))
     }
 
     func testInlinePreviewSmokeCoversControlledFIMField() throws {
@@ -148,6 +161,8 @@ final class AppQAMatrixTests: XCTestCase {
         XCTAssertTrue(report.contains("ui settings backend smoke | SKIPPED"))
         XCTAssertTrue(report.contains("unit test skip"))
         XCTAssertTrue(report.contains("Referenced command logs are redacted"))
+        XCTAssertTrue(report.contains("Record non-content source, quality, and trust labels"))
+        XCTAssertFalse(report.contains("typed text, OCR text, clipboard text, prompts, or completions.\nsecret"))
     }
 
     func testQAScriptRedactsSensitiveLogSections() throws {

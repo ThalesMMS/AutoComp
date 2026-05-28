@@ -220,7 +220,7 @@ fi
 
 cat >>"$REPORT_PATH" <<'REPORT'
 
-Manual app coverage is defined in Docs/AppQAMatrix.md. Referenced command logs are redacted before attachment; keep local debug artifacts separate unless local debug opt-in was intentionally enabled.
+Manual app coverage is defined in Docs/AppQAMatrix.md. Referenced command logs are redacted before attachment; keep local debug artifacts separate unless local debug opt-in was intentionally enabled. Record non-content source, quality, and trust labels for focused-text capture evidence; do not record typed text, OCR text, clipboard text, prompts, or completions.
 REPORT
 
 echo "QA report: $REPORT_PATH"

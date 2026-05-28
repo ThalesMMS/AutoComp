@@ -61,6 +61,14 @@ final class KeyboardShortcutSettingsTests: XCTestCase {
         rightShift.flags = .maskShift
         XCTAssertEqual(settings.command(matching: .flagsChanged, event: rightShift), .acceptFullSuggestion)
 
+        let previousSuggestion = try XCTUnwrap(CGEvent(keyboardEventSource: nil, virtualKey: 33, keyDown: true))
+        previousSuggestion.flags = .maskAlternate
+        XCTAssertEqual(settings.command(matching: .keyDown, event: previousSuggestion), .selectPreviousSuggestion)
+
+        let nextSuggestion = try XCTUnwrap(CGEvent(keyboardEventSource: nil, virtualKey: 30, keyDown: true))
+        nextSuggestion.flags = .maskAlternate
+        XCTAssertEqual(settings.command(matching: .keyDown, event: nextSuggestion), .selectNextSuggestion)
+
         let optionSpace = try XCTUnwrap(CGEvent(keyboardEventSource: nil, virtualKey: 49, keyDown: true))
         optionSpace.flags = .maskAlternate
         XCTAssertEqual(settings.command(matching: .keyDown, event: optionSpace), .manualTrigger)

@@ -84,7 +84,7 @@ final class InputSuppressionController {
         return true
     }
 
-    func shouldSuppressKeyRelease(keyCode: UInt16) -> Bool {
+    func consumeSuppressedKeyRelease(keyCode: UInt16) -> Bool {
         lock.lock()
         defer { lock.unlock() }
 
@@ -94,6 +94,7 @@ final class InputSuppressionController {
               currentDate <= suppressUntil else {
             return false
         }
+        suppressedKeyReleases[keyCode] = nil
         return true
     }
 

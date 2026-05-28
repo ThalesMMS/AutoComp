@@ -1,12 +1,20 @@
 import Foundation
 
 public struct CompatibilityDecision: Equatable, Sendable {
+    public enum RuleSource: String, Codable, Equatable, Sendable {
+        case `default` = "default"
+        case appRule = "app-rule"
+        case domainRule = "domain-rule"
+    }
+
     public let profile: AppCompatibilityProfile
     public let mode: SuggestionDisplayMode
     public let enabled: Bool
     public let overrideMode: CompatibilityOverrideMode
     public let allowsAutomaticSuggestions: Bool
     public let setupMessage: String?
+    public let warningMessage: String?
+    public let ruleSource: RuleSource
 
     public init(
         profile: AppCompatibilityProfile,
@@ -14,7 +22,9 @@ public struct CompatibilityDecision: Equatable, Sendable {
         enabled: Bool,
         overrideMode: CompatibilityOverrideMode = .automatic,
         allowsAutomaticSuggestions: Bool = true,
-        setupMessage: String? = nil
+        setupMessage: String? = nil,
+        warningMessage: String? = nil,
+        ruleSource: RuleSource = .default
     ) {
         self.profile = profile
         self.mode = mode
@@ -22,6 +32,8 @@ public struct CompatibilityDecision: Equatable, Sendable {
         self.overrideMode = overrideMode
         self.allowsAutomaticSuggestions = allowsAutomaticSuggestions
         self.setupMessage = setupMessage
+        self.warningMessage = warningMessage
+        self.ruleSource = ruleSource
     }
 }
 
@@ -49,6 +61,7 @@ public struct CompatibilityCatalog: Sendable {
         userModeOverrides: [String: CompatibilityOverrideMode] = [:]
     ) -> CompatibilityDecision {
         var profile = profile(for: bundleID)
+        let hostCategory = RiskyHostAppPolicy.category(bundleID: bundleID, domain: domain)
 
         if let domain, Self.unsupportedGoogleWorkspaceDomains.contains(where: domain.contains) {
             profile = AppCompatibilityProfile(
@@ -71,12 +84,41 @@ public struct CompatibilityCatalog: Sendable {
                 notes: "Enable screen reader support and braille support in Google Docs, and disable Smart Compose.",
                 defaultActivationMode: profile.defaultActivationMode
             )
+        } else if let domain, hostCategory == .chat {
+            profile = AppCompatibilityProfile(
+                bundleID: bundleID,
+                displayName: profile.displayName,
+                status: .partial,
+                defaultMode: .inline,
+                domains: [domain],
+                notes: "Manual trigger only by default to avoid sending chat messages.",
+                defaultActivationMode: .manualOnly
+            )
         }
 
         let defaultOverrideMode = profile.defaultActivationMode
         let legacyOverrideMode = userEnabledOverrides[profile.bundleID].map { $0 ? CompatibilityOverrideMode.automatic : .disabled }
         let domainOverrideMode = domain.flatMap { Self.modeOverride(forDomain: $0, in: userModeOverrides) }
-        let overrideMode = domainOverrideMode ?? userModeOverrides[profile.bundleID] ?? legacyOverrideMode ?? defaultOverrideMode
+        let appOverrideMode = userModeOverrides[profile.bundleID]
+        let explicitOverrideMode = domainOverrideMode ?? appOverrideMode
+        let ruleSource: CompatibilityDecision.RuleSource
+        if domainOverrideMode != nil {
+            ruleSource = .domainRule
+        } else if appOverrideMode != nil || legacyOverrideMode != nil {
+            ruleSource = .appRule
+        } else {
+            ruleSource = .default
+        }
+        var overrideMode = explicitOverrideMode ?? legacyOverrideMode ?? defaultOverrideMode
+        var riskWarning: String?
+        if hostCategory == .terminal {
+            if explicitOverrideMode == .automatic {
+                riskWarning = "Warning: automatic terminal suggestions can execute commands. Prefer Manual only unless this override is intentional."
+            } else if legacyOverrideMode == .automatic {
+                overrideMode = .manualOnly
+                riskWarning = "Terminal enablement defaults to Manual only unless Automatic is selected explicitly."
+            }
+        }
         let enabled = profile.status != .unsupported && overrideMode != .disabled
         let defaultDisplayMode = profile.defaultMode == .disabled && enabled ? SuggestionDisplayMode.inline : profile.defaultMode
         let mode = enabled ? defaultDisplayMode : .disabled
@@ -89,7 +131,9 @@ public struct CompatibilityCatalog: Sendable {
             enabled: enabled,
             overrideMode: overrideMode,
             allowsAutomaticSuggestions: allowsAutomaticSuggestions,
-            setupMessage: setupMessage
+            setupMessage: setupMessage,
+            warningMessage: riskWarning,
+            ruleSource: ruleSource
         )
     }
 

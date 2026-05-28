@@ -1,0 +1,94 @@
+[
+  {
+    "name": "short-suffix-echo",
+    "source": "handwritten",
+    "categories": ["shortSuffix", "suffixEcho"],
+    "textBeforeCursor": "A reuniao foi ",
+    "textAfterCursor": " porque o prazo mudou.",
+    "rawText": "adiada porque o prazo mudou.",
+    "expectedText": "adiada"
+  },
+  {
+    "name": "long-suffix-echo",
+    "source": "handwritten",
+    "categories": ["longSuffix", "suffixEcho"],
+    "textBeforeCursor": "The rollout ",
+    "textAfterCursor": " after the audit window closes, after release notes are signed, and before beta access opens.",
+    "rawText": "can proceed after the audit window closes, after release notes are signed, and before beta access opens.",
+    "expectedText": "can proceed"
+  },
+  {
+    "name": "manual-selection-replacement",
+    "source": "handwritten",
+    "categories": ["selection", "manualOnly"],
+    "textBeforeCursor": "Please ",
+    "textAfterCursor": " for Friday.",
+    "selectedText": "draft",
+    "fullTextWindow": "Please draft for Friday.",
+    "rawText": "send the update for Friday.",
+    "expectedText": "send the update"
+  },
+  {
+    "name": "prefix-and-suffix-echo",
+    "source": "handwritten",
+    "categories": ["prefixAndSuffixEcho", "suffixEcho"],
+    "textBeforeCursor": "A reuniao foi ",
+    "textAfterCursor": " porque o prazo mudou.",
+    "rawText": "A reuniao foi adiada para sexta-feira porque o prazo mudou.",
+    "expectedText": "adiada para sexta-feira"
+  },
+  {
+    "name": "explanatory-markdown-fence",
+    "source": "handwritten",
+    "categories": ["explanatoryOutput", "markdownFence"],
+    "textBeforeCursor": "A reuniao foi ",
+    "textAfterCursor": " porque o prazo mudou.",
+    "rawText": "Sure, here's the completion:\n```text\nadiada para sexta-feira porque o prazo mudou.\n```",
+    "expectedText": "adiada para sexta-feira"
+  },
+  {
+    "name": "mixed-language-newline-suffix",
+    "source": "handwritten",
+    "categories": ["newline", "mixedLanguage"],
+    "textBeforeCursor": "O relatorio ",
+    "textAfterCursor": " despues de la revision final.",
+    "rawText": "sera publicado\ndespues de la revision final.",
+    "expectedText": "sera publicado"
+  },
+  {
+    "name": "combining-mark-cluster",
+    "source": "minimized-deterministic-fuzz",
+    "categories": ["combiningMark", "graphemeCluster"],
+    "textBeforeCursor": "Resultado: ",
+    "textAfterCursor": " agora.",
+    "rawText": "cafe\u0301 agora.",
+    "expectedText": "cafe\u0301"
+  },
+  {
+    "name": "emoji-grapheme-cluster",
+    "source": "minimized-deterministic-fuzz",
+    "categories": ["graphemeCluster"],
+    "textBeforeCursor": "Responsavel: ",
+    "textAfterCursor": " no sistema.",
+    "rawText": "👩🏽‍💻 no sistema.",
+    "expectedText": "👩🏽‍💻"
+  },
+  {
+    "name": "xml-chat-tags-and-stop-marker",
+    "source": "minimized-deterministic-fuzz",
+    "categories": ["xmlLikeTags", "chatTags"],
+    "textBeforeCursor": "A reuniao foi ",
+    "textAfterCursor": " porque o prazo mudou.",
+    "rawText": "<|assistant|>\n<completion>adiada para sexta-feira</completion><|fim_suffix|> porque o prazo mudou.",
+    "expectedText": "adiada para sexta-feira"
+  },
+  {
+    "name": "suffix-at-start",
+    "source": "minimized-deterministic-fuzz",
+    "categories": ["suffixAtStart"],
+    "textBeforeCursor": "A reuniao foi ",
+    "textAfterCursor": " porque o prazo mudou.",
+    "rawText": " porque o prazo mudou.adiada",
+    "expectedText": "adiada"
+  }
+]

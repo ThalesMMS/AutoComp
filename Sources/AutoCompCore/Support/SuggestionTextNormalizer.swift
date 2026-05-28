@@ -5,12 +5,13 @@ public enum SuggestionTextNormalizer {
         rawText: String,
         request: CompletionRequest
     ) -> String {
-        normalize(
+        let normalized = normalize(
             rawText: rawText,
             precedingText: request.truncatedTextBeforeCursor,
             trailingText: request.truncatedTextAfterCursor,
             promptEchoCandidates: request.promptEchoCandidates
         )
+        return CompletionStopSequenceTrimmer.trim(normalized, stopSequences: request.stopSequences)
     }
 
     public static func normalize(
@@ -25,6 +26,7 @@ public enum SuggestionTextNormalizer {
 
         text = removeLeadingTemplateMarkers(from: text)
         text = removeMarkdownWrappers(from: text)
+        text = removeXMLLikeCompletionWrapper(from: text)
         text = removeLeadingPromptEchoes(
             from: text,
             precedingText: precedingText,
@@ -33,6 +35,7 @@ public enum SuggestionTextNormalizer {
         text = removeLeadingExplanatoryPreamble(from: text)
         text = firstUsefulLine(in: text)
         text = removeMarkdownWrappers(from: text)
+        text = removeXMLLikeCompletionWrapper(from: text)
         text = removeLeadingTemplateMarkers(from: text)
         text = removeLeadingPromptEchoes(
             from: text,
@@ -40,12 +43,12 @@ public enum SuggestionTextNormalizer {
             promptEchoCandidates: promptEchoCandidates
         )
         text = removeLeadingExplanatoryPreamble(from: text)
+        text = removeTrailingTextEcho(from: text, trailingText: trailingText)
 
         if endsWithWhitespace(precedingText) {
             text = droppingLeadingWhitespace(from: text)
         }
 
-        text = removeTrailingTextEcho(from: text, trailingText: trailingText)
         return trimmingTrailingWhitespaceAndNewlines(from: text)
     }
 
@@ -121,6 +124,28 @@ public enum SuggestionTextNormalizer {
                 && trimmed.hasSuffix(wrapper)
                 && trimmed.count >= wrapper.count * 2 {
             return String(trimmed.dropFirst(wrapper.count).dropLast(wrapper.count))
+        }
+        return text
+    }
+
+    private static func removeXMLLikeCompletionWrapper(from text: String) -> String {
+        let candidate = droppingLeadingWhitespaceAndNewlines(from: text)
+        for tag in xmlLikeCompletionWrapperTags {
+            let openingTag = "<\(tag)>"
+            let closingTag = "</\(tag)>"
+            guard let openingRange = candidate.range(
+                of: openingTag,
+                options: [.anchored, .caseInsensitive]
+            ),
+                  let closingRange = candidate.range(
+                    of: closingTag,
+                    options: [.caseInsensitive],
+                    range: openingRange.upperBound..<candidate.endIndex
+                  ) else {
+                continue
+            }
+
+            return String(candidate[openingRange.upperBound..<closingRange.lowerBound])
         }
         return text
     }
@@ -273,6 +298,13 @@ public enum SuggestionTextNormalizer {
         "```",
         "~~~",
         "`"
+    ]
+
+    private static let xmlLikeCompletionWrapperTags = [
+        "assistant",
+        "completion",
+        "insert",
+        "suggestion"
     ]
 
     private static let leadingExplanationPrefixes = [

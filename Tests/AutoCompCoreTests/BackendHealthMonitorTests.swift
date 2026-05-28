@@ -68,6 +68,40 @@ final class BackendHealthMonitorTests: XCTestCase {
         XCTAssertTrue(monitor.allowsAutomaticTrigger(at: now.addingTimeInterval(3)))
     }
 
+    func testOpenAICompatibleContractClassifiesTransientAndConfigurationFailures() throws {
+        let now = Date(timeIntervalSince1970: 100)
+        var monitor = BackendHealthMonitor(
+            circuitBreaker: RemoteCircuitBreaker(
+                failureThreshold: 2,
+                suppressionInterval: 30
+            )
+        )
+
+        _ = try XCTUnwrap(monitor.recordFailure(
+            RemoteCompletionError.badStatus(404, ""),
+            at: now
+        ))
+        XCTAssertEqual(monitor.summary.issue, .httpStatus(404))
+        XCTAssertEqual(monitor.circuitBreaker.consecutiveFailures, 0)
+        XCTAssertTrue(monitor.allowsAutomaticTrigger(at: now))
+
+        _ = try XCTUnwrap(monitor.recordFailure(
+            RemoteCompletionError.badStatus(429, ""),
+            at: now.addingTimeInterval(1)
+        ))
+        XCTAssertEqual(monitor.summary.issue, .rateLimited)
+        XCTAssertEqual(monitor.circuitBreaker.consecutiveFailures, 1)
+        XCTAssertTrue(monitor.allowsAutomaticTrigger(at: now.addingTimeInterval(1)))
+
+        let paused = try XCTUnwrap(monitor.recordFailure(
+            RemoteCompletionError.badStatus(500, ""),
+            at: now.addingTimeInterval(2)
+        ))
+        XCTAssertEqual(paused.state, .paused)
+        XCTAssertEqual(paused.issue, .httpStatus(500))
+        XCTAssertFalse(monitor.allowsAutomaticTrigger(at: now.addingTimeInterval(2)))
+    }
+
     func testNonTransientFailureDuringSuppressionDoesNotClearActiveBackoff() throws {
         let now = Date(timeIntervalSince1970: 100)
         var monitor = BackendHealthMonitor(

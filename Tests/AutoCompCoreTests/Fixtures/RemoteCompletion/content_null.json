@@ -1,0 +1,14 @@
+{
+  "id": "chatcmpl-null-content",
+  "object": "chat.completion",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": null
+      },
+      "finish_reason": "stop"
+    }
+  ]
+}

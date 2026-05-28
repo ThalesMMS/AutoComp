@@ -41,17 +41,24 @@ protocol ScreenOCRGeometryFallbackResolving: AnyObject {
 
 extension ScreenOCRGeometryFallbackResolver: ScreenOCRGeometryFallbackResolving {}
 
-final class FocusTrackingModel: ObservableObject, TextContextProvider, @unchecked Sendable {
+protocol DomainResolutionReporting: AnyObject {
+    var lastDomainResolution: BrowserDomainResolution? { get }
+}
+
+final class FocusTrackingModel: ObservableObject, TextContextProvider, FocusContextLatencyReporting, DomainResolutionReporting, @unchecked Sendable {
     @Published private(set) var snapshot: FocusTrackingSnapshot?
     @Published private(set) var stableFieldIdentity: StableFieldIdentity?
     @Published private(set) var focusChangeSequence: UInt64 = 0
     @Published private(set) var capability: FocusFieldCapability = .unknown
     @Published private(set) var rejectionReason: String?
+    private(set) var lastFocusContextLatencyReport: FocusContextLatencyReport?
+    private(set) var lastDomainResolution: BrowserDomainResolution?
 
     private let axHelper: AXHelper
     private let focusSnapshotResolver: any FocusSnapshotResolving
     private let textGeometryResolver: any AXTextGeometryResolving
     private let screenOCRGeometryFallbackResolver: any ScreenOCRGeometryFallbackResolving
+    private let axCapabilitySnapshotRecorder: any AXCapabilitySnapshotRecording
     private let safeOverlayModeEnabled: Bool
     private var lastStableFieldIdentity: StableFieldIdentity?
     private var lastTrackedFocusIdentity: TrackedFocusIdentity?
@@ -61,18 +68,25 @@ final class FocusTrackingModel: ObservableObject, TextContextProvider, @unchecke
         focusSnapshotResolver: (any FocusSnapshotResolving)? = nil,
         textGeometryResolver: (any AXTextGeometryResolving)? = nil,
         screenOCRGeometryFallbackResolver: any ScreenOCRGeometryFallbackResolving = ScreenOCRGeometryFallbackResolver(),
+        axCapabilitySnapshotRecorder: any AXCapabilitySnapshotRecording = AXCapabilitySnapshotRecorder(),
         safeOverlayModeEnabled: Bool = SafeOverlayMode.isEnabled
     ) {
         self.axHelper = axHelper
         self.focusSnapshotResolver = focusSnapshotResolver ?? FocusSnapshotResolver(axHelper: axHelper)
         self.textGeometryResolver = textGeometryResolver ?? AXTextGeometryResolver(axHelper: axHelper)
         self.screenOCRGeometryFallbackResolver = screenOCRGeometryFallbackResolver
+        self.axCapabilitySnapshotRecorder = axCapabilitySnapshotRecorder
         self.safeOverlayModeEnabled = safeOverlayModeEnabled
     }
 
     func currentContext() async throws -> TextContext {
+        lastFocusContextLatencyReport = nil
         do {
+            let axCaptureStartedAt = ContinuousClock.now
             let focusSnapshot = try focusSnapshotResolver.resolve()
+            lastDomainResolution = focusSnapshot.domainResolution
+            let axCaptureMs = axCaptureStartedAt.duration(to: .now).appMilliseconds
+            let geometryStartedAt = ContinuousClock.now
             var geometry = textGeometryResolver.resolve(snapshot: focusSnapshot)
             let selectedRange = focusSnapshot.selectedRange
             let textBeforeCursor = focusSnapshot.textBeforeCursor
@@ -107,6 +121,17 @@ final class FocusTrackingModel: ObservableObject, TextContextProvider, @unchecke
                 captureSources.insert(.screenOCR)
                 GeometryDebug.log("ax-fallback source=screenOCR-geometry focusedElementRect=\(fallback.focusedElementRect) caretRect=\(fallback.caretRect)")
             }
+            let geometryMs = geometryStartedAt.duration(to: .now).appMilliseconds
+            lastFocusContextLatencyReport = FocusContextLatencyReport(
+                axCaptureMs: axCaptureMs,
+                geometryMs: geometryMs
+            )
+            axCapabilitySnapshotRecorder.record(
+                focusSnapshot: focusSnapshot,
+                geometry: geometry,
+                captureSources: captureSources,
+                capabilityPresence: axHelper.capabilityPresence(for: focusSnapshot.focusedElement)
+            )
 
             guard let textBeforeCursor else {
                 GeometryDebug.log("ax rejected reason=no-readable-text role=\(axHelper.stringAttribute(kAXRoleAttribute, from: focusSnapshot.focusedElement) ?? "nil") subrole=\(axHelper.stringAttribute(kAXSubroleAttribute, from: focusSnapshot.focusedElement) ?? "nil") selectedRange=\(String(describing: selectedRange)) textLength=\(focusSnapshot.textLength)")
@@ -191,6 +216,7 @@ final class FocusTrackingModel: ObservableObject, TextContextProvider, @unchecke
         rejectionReason = Self.rejectionReason(for: error)
         stableFieldIdentity = nil
         snapshot = nil
+        lastDomainResolution = nil
     }
 
     private static func capability(for error: Error) -> FocusFieldCapability {

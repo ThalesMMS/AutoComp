@@ -67,4 +67,30 @@ final class SuggestionTests: XCTestCase {
         XCTAssertTrue(suggestion.isExhausted)
         XCTAssertEqual(suggestion.acceptedPrefix, " second option")
     }
+
+    func testSelectAlternativeWrapsAndUpdatesVisibleText() {
+        var suggestion = Suggestion(
+            baseContextID: UUID(),
+            visibleText: "first",
+            alternatives: [
+                SuggestionAlternative(visibleText: "first"),
+                SuggestionAlternative(visibleText: "second"),
+                SuggestionAlternative(visibleText: "third")
+            ],
+            latencyMs: 10
+        )
+
+        XCTAssertTrue(suggestion.selectAlternative(offset: 1))
+        XCTAssertEqual(suggestion.selectedAlternativeIndex, 1)
+        XCTAssertEqual(suggestion.visibleText, "second")
+        XCTAssertEqual(suggestion.remainingText, "second")
+
+        XCTAssertTrue(suggestion.selectAlternative(offset: -1))
+        XCTAssertEqual(suggestion.selectedAlternativeIndex, 0)
+        XCTAssertEqual(suggestion.visibleText, "first")
+
+        XCTAssertTrue(suggestion.selectAlternative(offset: -1))
+        XCTAssertEqual(suggestion.selectedAlternativeIndex, 2)
+        XCTAssertEqual(suggestion.visibleText, "third")
+    }
 }

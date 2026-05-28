@@ -2,31 +2,129 @@ import AppKit
 import AutoCompCore
 import Foundation
 
+struct KeyboardShortcutServiceDiagnostics: Equatable {
+    let activeTapCount: Int
+    let activeTapNames: [String]
+    let handlersConfigured: Bool
+
+    var activeTapSetCount: Int {
+        activeTapCount > 0 ? 1 : 0
+    }
+}
+
+protocol KeyboardShortcutTap: AnyObject {
+    var name: String { get }
+    func enable(_ enabled: Bool)
+    func invalidate()
+    func removeFromRunLoop()
+}
+
+protocol KeyboardShortcutTapInstalling: AnyObject {
+    func hasInputMonitoringPermission() -> Bool
+    func installTap(
+        location: CGEventTapLocation,
+        name: String,
+        eventsOfInterest: CGEventMask,
+        callback: @escaping CGEventTapCallBack,
+        userInfo: UnsafeMutableRawPointer
+    ) -> KeyboardShortcutTap?
+}
+
+final class SystemKeyboardShortcutTapInstaller: KeyboardShortcutTapInstalling {
+    func hasInputMonitoringPermission() -> Bool {
+        CGPreflightListenEventAccess()
+    }
+
+    func installTap(
+        location: CGEventTapLocation,
+        name: String,
+        eventsOfInterest: CGEventMask,
+        callback: @escaping CGEventTapCallBack,
+        userInfo: UnsafeMutableRawPointer
+    ) -> KeyboardShortcutTap? {
+        guard let eventTap = CGEvent.tapCreate(
+            tap: location,
+            place: .headInsertEventTap,
+            options: .defaultTap,
+            eventsOfInterest: eventsOfInterest,
+            callback: callback,
+            userInfo: userInfo
+        ) else {
+            return nil
+        }
+
+        guard let runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap, 0) else {
+            CFMachPortInvalidate(eventTap)
+            return nil
+        }
+
+        CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
+        CGEvent.tapEnable(tap: eventTap, enable: true)
+        return SystemKeyboardShortcutTap(name: name, eventTap: eventTap, runLoopSource: runLoopSource)
+    }
+}
+
+private final class SystemKeyboardShortcutTap: KeyboardShortcutTap {
+    let name: String
+    private let eventTap: CFMachPort
+    private let runLoopSource: CFRunLoopSource
+
+    init(name: String, eventTap: CFMachPort, runLoopSource: CFRunLoopSource) {
+        self.name = name
+        self.eventTap = eventTap
+        self.runLoopSource = runLoopSource
+    }
+
+    func enable(_ enabled: Bool) {
+        CGEvent.tapEnable(tap: eventTap, enable: enabled)
+    }
+
+    func invalidate() {
+        CFMachPortInvalidate(eventTap)
+    }
+
+    func removeFromRunLoop() {
+        CFRunLoopRemoveSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
+    }
+}
+
 final class KeyboardShortcutService: @unchecked Sendable {
-    private var eventTaps: [CFMachPort] = []
-    private var runLoopSources: [CFRunLoopSource] = []
+    private var eventTaps: [KeyboardShortcutTap] = []
     private var onCommand: ((KeyboardShortcutCommand) -> Void)?
     private var onInputEvent: ((CapturedInputEvent) -> Void)?
+    private var shouldInterceptCommand: (KeyboardShortcutCommand) -> Bool = { _ in true }
     private let inputEventAdapter = CapturedInputEventAdapter()
     private let inputSuppressionController: InputSuppressionController
     private let inputMethodStateProvider: @Sendable () -> InputMethodState
+    private let tapInstaller: KeyboardShortcutTapInstalling
     private var shortcutSettings: KeyboardShortcutSettings
     private var passthroughReplay: (keyCode: UInt16, expiresAt: Date)?
 
     init(
         inputSuppressionController: InputSuppressionController = InputSuppressionController(),
         shortcutSettings: KeyboardShortcutSettings = .defaults,
-        inputMethodStateProvider: @escaping @Sendable () -> InputMethodState = { .asciiCompatible }
+        inputMethodStateProvider: @escaping @Sendable () -> InputMethodState = { .asciiCompatible },
+        tapInstaller: KeyboardShortcutTapInstalling = SystemKeyboardShortcutTapInstaller()
     ) {
         self.inputSuppressionController = inputSuppressionController
         self.shortcutSettings = shortcutSettings
         self.inputMethodStateProvider = inputMethodStateProvider
+        self.tapInstaller = tapInstaller
+    }
+
+    var diagnostics: KeyboardShortcutServiceDiagnostics {
+        KeyboardShortcutServiceDiagnostics(
+            activeTapCount: eventTaps.count,
+            activeTapNames: eventTaps.map(\.name),
+            handlersConfigured: onCommand != nil
+        )
     }
 
     func start(
         onTab: @escaping () -> Void,
         onAcceptAll: @escaping () -> Void,
-        onInputEvent: ((CapturedInputEvent) -> Void)? = nil
+        onInputEvent: ((CapturedInputEvent) -> Void)? = nil,
+        shouldInterceptCommand: @escaping (KeyboardShortcutCommand) -> Bool = { _ in true }
     ) {
         start(
             onCommand: { command in
@@ -35,25 +133,28 @@ final class KeyboardShortcutService: @unchecked Sendable {
                     onTab()
                 case .acceptFullSuggestion:
                     onAcceptAll()
-                case .manualTrigger, .dismissSuggestion, .toggleAutocomplete:
+                case .selectPreviousSuggestion, .selectNextSuggestion, .manualTrigger, .dismissSuggestion, .toggleAutocomplete:
                     break
                 }
             },
-            onInputEvent: onInputEvent
+            onInputEvent: onInputEvent,
+            shouldInterceptCommand: shouldInterceptCommand
         )
     }
 
     func start(
         onCommand: @escaping (KeyboardShortcutCommand) -> Void,
-        onInputEvent: ((CapturedInputEvent) -> Void)? = nil
+        onInputEvent: ((CapturedInputEvent) -> Void)? = nil,
+        shouldInterceptCommand: @escaping (KeyboardShortcutCommand) -> Bool = { _ in true }
     ) {
         stop()
         configureHandlers(
             onCommand: onCommand,
-            onInputEvent: onInputEvent
+            onInputEvent: onInputEvent,
+            shouldInterceptCommand: shouldInterceptCommand
         )
 
-        guard CGPreflightListenEventAccess() else {
+        guard tapInstaller.hasInputMonitoringPermission() else {
             NSLog("AutoComp cannot monitor keyboard shortcuts until Input Monitoring permission is enabled.")
             GeometryDebug.log("shortcut-start rejected reason=input-monitoring-missing")
             return
@@ -88,23 +189,15 @@ final class KeyboardShortcutService: @unchecked Sendable {
 
         var createdEventTapNames: [String] = []
         for candidate in tapCandidates {
-            if let eventTap = CGEvent.tapCreate(
-                tap: candidate.0,
-                place: .headInsertEventTap,
-                options: .defaultTap,
+            if let eventTap = tapInstaller.installTap(
+                location: candidate.0,
+                name: candidate.1,
                 eventsOfInterest: eventsOfInterest,
                 callback: callback,
                 userInfo: userInfo
             ) {
-                guard let runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap, 0) else {
-                    CFMachPortInvalidate(eventTap)
-                    continue
-                }
-                CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
-                CGEvent.tapEnable(tap: eventTap, enable: true)
                 eventTaps.append(eventTap)
-                runLoopSources.append(runLoopSource)
-                createdEventTapNames.append(candidate.1)
+                createdEventTapNames.append(eventTap.name)
             }
         }
 
@@ -117,19 +210,16 @@ final class KeyboardShortcutService: @unchecked Sendable {
     }
 
     func stop() {
-        for runLoopSource in runLoopSources {
-            CFRunLoopRemoveSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
-        }
-
         for eventTap in eventTaps {
-            CGEvent.tapEnable(tap: eventTap, enable: false)
-            CFMachPortInvalidate(eventTap)
+            eventTap.removeFromRunLoop()
+            eventTap.enable(false)
+            eventTap.invalidate()
         }
 
         eventTaps = []
-        runLoopSources = []
         onCommand = nil
         onInputEvent = nil
+        shouldInterceptCommand = { _ in true }
         passthroughReplay = nil
         inputSuppressionController.reset()
     }
@@ -173,7 +263,8 @@ final class KeyboardShortcutService: @unchecked Sendable {
     func configureHandlers(
         onTab: @escaping () -> Void,
         onAcceptAll: @escaping () -> Void,
-        onInputEvent: ((CapturedInputEvent) -> Void)? = nil
+        onInputEvent: ((CapturedInputEvent) -> Void)? = nil,
+        shouldInterceptCommand: @escaping (KeyboardShortcutCommand) -> Bool = { _ in true }
     ) {
         configureHandlers(
             onCommand: { command in
@@ -182,20 +273,23 @@ final class KeyboardShortcutService: @unchecked Sendable {
                     onTab()
                 case .acceptFullSuggestion:
                     onAcceptAll()
-                case .manualTrigger, .dismissSuggestion, .toggleAutocomplete:
+                case .selectPreviousSuggestion, .selectNextSuggestion, .manualTrigger, .dismissSuggestion, .toggleAutocomplete:
                     break
                 }
             },
-            onInputEvent: onInputEvent
+            onInputEvent: onInputEvent,
+            shouldInterceptCommand: shouldInterceptCommand
         )
     }
 
     func configureHandlers(
         onCommand: @escaping (KeyboardShortcutCommand) -> Void,
-        onInputEvent: ((CapturedInputEvent) -> Void)? = nil
+        onInputEvent: ((CapturedInputEvent) -> Void)? = nil,
+        shouldInterceptCommand: @escaping (KeyboardShortcutCommand) -> Bool = { _ in true }
     ) {
         self.onCommand = onCommand
         self.onInputEvent = onInputEvent
+        self.shouldInterceptCommand = shouldInterceptCommand
     }
 
     func capturedInputEvent(type: CGEventType, event: CGEvent) -> CapturedInputEvent? {
@@ -206,7 +300,7 @@ final class KeyboardShortcutService: @unchecked Sendable {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             GeometryDebug.log("shortcut-event-tap-disabled type=\(type.rawValue) reenabled=\(!eventTaps.isEmpty)")
             for eventTap in eventTaps {
-                CGEvent.tapEnable(tap: eventTap, enable: true)
+                eventTap.enable(true)
             }
             return Unmanaged.passUnretained(event)
         }
@@ -221,7 +315,7 @@ final class KeyboardShortcutService: @unchecked Sendable {
 
         if type == .keyUp {
             let keyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
-            if inputSuppressionController.shouldSuppressKeyRelease(keyCode: keyCode) {
+            if inputSuppressionController.consumeSuppressedKeyRelease(keyCode: keyCode) {
                 GeometryDebug.log("shortcut-keyup-suppressed keyCode=\(keyCode)")
                 return nil
             }
@@ -274,7 +368,7 @@ final class KeyboardShortcutService: @unchecked Sendable {
         let keyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
         let matchedCommand = shortcutSettings.command(matching: .flagsChanged, event: event)
         if matchedCommand == nil,
-           inputSuppressionController.shouldSuppressKeyRelease(keyCode: keyCode) {
+           inputSuppressionController.consumeSuppressedKeyRelease(keyCode: keyCode) {
             GeometryDebug.log("shortcut-flags-release-suppressed keyCode=\(keyCode)")
             return nil
         }
@@ -309,6 +403,7 @@ final class KeyboardShortcutService: @unchecked Sendable {
         GeometryDebug.log("shortcut-command eventKind=\(command.inputEventKind.rawValue) command=\(command.rawValue) keyCode=\(keyCode) armed=\(isArmed)")
         if command.requiresActiveSuggestion {
             guard isArmed else {
+                GeometryDebug.log("shortcut-pass-through reason=inactive command=\(command.rawValue) keyCode=\(keyCode)")
                 return Unmanaged.passUnretained(event)
             }
 
@@ -316,6 +411,11 @@ final class KeyboardShortcutService: @unchecked Sendable {
                 GeometryDebug.log("shortcut-pass-through reason=input-method state=\(inputMethodState.diagnosticSummary) source=\(inputMethodState.currentInputSourceID ?? "nil")")
                 return Unmanaged.passUnretained(event)
             }
+        }
+
+        guard shouldInterceptCommand(command) else {
+            GeometryDebug.log("shortcut-pass-through reason=command-disabled command=\(command.rawValue)")
+            return Unmanaged.passUnretained(event)
         }
 
         guard inputSuppressionController.consumeShortcutIfNeeded(
@@ -406,6 +506,8 @@ private extension KeyboardShortcutCommand {
             return .acceptance
         case .acceptFullSuggestion:
             return .fullAcceptance
+        case .selectPreviousSuggestion, .selectNextSuggestion:
+            return .navigation
         case .manualTrigger:
             return .manualTrigger
         case .dismissSuggestion:
@@ -417,7 +519,7 @@ private extension KeyboardShortcutCommand {
 
     var requiresActiveSuggestion: Bool {
         switch self {
-        case .acceptNextWord, .acceptFullSuggestion, .dismissSuggestion:
+        case .acceptNextWord, .acceptFullSuggestion, .selectPreviousSuggestion, .selectNextSuggestion, .dismissSuggestion:
             return true
         case .manualTrigger, .toggleAutocomplete:
             return false

@@ -3,7 +3,7 @@ import AppKit
 import XCTest
 
 final class InputSuppressionControllerTests: XCTestCase {
-    func testShortcutConsumptionExtendsGraceSuppressesReleaseAndDeduplicatesTimestamp() {
+    func testShortcutConsumptionExtendsGraceSuppressesOneReleaseAndDeduplicatesTimestamp() {
         let clock = InputSuppressionTestClock()
         let controller = InputSuppressionController(
             shortcutGraceInterval: 0.5,
@@ -14,15 +14,13 @@ final class InputSuppressionControllerTests: XCTestCase {
         XCTAssertFalse(controller.isShortcutArmed)
         XCTAssertTrue(controller.consumeShortcutIfNeeded(keyCode: 48, eventTimestamp: 123))
         XCTAssertTrue(controller.isShortcutArmed)
-        XCTAssertTrue(controller.shouldSuppressKeyRelease(keyCode: 48))
+        XCTAssertTrue(controller.consumeSuppressedKeyRelease(keyCode: 48))
+        XCTAssertFalse(controller.consumeSuppressedKeyRelease(keyCode: 48))
         XCTAssertFalse(controller.consumeShortcutIfNeeded(keyCode: 48, eventTimestamp: 123))
 
         clock.advance(by: 0.6)
         XCTAssertFalse(controller.isShortcutArmed)
-        XCTAssertTrue(controller.shouldSuppressKeyRelease(keyCode: 48))
-
-        clock.advance(by: 0.2)
-        XCTAssertFalse(controller.shouldSuppressKeyRelease(keyCode: 48))
+        XCTAssertFalse(controller.consumeSuppressedKeyRelease(keyCode: 48))
     }
 
     func testSyntheticInsertionConsumesExpectedKeyDownAndKeyUpCounts() throws {
@@ -96,12 +94,11 @@ final class InputSuppressionControllerTests: XCTestCase {
 
         XCTAssertTrue(controller.consumeShortcutIfNeeded(keyCode: 48, eventTimestamp: 123))
         XCTAssertTrue(controller.isShortcutArmed)
-        XCTAssertTrue(controller.shouldSuppressKeyRelease(keyCode: 48))
 
         controller.clearConsumedShortcut(keyCode: 48)
 
         XCTAssertFalse(controller.isShortcutArmed)
-        XCTAssertFalse(controller.shouldSuppressKeyRelease(keyCode: 48))
+        XCTAssertFalse(controller.consumeSuppressedKeyRelease(keyCode: 48))
         XCTAssertTrue(controller.consumeShortcutIfNeeded(keyCode: 48, eventTimestamp: 123))
     }
 }

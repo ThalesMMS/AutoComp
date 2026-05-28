@@ -1,6 +1,10 @@
 import AutoCompCore
 import Foundation
 
+#if AUTOCOMP_LLAMA_RUNTIME
+import AutoCompLlamaRuntime
+#endif
+
 struct LocalLlamaRuntimeState: Equatable {
     var isAvailable: Bool
     var message: String
@@ -34,6 +38,8 @@ struct AppleIntelligenceDiagnostic: Equatable {
 }
 
 struct CompletionBackendSettings: Equatable {
+    static let defaultMultiSuggestionEnabled = false
+
     var engineKind: CompletionEngineKind
     var remoteBaseURL: String
     var remoteAPIKey: String
@@ -45,6 +51,7 @@ struct CompletionBackendSettings: Equatable {
     var fallbackToRemoteOnLocalFailure: Bool
     var fallbackToRemoteOnAppleIntelligenceFailure: Bool
     var multiSuggestionEnabled: Bool
+    var stopSequences: CompletionStopSequences
 
     init(
         engineKind: CompletionEngineKind = .remote,
@@ -57,7 +64,8 @@ struct CompletionBackendSettings: Equatable {
         localLastError: String? = nil,
         fallbackToRemoteOnLocalFailure: Bool = false,
         fallbackToRemoteOnAppleIntelligenceFailure: Bool = false,
-        multiSuggestionEnabled: Bool = true
+        multiSuggestionEnabled: Bool = CompletionBackendSettings.defaultMultiSuggestionEnabled,
+        stopSequences: CompletionStopSequences = .conservativeDefault
     ) {
         self.engineKind = engineKind
         self.remoteBaseURL = remoteBaseURL
@@ -70,20 +78,32 @@ struct CompletionBackendSettings: Equatable {
         self.fallbackToRemoteOnLocalFailure = fallbackToRemoteOnLocalFailure
         self.fallbackToRemoteOnAppleIntelligenceFailure = fallbackToRemoteOnAppleIntelligenceFailure
         self.multiSuggestionEnabled = multiSuggestionEnabled
+        self.stopSequences = stopSequences
     }
 
     var summary: String {
+        backendSummary()
+    }
+
+    func backendSummary(
+        fileExists: (String) -> Bool = FileManager.default.fileExists(atPath:),
+        appleAvailability: AppleFoundationModelAvailability = SystemAppleFoundationModelBackend.availability()
+    ) -> String {
         switch engineKind {
         case .remote:
             return "Remote backend: \(remoteModel) at \(remoteBaseURL)"
         case .localLlama:
-            let diagnostic = localDiagnostic()
+            let diagnostic = localDiagnostic(fileExists: fileExists)
             if diagnostic.isUsable {
-                return "Local Llama backend: available at \(localModelPath)"
+                return fallbackToRemoteOnLocalFailure
+                    ? "Local Llama backend available with remote fallback at \(localModelPath)"
+                    : "Local Llama backend available without fallback at \(localModelPath)"
             }
-            return "Local Llama backend unavailable: \(diagnostic.runtimeTitle); \(diagnostic.modelFileTitle)"
+            return fallbackToRemoteOnLocalFailure
+                ? "Local Llama backend unavailable: \(diagnostic.runtimeTitle); \(diagnostic.modelFileTitle); remote fallback enabled"
+                : "Local Llama backend unavailable: \(diagnostic.runtimeTitle); \(diagnostic.modelFileTitle); remote fallback disabled"
         case .appleIntelligence:
-            let diagnostic = appleIntelligenceDiagnostic()
+            let diagnostic = appleIntelligenceDiagnostic(availability: appleAvailability)
             if diagnostic.isUsable {
                 return fallbackToRemoteOnAppleIntelligenceFailure
                     ? "Apple Intelligence backend available with remote fallback"
@@ -99,8 +119,24 @@ struct CompletionBackendSettings: Equatable {
         RemoteCompletionConfiguration(
             baseURL: remoteBaseURL,
             apiKey: remoteAPIKey,
-            model: remoteModel
+            model: remoteModel,
+            stopSequences: stopSequences
         )
+    }
+
+    var stopSequenceSummaryTitle: String {
+        "\(stopSequences.continuation.count) continuation, \(stopSequences.fillInMiddle.count) FIM"
+    }
+
+    var stopSequenceBehaviorTitle: String {
+        switch engineKind {
+        case .remote:
+            return "Sent as OpenAI-compatible stop sequences."
+        case .localLlama:
+            return "Applied in the local generation loop when the runtime is available."
+        case .appleIntelligence:
+            return "Post-generation trimming fallback; Apple Intelligence does not expose stop sequences."
+        }
     }
 
     var requestDestinationTitle: String {
@@ -108,6 +144,9 @@ struct CompletionBackendSettings: Equatable {
         case .remote:
             return "Remote: \(remoteModel) at \(remoteBaseURL)"
         case .localLlama:
+            guard !localModelPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return "Local in-process: no model selected"
+            }
             let modelFileName = URL(fileURLWithPath: localModelPath).lastPathComponent
             return "Local in-process: \(modelFileName.isEmpty ? localConfiguration.modelName : modelFileName)"
         case .appleIntelligence:
@@ -116,17 +155,30 @@ struct CompletionBackendSettings: Equatable {
     }
 
     var dataLeavesDeviceTitle: String {
+        dataLeavesDeviceTitle()
+    }
+
+    func dataLeavesDeviceTitle(
+        fileExists: (String) -> Bool = FileManager.default.fileExists(atPath:),
+        appleAvailability: AppleFoundationModelAvailability = SystemAppleFoundationModelBackend.availability()
+    ) -> String {
         switch engineKind {
         case .remote:
             return "Yes, autocomplete text is sent to \(remoteBaseURL)."
         case .localLlama:
-            return fallbackToRemoteOnLocalFailure
-                ? "Local first; text may be sent to \(remoteBaseURL) after a local failure."
-                : "No, local completion requests stay on this Mac."
+            if fallbackToRemoteOnLocalFailure {
+                return "Local first; text may be sent to \(remoteBaseURL) after a local failure."
+            }
+            return localDiagnostic(fileExists: fileExists).isUsable
+                ? "No, local completion requests stay on this Mac."
+                : "No remote endpoint; local completion is blocked until runtime and model prerequisites are met."
         case .appleIntelligence:
-            return fallbackToRemoteOnAppleIntelligenceFailure
-                ? "Apple first; text may be sent to \(remoteBaseURL) after an Apple Intelligence failure."
-                : "No remote endpoint while Apple Intelligence succeeds."
+            if fallbackToRemoteOnAppleIntelligenceFailure {
+                return "Apple first; text may be sent to \(remoteBaseURL) after an Apple Intelligence failure."
+            }
+            return appleIntelligenceDiagnostic(availability: appleAvailability).isUsable
+                ? "No remote endpoint while Apple Intelligence succeeds."
+                : "No remote endpoint; Apple Intelligence is unavailable on this Mac."
         }
     }
 
@@ -154,21 +206,62 @@ struct CompletionBackendSettings: Equatable {
         }
     }
 
+    func remoteBackendExposureTitle(sourceEnabled: Bool) -> String {
+        guard sourceEnabled else {
+            return "No; source is off."
+        }
+
+        switch engineKind {
+        case .remote:
+            return "Yes, sent to \(remoteBaseURL)."
+        case .localLlama:
+            return fallbackToRemoteOnLocalFailure
+                ? "Only after local failure fallback to \(remoteBaseURL)."
+                : "No remote backend."
+        case .appleIntelligence:
+            return fallbackToRemoteOnAppleIntelligenceFailure
+                ? "Only after Apple Intelligence fallback to \(remoteBaseURL)."
+                : "No remote backend."
+        }
+    }
+
     var localConfiguration: LocalLlamaConfiguration {
         LocalLlamaConfiguration(
             modelPath: localModelPath,
-            maxRAMBytes: localMaxRAMBytes
+            maxRAMBytes: localMaxRAMBytes,
+            stopSequences: stopSequences
         )
     }
 
-    func localDiagnostic(fileExists: (String) -> Bool = FileManager.default.fileExists(atPath:)) -> LocalLlamaDiagnostic {
-        let modelExists = fileExists(localModelPath)
+    func localDiagnostic(
+        fileExists: (String) -> Bool = FileManager.default.fileExists(atPath:),
+        loadStatus: LocalLlamaRuntimeStatus = .unloaded
+    ) -> LocalLlamaDiagnostic {
+        let hasModelPath = !localModelPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let modelExists = hasModelPath && fileExists(localModelPath)
         let runtimeTitle = localRuntimeState.isAvailable ? "Available" : "Unavailable: \(localRuntimeState.message)"
-        let modelFileTitle = modelExists ? "Found at \(localModelPath)" : "Missing at \(localModelPath)"
-        let loadStateTitle = localRuntimeState.isAvailable && modelExists ? "Ready to load" : "Blocked"
+        let modelFileTitle: String
+        if !hasModelPath {
+            modelFileTitle = "No model selected"
+        } else {
+            modelFileTitle = modelExists ? "Found at \(localModelPath)" : "Missing at \(localModelPath)"
+        }
+        let loadStateTitle: String
+        if localRuntimeState.isAvailable && modelExists {
+            loadStateTitle = loadStatus.applies(to: localModelPath)
+                ? loadStatus.state.title
+                : LocalLlamaRuntimeLoadState.unloaded.title
+        } else {
+            loadStateTitle = "Blocked"
+        }
         let lastErrorTitle: String
         if let localLastError, !localLastError.isEmpty {
             lastErrorTitle = localLastError
+        } else if loadStatus.applies(to: localModelPath),
+                  loadStatus.state == .failed,
+                  let message = loadStatus.message,
+                  !message.isEmpty {
+            lastErrorTitle = message
         } else {
             lastErrorTitle = "None"
         }
@@ -211,6 +304,12 @@ struct CompletionBackendSettings: Equatable {
     }
 }
 
+private extension LocalLlamaRuntimeStatus {
+    func applies(to modelPath: String) -> Bool {
+        self.modelPath == nil || self.modelPath == modelPath
+    }
+}
+
 struct CompletionBackendConfigurationService {
     private let defaults: UserDefaults
     private let mirroredDefaults: [UserDefaults]
@@ -231,9 +330,10 @@ struct CompletionBackendConfigurationService {
     }
 
     func load(
-        localRuntimeState: LocalLlamaRuntimeState = CompletionBackendConfigurationService.localRuntimeState()
+        localRuntimeState: LocalLlamaRuntimeState = CompletionBackendConfigurationService.localRuntimeState(),
+        values overrideValues: [String: String]? = nil
     ) -> CompletionBackendSettings {
-        let values = loadValues()
+        let values = overrideValues ?? loadValues()
 
         return CompletionBackendSettings(
             engineKind: CompletionEngineKind(rawValue: string(forKey: defaultsPrefix + "kind") ?? "") ?? .remote,
@@ -266,14 +366,22 @@ struct CompletionBackendConfigurationService {
             ),
             multiSuggestionEnabled: loadBool(
                 key: defaultsPrefix + "multiSuggestionEnabled",
-                environmentValue: values["AUTOCOMP_MULTI_SUGGESTION_ENABLED"],
-                defaultValue: true
-            )
+                environmentValue: values["AUTOCOMP_DEBUG_MULTI_SUGGESTION_ENABLED"]
+                    ?? values["AUTOCOMP_MULTI_SUGGESTION_ENABLED"],
+                defaultValue: CompletionBackendSettings.defaultMultiSuggestionEnabled
+            ),
+            stopSequences: loadStopSequences(values: values)
         )
     }
 
     static func localRuntimeState() -> LocalLlamaRuntimeState {
-        #if canImport(AutoCompLlamaRuntime)
+        #if AUTOCOMP_LLAMA_RUNTIME
+        guard LlamaCppRuntimeBackend.runtimeSystemInfo() != "unavailable" else {
+            return LocalLlamaRuntimeState(
+                isAvailable: false,
+                message: "Local runtime libraries are unavailable."
+            )
+        }
         return .available
         #else
         return .unavailableInBuild
@@ -294,8 +402,50 @@ struct CompletionBackendConfigurationService {
         set(settings.fallbackToRemoteOnLocalFailure, forKey: defaultsPrefix + "fallbackToRemoteOnLocalFailure")
         set(settings.fallbackToRemoteOnAppleIntelligenceFailure, forKey: defaultsPrefix + "fallbackToRemoteOnAppleIntelligenceFailure")
         set(settings.multiSuggestionEnabled, forKey: defaultsPrefix + "multiSuggestionEnabled")
+        set(settings.stopSequences.continuation, forKey: defaultsPrefix + "stopSequences.continuation")
+        set(settings.stopSequences.fillInMiddle, forKey: defaultsPrefix + "stopSequences.fillInMiddle")
         synchronize()
         saveRemoteAPIKey(settings.remoteAPIKey)
+    }
+
+    private func loadStopSequences(values: [String: String]) -> CompletionStopSequences {
+        CompletionStopSequences(
+            continuation: loadStopSequenceList(
+                key: defaultsPrefix + "stopSequences.continuation",
+                environmentValue: values["AUTOCOMP_STOP_SEQUENCES_CONTINUATION"],
+                defaultValue: CompletionStopSequences.conservativeDefault.continuation
+            ),
+            fillInMiddle: loadStopSequenceList(
+                key: defaultsPrefix + "stopSequences.fillInMiddle",
+                environmentValue: values["AUTOCOMP_STOP_SEQUENCES_FIM"],
+                defaultValue: CompletionStopSequences.conservativeDefault.fillInMiddle
+            )
+        )
+    }
+
+    private func loadStopSequenceList(
+        key: String,
+        environmentValue: String?,
+        defaultValue: [String]
+    ) -> [String] {
+        if let stored = object(forKey: key) as? [String] {
+            return stored
+        }
+
+        if let environmentValue {
+            return environmentValue
+                .components(separatedBy: "||")
+                .map(unescapedStopSequence)
+        }
+
+        return defaultValue
+    }
+
+    private func unescapedStopSequence(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "\\r", with: "\r")
+            .replacingOccurrences(of: "\\n", with: "\n")
+            .replacingOccurrences(of: "\\t", with: "\t")
     }
 
     private func loadUInt64(key: String, environmentValue: String?, defaultValue: UInt64) -> UInt64 {

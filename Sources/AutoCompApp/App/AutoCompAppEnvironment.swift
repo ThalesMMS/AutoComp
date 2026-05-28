@@ -1,7 +1,7 @@
 import AutoCompCore
 import Foundation
 
-#if canImport(AutoCompLlamaRuntime)
+#if AUTOCOMP_LLAMA_RUNTIME
 import AutoCompLlamaRuntime
 #endif
 
@@ -21,8 +21,11 @@ struct AutoCompAppEnvironment {
     let inputSourceMonitor: InputSourceMonitor
     let shortcutSettingsStore: KeyboardShortcutSettingsStore
     let completionBackendConfigurationService: CompletionBackendConfigurationService
+    let localLlamaRuntimeStatusStore: LocalLlamaRuntimeStatusStore
+    let remoteCompletionConsentStore: RemoteCompletionConsentStore
     let debugOptionsStore: AutoCompDebugOptionsStore
     let debugArtifactStore: DebugArtifactStore
+    let pasteboardRecoveryStore: PasteboardInsertionRecoveryStore
     let suggestionDebugLogger: SuggestionDebugLogger
     let overlayRecoveryAdvisor: OverlayRecoveryAdvisor
     let productivityMetricsStore: LocalProductivityMetricsStore
@@ -36,6 +39,8 @@ struct AutoCompAppEnvironment {
         let usesInlinePreviewTestProvider = arguments.contains("--ui-test-inline-preview")
         let usesPlaygroundTestProvider = arguments.contains("--ui-test-playground")
         let completionBackendConfigurationService = CompletionBackendConfigurationService()
+        let localLlamaRuntimeStatusStore = LocalLlamaRuntimeStatusStore()
+        let remoteCompletionConsentStore = RemoteCompletionConsentStore()
         let backendSettings = usesInlinePreviewTestProvider
             ? CompletionBackendSettings()
             : completionBackendConfigurationService.load()
@@ -45,6 +50,7 @@ struct AutoCompAppEnvironment {
         let privacySettingsStore = PrivacySettingsStore()
         let debugOptionsStore = AutoCompDebugOptionsStore()
         let debugArtifactStore = DebugArtifactStore()
+        let pasteboardRecoveryStore = PasteboardInsertionRecoveryStore()
         let suggestionDebugLogger = SuggestionDebugLogger(artifactStore: debugArtifactStore)
         let overlayRecoveryAdvisor = OverlayRecoveryAdvisor()
         let productivityMetricsStore = LocalProductivityMetricsStore(
@@ -60,9 +66,16 @@ struct AutoCompAppEnvironment {
             shortcutSettings: shortcutSettingsStore.load(),
             inputMethodStateProvider: { inputSourceMonitor.currentState }
         )
-        let acceptanceService = AcceptanceService(inputSuppressionController: inputSuppressionController)
+        let acceptanceService = AcceptanceService(
+            inputSuppressionController: inputSuppressionController,
+            pasteboardRecoveryStore: pasteboardRecoveryStore
+        )
         let personalizationStore = SecurePersonalizationStore(directory: Self.personalizationDirectory())
-        let focusTrackingModel = FocusTrackingModel()
+        let focusTrackingModel = FocusTrackingModel(
+            axCapabilitySnapshotRecorder: AXCapabilitySnapshotRecorder(
+                artifactStore: debugArtifactStore
+            )
+        )
         let visualContextCoordinator = VisualContextCoordinator(privacyStore: privacySettingsStore)
         let clipboardContextProvider = SystemClipboardContextProvider()
         let keystrokeBufferFallback = KeystrokeBufferFallback()
@@ -82,7 +95,9 @@ struct AutoCompAppEnvironment {
         )
         let completionProvider = Self.completionProvider(
             settings: backendSettings,
-            usesInlinePreviewTestProvider: usesInlinePreviewTestProvider
+            usesInlinePreviewTestProvider: usesInlinePreviewTestProvider,
+            remoteConsentStore: remoteCompletionConsentStore,
+            localLlamaRuntimeStatusStore: localLlamaRuntimeStatusStore
         )
         let suggestionEngine = SuggestionEngine(
             contextProvider: focusTrackingModel,
@@ -118,8 +133,11 @@ struct AutoCompAppEnvironment {
         self.inputSourceMonitor = inputSourceMonitor
         self.shortcutSettingsStore = shortcutSettingsStore
         self.completionBackendConfigurationService = completionBackendConfigurationService
+        self.localLlamaRuntimeStatusStore = localLlamaRuntimeStatusStore
+        self.remoteCompletionConsentStore = remoteCompletionConsentStore
         self.debugOptionsStore = debugOptionsStore
         self.debugArtifactStore = debugArtifactStore
+        self.pasteboardRecoveryStore = pasteboardRecoveryStore
         self.suggestionDebugLogger = suggestionDebugLogger
         self.overlayRecoveryAdvisor = overlayRecoveryAdvisor
         self.productivityMetricsStore = productivityMetricsStore
@@ -134,7 +152,9 @@ struct AutoCompAppEnvironment {
     func completionProvider(for settings: CompletionBackendSettings) -> CompletionProvider {
         Self.completionProvider(
             settings: settings,
-            usesInlinePreviewTestProvider: usesInlinePreviewTestProvider
+            usesInlinePreviewTestProvider: usesInlinePreviewTestProvider,
+            remoteConsentStore: remoteCompletionConsentStore,
+            localLlamaRuntimeStatusStore: localLlamaRuntimeStatusStore
         )
     }
 
@@ -147,13 +167,18 @@ struct AutoCompAppEnvironment {
 
     private static func completionProvider(
         settings: CompletionBackendSettings,
-        usesInlinePreviewTestProvider: Bool
+        usesInlinePreviewTestProvider: Bool,
+        remoteConsentStore: RemoteCompletionConsentStore,
+        localLlamaRuntimeStatusStore: LocalLlamaRuntimeStatusStore
     ) -> CompletionProvider {
         let remoteProvider: CompletionProvider = usesInlinePreviewTestProvider
             ? InlinePreviewTestCompletionProvider()
             : RemoteCompletionProvider(configuration: settings.remoteConfiguration)
-        let localProvider = Self.localLlamaProvider(settings: settings)
-        let appleFoundationProvider = AppleFoundationCompletionProvider()
+        let localProvider = Self.localLlamaProvider(
+            settings: settings,
+            runtimeStatusStore: localLlamaRuntimeStatusStore
+        )
+        let appleFoundationProvider = AppleFoundationCompletionProvider(stopSequences: settings.stopSequences)
         let fallbackKind = Self.fallbackKind(for: settings)
 
         return CompletionProviderRouter(
@@ -163,18 +188,31 @@ struct AutoCompAppEnvironment {
                 .remote: remoteProvider,
                 .localLlama: localProvider,
                 .appleIntelligence: appleFoundationProvider
-            ]
+            ],
+            remoteConsentChecker: usesInlinePreviewTestProvider
+                ? AllowingRemoteCompletionConsentChecker()
+                : RemoteCompletionConsentPolicy(
+                    store: remoteConsentStore,
+                    remoteBaseURL: settings.remoteBaseURL
+                )
         )
     }
 
-    private static func localLlamaProvider(settings: CompletionBackendSettings) -> CompletionProvider {
-        #if canImport(AutoCompLlamaRuntime)
+    private static func localLlamaProvider(
+        settings: CompletionBackendSettings,
+        runtimeStatusStore: LocalLlamaRuntimeStatusStore
+    ) -> CompletionProvider {
+        #if AUTOCOMP_LLAMA_RUNTIME
         return LocalLlamaCompletionProvider(
             configuration: settings.localConfiguration,
-            runtime: LocalLlamaRuntimeCore(backend: LlamaCppRuntimeBackend())
+            runtime: LocalLlamaRuntimeCore(backend: LlamaCppRuntimeBackend()),
+            runtimeStatusRecorder: runtimeStatusStore.makeRecorder()
         )
         #else
-        return LocalLlamaCompletionProvider(configuration: settings.localConfiguration)
+        return LocalLlamaCompletionProvider(
+            configuration: settings.localConfiguration,
+            runtimeStatusRecorder: runtimeStatusStore.makeRecorder()
+        )
         #endif
     }
 

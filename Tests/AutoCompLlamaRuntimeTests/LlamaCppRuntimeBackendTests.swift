@@ -3,6 +3,13 @@ import AutoCompCore
 import XCTest
 
 final class LlamaCppRuntimeBackendTests: XCTestCase {
+    func testRuntimeSystemInfoReportsLinkedRuntime() {
+        let systemInfo = LlamaCppRuntimeBackend.runtimeSystemInfo()
+
+        XCTAssertFalse(systemInfo.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        XCTAssertNotEqual(systemInfo, "unavailable")
+    }
+
     func testMissingModelFileFailsClearly() async {
         let missingPath = FileManager.default.temporaryDirectory
             .appendingPathComponent("missing-\(UUID().uuidString).gguf")
@@ -50,13 +57,22 @@ final class LlamaCppRuntimeBackendTests: XCTestCase {
             )
             XCTFail("Expected memory limit error")
         } catch let error as LocalLlamaError {
-            guard case .loadFailed(let reason) = error else {
-                return XCTFail("Expected load failure, got \(error)")
+            guard case .allocationFailed(let reason) = error else {
+                return XCTFail("Expected allocation failure, got \(error)")
             }
             XCTAssertTrue(reason.contains("exceeds configured local memory limit"))
         } catch {
             XCTFail("Unexpected error: \(error)")
         }
+    }
+
+    func testBridgeAllocationLoadFailureMapsToAllocationError() {
+        let error = LlamaCppRuntimeBackend.loadError(
+            message: "Could not allocate model wrapper.",
+            code: 3
+        )
+
+        XCTAssertEqual(error, .allocationFailed("Could not allocate model wrapper."))
     }
 
     func testPromptCacheCompatibilityHitsForSharedPrefix() {

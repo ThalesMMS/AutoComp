@@ -390,6 +390,8 @@ struct PrivacySettingsView: View {
     @State private var recordCount = 0
     @State private var debugArtifactCount = 0
     @State private var debugArtifactMessage: String?
+    @State private var settingsTransferMessage: String?
+    @State private var pendingSettingsImportPreview: RedactedSettingsImportPreview?
     @State private var draftWritingRule = ""
     @State private var draftPrivacyDomain = ""
     @State private var draftDomainCollectionAllowed = false
@@ -564,6 +566,20 @@ struct PrivacySettingsView: View {
                 Button("Export Debug Logs...") {
                     exportDebugLogs()
                 }
+                Button("Export Redacted Settings...") {
+                    exportRedactedSettings()
+                }
+                Button("Import Redacted Settings...") {
+                    importRedactedSettings()
+                }
+                if let pendingSettingsImportPreview {
+                    redactedSettingsImportPreview(pendingSettingsImportPreview)
+                }
+                if let settingsTransferMessage {
+                    Text(settingsTransferMessage)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 Button("Delete Debug Artifacts", role: .destructive) {
                     deleteDebugArtifacts()
                 }
@@ -642,23 +658,7 @@ struct PrivacySettingsView: View {
     }
 
     private func remoteBackendExposure(sourceEnabled: Bool) -> String {
-        guard sourceEnabled else {
-            return "No; source is off."
-        }
-
-        let backendSettings = controller.completionBackendSettings
-        switch backendSettings.engineKind {
-        case .remote:
-            return "Yes, sent to \(backendSettings.remoteBaseURL)."
-        case .localLlama:
-            return backendSettings.fallbackToRemoteOnLocalFailure
-                ? "Only after local failure fallback to \(backendSettings.remoteBaseURL)."
-                : "No remote backend."
-        case .appleIntelligence:
-            return backendSettings.fallbackToRemoteOnAppleIntelligenceFailure
-                ? "Only after Apple Intelligence fallback to \(backendSettings.remoteBaseURL)."
-                : "No remote backend."
-        }
+        controller.completionBackendSettings.remoteBackendExposureTitle(sourceEnabled: sourceEnabled)
     }
 
     private func privacyPolicyTable(rows: [PrivacyPolicyRow]) -> some View {
@@ -807,6 +807,97 @@ struct PrivacySettingsView: View {
         }
     }
 
+    private func exportRedactedSettings() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.json]
+        panel.canCreateDirectories = true
+        panel.nameFieldStringValue = controller.redactedSettingsExportFilename()
+        panel.prompt = "Export"
+        panel.message = "Choose where to save the redacted settings export."
+
+        guard panel.runModal() == .OK, let url = panel.url else {
+            return
+        }
+
+        do {
+            try controller.exportRedactedSettings(to: url)
+            pendingSettingsImportPreview = nil
+            settingsTransferMessage = "Redacted settings exported to \(url.path)."
+        } catch {
+            settingsTransferMessage = "Unable to export redacted settings: \(error.localizedDescription)"
+        }
+    }
+
+    private func importRedactedSettings() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.json]
+        panel.prompt = "Import"
+        panel.message = "Choose a redacted settings export."
+
+        guard panel.runModal() == .OK, let url = panel.url else {
+            return
+        }
+
+        do {
+            let data = try Data(contentsOf: url)
+            pendingSettingsImportPreview = try controller.redactedSettingsImportPreview(from: data)
+            settingsTransferMessage = "Review the import preview before applying."
+        } catch {
+            pendingSettingsImportPreview = nil
+            settingsTransferMessage = "Unable to import redacted settings: \(error.localizedDescription)"
+        }
+    }
+
+    private func applyRedactedSettingsImport(_ preview: RedactedSettingsImportPreview) {
+        do {
+            try controller.applyRedactedSettingsImport(preview)
+            settings = controller.privacySettingsStore.load()
+            pendingSettingsImportPreview = nil
+            settingsTransferMessage = "Redacted settings imported."
+        } catch {
+            settingsTransferMessage = "Unable to apply redacted settings: \(error.localizedDescription)"
+        }
+    }
+
+    private func redactedSettingsImportPreview(_ preview: RedactedSettingsImportPreview) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Import preview")
+                .font(.caption.weight(.medium))
+            Text(preview.summary)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            ForEach(preview.rows) { row in
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(row.title)
+                        .font(.caption.weight(.medium))
+                    Text("Current: \(row.currentValue)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text("Import: \(row.importedValue)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            ForEach(preview.warnings, id: \.self) { warning in
+                Text(warning)
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+            HStack {
+                Button("Apply Import") {
+                    applyRedactedSettingsImport(preview)
+                }
+                Button("Cancel Import", role: .cancel) {
+                    pendingSettingsImportPreview = nil
+                    settingsTransferMessage = "Redacted settings import canceled."
+                }
+            }
+        }
+    }
+
     private func deleteAllLocalPrivacyData() {
         do {
             try controller.deleteAllLocalPrivacyData()
@@ -912,7 +1003,22 @@ private struct ProductivityMetricsSettingsSummary: View {
         LabeledContent("Suggestions accepted", value: "\(snapshot.suggestionsAccepted)")
         LabeledContent("Suggestions dismissed", value: "\(snapshot.suggestionsDismissed)")
         LabeledContent("Average backend latency", value: averageLatencyTitle(snapshot.averageBackendLatencyMs))
-        Text("Counters are stored locally as numbers only. Accepted text, prompts, suggestions, clipboard, OCR, and domains are not stored in metrics.")
+        if let latencyReport = snapshot.lastLatencyReport {
+            Text("Latest latency report")
+                .font(.caption.weight(.medium))
+            Text(latencyReport.redactedReport)
+                .font(.system(.caption, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+            Button("Copy Redacted Latency Report") {
+                copyLatencyReport(latencyReport)
+            }
+        } else {
+            Text("No latency report yet.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        Text("Counters and latency reports are stored locally as numbers only. Accepted text, prompts, suggestions, clipboard, OCR, app names, bundle IDs, and domains are not stored in metrics.")
             .font(.caption)
             .foregroundStyle(.secondary)
         Button("Reset Productivity Metrics", role: .destructive) {
@@ -931,6 +1037,12 @@ private struct ProductivityMetricsSettingsSummary: View {
             || snapshot.suggestionsAccepted > 0
             || snapshot.suggestionsDismissed > 0
             || snapshot.latencySampleCount > 0
+            || snapshot.lastLatencyReport != nil
+    }
+
+    private func copyLatencyReport(_ report: CompletionLatencyReport) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(report.redactedReport, forType: .string)
     }
 }
 
@@ -1080,6 +1192,7 @@ private final class ShortcutCaptureNSView: NSView {
 struct ModelSettingsView: View {
     @EnvironmentObject private var controller: AppController
     @EnvironmentObject private var engine: SuggestionEngine
+    @EnvironmentObject private var localRuntimeStatusStore: LocalLlamaRuntimeStatusStore
     @StateObject private var modelDownloadManager = ModelDownloadManager()
     @StateObject private var runtimeBootstrapModel = RuntimeBootstrapModel()
     @State private var draft = CompletionBackendSettings()
@@ -1094,6 +1207,7 @@ struct ModelSettingsView: View {
     @State private var didRunPlaygroundUITest = false
     @State private var debugOptions = AutoCompDebugOptions()
     @State private var backendSaveMessage: String?
+    @State private var remoteConsentRevision = 0
 
     var body: some View {
         Form {
@@ -1106,10 +1220,65 @@ struct ModelSettingsView: View {
                 LabeledContent("Request destination", value: draft.requestDestinationTitle)
                 LabeledContent("Data leaves this Mac", value: draft.dataLeavesDeviceTitle)
                 LabeledContent("Remote fallback", value: draft.remoteFallbackTitle)
+                LabeledContent("Stop sequences", value: draft.stopSequenceSummaryTitle)
+                LabeledContent("Stop behavior", value: draft.stopSequenceBehaviorTitle)
                 if let warning = draft.remoteFallbackWarning {
                     Text(warning)
                         .font(.caption)
                         .foregroundStyle(.orange)
+                }
+            }
+
+            Section("Remote completion consent") {
+                let requirements = draft.remoteConsentRequirements
+                if requirements.isEmpty {
+                    Text(draft.remoteConsentLocalOnlyDescription)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    LabeledContent("Remote endpoint", value: draft.remoteBaseURL)
+                    LabeledContent("Endpoint type", value: draft.remoteConsentEndpointKindTitle)
+                    Text("Remote consent is saved per endpoint. Changing the remote endpoint requires consent again.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    ForEach(requirements) { requirement in
+                        let hasConsent = controller.hasRemoteCompletionConsent(
+                            for: requirement.scope,
+                            settings: draft
+                        )
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                Text(requirement.title)
+                                    .font(.caption.weight(.medium))
+                                Spacer()
+                                Text(hasConsent ? "Allowed" : "Needs consent")
+                                    .font(.caption.weight(.medium))
+                                    .foregroundStyle(hasConsent ? .green : .orange)
+                            }
+                            Text(requirement.detail)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            if hasConsent {
+                                Text("Consent is saved for this endpoint.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            } else {
+                                Button(requirement.buttonTitle) {
+                                    controller.grantRemoteCompletionConsent(
+                                        for: requirement.scope,
+                                        settings: draft
+                                    )
+                                    remoteConsentRevision += 1
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Button("Reset Remote Completion Consent", role: .destructive) {
+                    controller.resetRemoteCompletionConsent()
+                    remoteConsentRevision += 1
                 }
             }
 
@@ -1150,6 +1319,18 @@ struct ModelSettingsView: View {
                 }
 
                 connectionStatusView
+            }
+
+            Section("Model compatibility evidence") {
+                let recommendation = ModelCompatibilityMatrix.bundled.recommendation(for: draft)
+                LabeledContent("Matrix row", value: recommendation.rowTitle)
+                LabeledContent("FIM behavior", value: recommendation.fimTitle)
+                LabeledContent("Multiple completions", value: recommendation.multipleCompletionsTitle)
+                LabeledContent("Latency", value: recommendation.latencyTitle)
+                LabeledContent("Evidence", value: recommendation.evidenceTitle)
+                Text(recommendation.detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Section("Apply changes") {
@@ -1197,10 +1378,10 @@ struct ModelSettingsView: View {
                 LabeledContent("Request destination", value: preview.requestDestinationTitle)
                 LabeledContent("Data leaves this Mac", value: preview.dataLeavesDeviceTitle)
                 LabeledContent("Remote fallback", value: preview.remoteFallbackTitle)
-                if debugOptions.allowsSensitivePromptPreview {
+                if let promptPreview = preview.promptPreview(options: debugOptions) {
                     Text("Prompt preview")
                         .font(.caption.weight(.medium))
-                    Text(preview.request.prompt)
+                    Text(promptPreview)
                         .font(.system(.caption, design: .monospaced))
                         .foregroundStyle(.secondary)
                         .textSelection(.enabled)
@@ -1266,6 +1447,10 @@ struct ModelSettingsView: View {
                     Button("Refresh") {
                         refreshLocalModels()
                     }
+                    Button("Unload Local Model") {
+                        controller.unloadLocalLlamaRuntime()
+                    }
+                    .disabled(controller.completionBackendSettings.engineKind != .localLlama)
                 }
 
                 if let localModelActionState {
@@ -1282,7 +1467,7 @@ struct ModelSettingsView: View {
             }
 
             Section("Local diagnostics") {
-                let diagnostic = draft.localDiagnostic()
+                let diagnostic = draft.localDiagnostic(loadStatus: localRuntimeStatusStore.status)
                 LabeledContent("Bootstrap", value: runtimeBootstrapModel.state.summary)
                 LabeledContent("Runtime", value: diagnostic.runtimeTitle)
                 LabeledContent("Model file", value: diagnostic.modelFileTitle)
@@ -1311,8 +1496,13 @@ struct ModelSettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
-            Section("Suggestions") {
-                Toggle("Enable multi-suggestion popup", isOn: $draft.multiSuggestionEnabled)
+            if debugOptions.localDebugOptIn || draft.multiSuggestionEnabled {
+                Section("Internal suggestions") {
+                    Toggle("Enable multi-suggestion popup", isOn: $draft.multiSuggestionEnabled)
+                    Text("Internal/debug only. Keep disabled for beta QA unless this run explicitly validates multi-suggestion behavior.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
 
             Section("Active backend") {
@@ -1322,6 +1512,8 @@ struct ModelSettingsView: View {
                 LabeledContent("Request destination", value: activeSettings.requestDestinationTitle)
                 LabeledContent("Data leaves this Mac", value: activeSettings.dataLeavesDeviceTitle)
                 LabeledContent("Remote fallback", value: activeSettings.remoteFallbackTitle)
+                LabeledContent("Stop sequences", value: activeSettings.stopSequenceSummaryTitle)
+                LabeledContent("Stop behavior", value: activeSettings.stopSequenceBehaviorTitle)
                 LabeledContent("Last backend used", value: engine.diagnostics.backend.lastUsedTitle)
                 LabeledContent("Connection", value: engine.backendStatusSummary.menuTitle)
                 LabeledContent(

@@ -73,6 +73,22 @@ final class AppleFoundationCompletionProviderTests: XCTestCase {
         XCTAssertEqual(suggestion.visibleText, "adiada para sexta-feira")
     }
 
+    func testUnsupportedStopSequencesFallbackToPostGenerationTrimming() async throws {
+        let provider = AppleFoundationCompletionProvider(
+            stopSequences: CompletionStopSequences(
+                continuation: ["<|fim_suffix|>"],
+                fillInMiddle: []
+            ),
+            backend: FakeAppleFoundationModelBackend(
+                rawText: "review this today <|fim_suffix|> ignored echo"
+            )
+        )
+
+        let suggestion = try await provider.complete(context: makeContext())
+
+        XCTAssertEqual(suggestion.visibleText, "review this today")
+    }
+
     private func makeContext(
         textBeforeCursor: String = "Can you ",
         textAfterCursor: String? = nil

@@ -19,6 +19,28 @@ final class SuggestionDiagnosticsTests: XCTestCase {
         XCTAssertNil(diagnostics.output.normalizedPreview)
     }
 
+    func testMenuRowsExposeOnlyRedactedOutputSummariesWhenCollectionIsEnabled() {
+        let rawText = "SECRET raw output"
+        let normalizedText = "SECRET normalized output"
+        var diagnostics = SuggestionDiagnostics()
+
+        diagnostics.recordBackendSuccess(
+            rawText: rawText,
+            normalizedText: normalizedText,
+            collectionAllowed: true,
+            route: nil
+        )
+
+        let rowValues = diagnostics.menuRows.map(\.value)
+        XCTAssertEqual(diagnostics.output.rawPreview, AutoCompLogger.redactedSummary(for: rawText).description)
+        XCTAssertEqual(diagnostics.output.normalizedPreview, AutoCompLogger.redactedSummary(for: normalizedText).description)
+        XCTAssertTrue(rowValues.contains(AutoCompLogger.redactedSummary(for: rawText).description))
+        XCTAssertTrue(rowValues.contains(AutoCompLogger.redactedSummary(for: normalizedText).description))
+        XCTAssertFalse(rowValues.contains { $0.contains("SECRET") })
+        XCTAssertFalse(rowValues.contains { $0.contains("raw output") })
+        XCTAssertFalse(rowValues.contains { $0.contains("normalized output") })
+    }
+
     func testBackendFailureUsesActionableLocalizedMessage() {
         var diagnostics = SuggestionDiagnostics()
 
@@ -78,6 +100,41 @@ final class SuggestionDiagnosticsTests: XCTestCase {
         )
     }
 
+    func testMenuRowsExposeLatencyStagesAndRedactedReport() throws {
+        var diagnostics = SuggestionDiagnostics()
+
+        diagnostics.recordLatency(CompletionLatencyReport(
+            axCaptureMs: 3,
+            geometryMs: nil,
+            visualContextMs: 5,
+            clipboardFilterMs: 1,
+            debounceMs: 250,
+            backendMs: 40,
+            normalizationMs: 2,
+            overlayMs: 4,
+            totalMs: 312
+        ))
+
+        XCTAssertEqual(
+            diagnostics.menuRows.first(where: { $0.id == "latency.axCaptureMs" })?.value,
+            "3 ms"
+        )
+        XCTAssertEqual(
+            diagnostics.menuRows.first(where: { $0.id == "latency.geometryMs" })?.value,
+            "not measured"
+        )
+        XCTAssertEqual(
+            diagnostics.menuRows.first(where: { $0.id == "latency.totalMs" })?.value,
+            "312 ms"
+        )
+        let redactedReport = try XCTUnwrap(diagnostics.redactedLatencyReport())
+        XCTAssertTrue(redactedReport.contains("backendMs=40"))
+        XCTAssertFalse(redactedReport.contains("typed secret"))
+        XCTAssertFalse(redactedReport.contains("prompt text"))
+        XCTAssertFalse(redactedReport.contains("clipboard text"))
+        XCTAssertFalse(redactedReport.contains("com.apple.TextEdit"))
+    }
+
     func testMenuRowsExposeInputMethodSummaryWithoutSourceIdentifier() {
         var diagnostics = SuggestionDiagnostics()
 
@@ -96,7 +153,7 @@ final class SuggestionDiagnosticsTests: XCTestCase {
         })
     }
 
-    func testMenuRowsExposeLowTrustContextSource() {
+    func testMenuRowsExposeLowTrustContextSourceAndQualityWithoutContent() {
         let app = AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1)
         var diagnostics = SuggestionDiagnostics()
 
@@ -109,10 +166,113 @@ final class SuggestionDiagnosticsTests: XCTestCase {
             )
         )
 
-        XCTAssertEqual(diagnostics.focus?.contextSource, "keystrokeBufferLowTrust")
+        XCTAssertEqual(diagnostics.focus?.contextSource, "Keystroke buffer")
+        XCTAssertEqual(diagnostics.focus?.geometryQuality, "unavailable")
+        XCTAssertEqual(diagnostics.focus?.contextTrust, "low-trust")
+        XCTAssertEqual(
+            diagnostics.focus?.contextWarning,
+            "Low-trust fallback: visual and clipboard context isolated."
+        )
         XCTAssertTrue(diagnostics.menuRows.contains {
-            $0.id == "contextSource" && $0.value == "keystrokeBufferLowTrust"
+            $0.id == "contextSource" && $0.value == "Keystroke buffer"
         })
+        XCTAssertTrue(diagnostics.menuRows.contains {
+            $0.id == "geometry" && $0.value == "unavailable"
+        })
+        XCTAssertTrue(diagnostics.menuRows.contains {
+            $0.id == "contextTrust" && $0.value == "low-trust"
+        })
+        XCTAssertTrue(diagnostics.menuRows.contains {
+            $0.id == "contextWarning"
+                && $0.value == "Low-trust fallback: visual and clipboard context isolated."
+        })
+        XCTAssertFalse(diagnostics.menuRows.contains { $0.value.contains("typed") })
+    }
+
+    func testMenuRowsUseNonContentCaptureLabelsForMixedSourceAndGeometryQuality() {
+        let app = AppIdentity(bundleID: "com.google.Chrome", displayName: "Chrome", processID: 1)
+        var diagnostics = SuggestionDiagnostics()
+
+        diagnostics.recordFocus(
+            context: TextContext(
+                app: app,
+                focusedElementID: "docs-field",
+                textBeforeCursor: "private draft",
+                caretGeometryQuality: .screenOCR,
+                captureSources: [.accessibility, .screenOCR]
+            )
+        )
+
+        XCTAssertEqual(diagnostics.focus?.contextSource, "Accessibility, OCR geometry")
+        XCTAssertEqual(diagnostics.focus?.geometryQuality, "OCR")
+        XCTAssertEqual(diagnostics.focus?.contextTrust, "standard")
+        XCTAssertNil(diagnostics.focus?.contextWarning)
+        XCTAssertFalse(diagnostics.menuRows.contains { $0.value.contains("private draft") })
+    }
+
+    func testContextCaptureDiagnosticsSeparatesVisualOCRAndClipboardFromFocusedText() {
+        let app = AppIdentity(bundleID: "com.google.Chrome", displayName: "Chrome", processID: 1)
+        let diagnostics = ContextCaptureDiagnostics(
+            context: TextContext(
+                app: app,
+                focusedElementID: "field",
+                textBeforeCursor: "private draft",
+                caretGeometryQuality: .glyph,
+                captureSources: [.accessibility]
+            ),
+            visualContext: VisualContextSnapshot(summary: "private visual text"),
+            clipboardContext: ClipboardContextSnapshot(
+                summary: "private clipboard text",
+                status: .included,
+                captureSources: [.clipboard]
+            )
+        )
+
+        XCTAssertEqual(diagnostics.contextSourceTitle, "Accessibility")
+        XCTAssertEqual(diagnostics.geometryQualityTitle, "glyph")
+        XCTAssertEqual(diagnostics.supplementalSourceTitle, "Visual OCR, Clipboard")
+        XCTAssertEqual(diagnostics.supplementalSourceLogValue, "visual-ocr,clipboard")
+        XCTAssertEqual(diagnostics.visualContextLogValue, "included")
+        XCTAssertEqual(diagnostics.clipboardContextLogValue, "included")
+        XCTAssertFalse(diagnostics.supplementalSourceTitle.contains("private"))
+        XCTAssertFalse(diagnostics.supplementalSourceLogValue.contains("private"))
+    }
+
+    func testMenuRowsExposeSupplementalContextSourcesWithoutContent() {
+        let app = AppIdentity(bundleID: "com.google.Chrome", displayName: "Chrome", processID: 1)
+        var diagnostics = SuggestionDiagnostics()
+        let context = TextContext(
+            app: app,
+            focusedElementID: "field",
+            textBeforeCursor: "private draft",
+            caretGeometryQuality: .directCaret,
+            captureSources: [.accessibility]
+        )
+
+        diagnostics.recordFocus(context: context)
+        diagnostics.recordSupplementalContext(
+            context: context,
+            visualContext: VisualContextSnapshot(summary: "private visual text"),
+            clipboardContext: ClipboardContextSnapshot(
+                summary: "private clipboard text",
+                status: .included,
+                captureSources: [.clipboard]
+            )
+        )
+
+        XCTAssertEqual(
+            diagnostics.menuRows.first(where: { $0.id == "supplementalContext" })?.value,
+            "Visual OCR, Clipboard"
+        )
+        XCTAssertEqual(
+            diagnostics.menuRows.first(where: { $0.id == "visualContext" })?.value,
+            "included"
+        )
+        XCTAssertEqual(
+            diagnostics.menuRows.first(where: { $0.id == "clipboardContext" })?.value,
+            "included"
+        )
+        XCTAssertFalse(diagnostics.menuRows.contains { $0.value.contains("private") })
     }
 
     func testMenuRowsExposeEffectiveCompatibilityProfile() {
@@ -126,6 +286,10 @@ final class SuggestionDiagnosticsTests: XCTestCase {
         XCTAssertEqual(
             diagnostics.menuRows.first(where: { $0.id == "compatibility" })?.value,
             "Slack: Manual only, mirror window, partial"
+        )
+        XCTAssertEqual(
+            diagnostics.menuRows.first(where: { $0.id == "compatibilityRuleSource" })?.value,
+            "default"
         )
     }
 
@@ -142,6 +306,51 @@ final class SuggestionDiagnosticsTests: XCTestCase {
             diagnostics.menuRows.first(where: { $0.id == "compatibility" })?.value,
             "Chrome: Automatic, inline, setup needed, setup required"
         )
+    }
+
+    func testMenuRowsExposeDomainResolutionRuleSourcesPrivacyAndBackendDestination() {
+        let app = AppIdentity(bundleID: "com.google.Chrome", displayName: "Chrome", processID: 1)
+        var diagnostics = SuggestionDiagnostics()
+        let compatibility = CompatibilityCatalog().decision(
+            bundleID: app.bundleID,
+            domain: nil,
+            userModeOverrides: ["com.google.Chrome": .manualOnly]
+        )
+
+        diagnostics.recordFocus(
+            context: TextContext(
+                app: app,
+                domain: nil,
+                focusedElementID: "field",
+                textBeforeCursor: "typed secret"
+            ),
+            domainResolution: BrowserDomainResolution(
+                status: .unavailableAppleEventsDenied,
+                domain: nil
+            )
+        )
+        diagnostics.recordCompatibility(compatibility)
+        diagnostics.recordPrivacy(PrivacyCollectionDecision(allowed: true, ruleSource: .appRule))
+        diagnostics.recordBackendRequest(policy: CompletionRoutingPolicy(activeKind: .remote, fallbackKind: nil))
+
+        XCTAssertEqual(
+            diagnostics.menuRows.first(where: { $0.id == "domain" })?.value,
+            "unavailable-appleevents-denied"
+        )
+        XCTAssertEqual(
+            diagnostics.menuRows.first(where: { $0.id == "compatibilityRuleSource" })?.value,
+            "app-rule"
+        )
+        XCTAssertEqual(
+            diagnostics.menuRows.first(where: { $0.id == "privacy" })?.value,
+            "collection allowed, app-rule"
+        )
+        XCTAssertEqual(
+            diagnostics.menuRows.first(where: { $0.id == "backendDestination" })?.value,
+            "Remote OpenAI-compatible"
+        )
+        XCTAssertFalse(diagnostics.menuRows.contains { $0.value.contains("typed secret") })
+        XCTAssertFalse(diagnostics.menuRows.contains { $0.value.contains("https://") })
     }
 
     func testFocusFailureIsClearedByReadableFocus() {
@@ -213,6 +422,10 @@ final class SuggestionDiagnosticsTests: XCTestCase {
             )
         )
         XCTAssertEqual(diagnostics.lastDecision?.summary, "paused: backend-circuit-breaker")
+
+        diagnostics.recordRiskyHostAppBlock(action: "typed secret")
+        XCTAssertEqual(diagnostics.lastDecision?.summary, "blocked: blocked-risky-host-app")
+        XCTAssertFalse(diagnostics.menuRows.contains { $0.value.contains("typed secret") })
     }
 
     func testLastDecisionCanRepresentDiagnosticReasonsWithoutMenuUserText() {

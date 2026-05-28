@@ -19,12 +19,32 @@ public enum CompletionEngineKind: String, Codable, CaseIterable, Sendable {
 
 public enum CompletionProviderRouterError: LocalizedError, Equatable, Sendable {
     case unavailable(CompletionEngineKind)
+    case remoteConsentRequired(RemoteCompletionConsentScope)
 
     public var errorDescription: String? {
         switch self {
         case .unavailable(let kind):
             return "\(kind.displayName) completion is unavailable in this build."
+        case .remoteConsentRequired(let scope):
+            switch scope {
+            case .remoteBackend:
+                return "Remote completion requires explicit consent before autocomplete text is sent."
+            case .remoteFallback:
+                return "Remote fallback requires explicit consent before autocomplete text is sent."
+            }
         }
+    }
+}
+
+public protocol RemoteCompletionConsentChecking: Sendable {
+    func hasConsent(for scope: RemoteCompletionConsentScope) -> Bool
+}
+
+public struct AllowingRemoteCompletionConsentChecker: RemoteCompletionConsentChecking {
+    public init() {}
+
+    public func hasConsent(for scope: RemoteCompletionConsentScope) -> Bool {
+        true
     }
 }
 
@@ -32,15 +52,18 @@ public struct CompletionProviderRouter: ClipboardContextAwareCompletionProvider,
     public let activeKind: CompletionEngineKind
     public let fallbackKind: CompletionEngineKind?
     private let providers: [CompletionEngineKind: CompletionProvider]
+    private let remoteConsentChecker: any RemoteCompletionConsentChecking
 
     public init(
         activeKind: CompletionEngineKind = .remote,
         fallbackKind: CompletionEngineKind? = nil,
-        providers: [CompletionEngineKind: CompletionProvider]
+        providers: [CompletionEngineKind: CompletionProvider],
+        remoteConsentChecker: any RemoteCompletionConsentChecking = AllowingRemoteCompletionConsentChecker()
     ) {
         self.activeKind = activeKind
         self.fallbackKind = fallbackKind
         self.providers = providers
+        self.remoteConsentChecker = remoteConsentChecker
     }
 
     public var routingPolicy: CompletionRoutingPolicy {
@@ -103,8 +126,10 @@ public struct CompletionProviderRouter: ClipboardContextAwareCompletionProvider,
         visualContext: VisualContextSnapshot?,
         clipboardContext: ClipboardContextSnapshot?
     ) async throws -> Suggestion {
+        try requireRemoteConsent(for: activeKind, scope: .remoteBackend)
         guard let provider = provider() else {
             if let fallbackProvider = fallbackProvider() {
+                try requireRemoteConsent(for: fallbackKind, scope: .remoteFallback)
                 let suggestion = try await complete(
                     with: fallbackProvider,
                     context: context,
@@ -134,6 +159,7 @@ public struct CompletionProviderRouter: ClipboardContextAwareCompletionProvider,
             guard let fallbackProvider = fallbackProvider() else {
                 throw error
             }
+            try requireRemoteConsent(for: fallbackKind, scope: .remoteFallback)
             let suggestion = try await complete(
                 with: fallbackProvider,
                 context: context,
@@ -152,8 +178,10 @@ public struct CompletionProviderRouter: ClipboardContextAwareCompletionProvider,
         clipboardContext: ClipboardContextSnapshot?,
         options: CompletionOptions
     ) async throws -> [Suggestion] {
+        try requireRemoteConsent(for: activeKind, scope: .remoteBackend)
         guard let provider = provider() else {
             if let fallbackProvider = fallbackProvider() {
+                try requireRemoteConsent(for: fallbackKind, scope: .remoteFallback)
                 let suggestions = try await completeMultiple(
                     with: fallbackProvider,
                     context: context,
@@ -185,6 +213,7 @@ public struct CompletionProviderRouter: ClipboardContextAwareCompletionProvider,
             guard let fallbackProvider = fallbackProvider() else {
                 throw error
             }
+            try requireRemoteConsent(for: fallbackKind, scope: .remoteFallback)
             let suggestions = try await completeMultiple(
                 with: fallbackProvider,
                 context: context,
@@ -204,6 +233,17 @@ public struct CompletionProviderRouter: ClipboardContextAwareCompletionProvider,
         }
 
         return providers[fallbackKind]
+    }
+
+    private func requireRemoteConsent(
+        for kind: CompletionEngineKind?,
+        scope: RemoteCompletionConsentScope
+    ) throws {
+        guard kind == .remote,
+              !remoteConsentChecker.hasConsent(for: scope) else {
+            return
+        }
+        throw CompletionProviderRouterError.remoteConsentRequired(scope)
     }
 
     private func routed(

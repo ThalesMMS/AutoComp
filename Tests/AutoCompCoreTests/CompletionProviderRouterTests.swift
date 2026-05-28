@@ -51,6 +51,29 @@ final class CompletionProviderRouterTests: XCTestCase {
         XCTAssertTrue(suggestion.completionRoute?.fallbackErrorDescription?.contains("Local model was not found") == true)
     }
 
+    func testLocalFailureDoesNotUseRemoteProviderWithoutExplicitFallback() async {
+        let remoteProvider = CountingCompletionProvider(text: "remote fallback")
+        let router = CompletionProviderRouter(
+            activeKind: .localLlama,
+            providers: [
+                .localLlama: ThrowingCompletionProvider(error: LocalLlamaError.allocationFailed("limit exceeded")),
+                .remote: remoteProvider
+            ]
+        )
+
+        do {
+            _ = try await router.complete(context: makeContext())
+            XCTFail("Expected local failure")
+        } catch let error as LocalLlamaError {
+            XCTAssertEqual(error, .allocationFailed("limit exceeded"))
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        let remoteCallCount = await remoteProvider.callCount()
+        XCTAssertEqual(remoteCallCount, 0)
+    }
+
     func testFallsBackFromAppleIntelligenceWhenConfigured() async throws {
         let router = CompletionProviderRouter(
             activeKind: .appleIntelligence,
@@ -95,6 +118,60 @@ final class CompletionProviderRouterTests: XCTestCase {
         } catch {
             XCTFail("Unexpected error: \(error)")
         }
+    }
+
+    func testRemoteBackendRequiresConsentBeforeCallingProvider() async {
+        let provider = CountingCompletionProvider(text: "review this")
+        let router = CompletionProviderRouter(
+            activeKind: .remote,
+            providers: [.remote: provider],
+            remoteConsentChecker: FixedRemoteConsentChecker(allowedScopes: [])
+        )
+
+        do {
+            _ = try await router.complete(context: makeContext())
+            XCTFail("Expected remote consent error")
+        } catch let error as CompletionProviderRouterError {
+            XCTAssertEqual(error, .remoteConsentRequired(.remoteBackend))
+            XCTAssertEqual(
+                error.errorDescription,
+                "Remote completion requires explicit consent before autocomplete text is sent."
+            )
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        let callCount = await provider.callCount()
+        XCTAssertEqual(callCount, 0)
+    }
+
+    func testRemoteFallbackRequiresSeparateConsentBeforeCallingProvider() async {
+        let remoteProvider = CountingCompletionProvider(text: "remote fallback")
+        let router = CompletionProviderRouter(
+            activeKind: .localLlama,
+            fallbackKind: .remote,
+            providers: [
+                .localLlama: ThrowingCompletionProvider(error: LocalLlamaError.modelNotFound("/tmp/missing.gguf")),
+                .remote: remoteProvider
+            ],
+            remoteConsentChecker: FixedRemoteConsentChecker(allowedScopes: [.remoteBackend])
+        )
+
+        do {
+            _ = try await router.complete(context: makeContext())
+            XCTFail("Expected remote fallback consent error")
+        } catch let error as CompletionProviderRouterError {
+            XCTAssertEqual(error, .remoteConsentRequired(.remoteFallback))
+            XCTAssertEqual(
+                error.errorDescription,
+                "Remote fallback requires explicit consent before autocomplete text is sent."
+            )
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        let remoteCallCount = await remoteProvider.callCount()
+        XCTAssertEqual(remoteCallCount, 0)
     }
 
     func testForwardsVisualContextToAwareProvider() async throws {
@@ -154,6 +231,24 @@ private actor StaticCompletionProvider: CompletionProvider {
     }
 }
 
+private actor CountingCompletionProvider: CompletionProvider {
+    let text: String
+    private var storedCallCount = 0
+
+    init(text: String) {
+        self.text = text
+    }
+
+    func callCount() -> Int {
+        storedCallCount
+    }
+
+    func complete(context: TextContext) async throws -> Suggestion {
+        storedCallCount += 1
+        return Suggestion(baseContextID: context.id, visibleText: text, latencyMs: 1)
+    }
+}
+
 private actor LifecycleRecordingCompletionProvider: CompletionProvider, RuntimeSwitchPreparingCompletionProvider {
     let text: String
     private var storedPrepareCount = 0
@@ -172,6 +267,14 @@ private actor LifecycleRecordingCompletionProvider: CompletionProvider, RuntimeS
 
     func complete(context: TextContext) async throws -> Suggestion {
         Suggestion(baseContextID: context.id, visibleText: text, latencyMs: 1)
+    }
+}
+
+private struct FixedRemoteConsentChecker: RemoteCompletionConsentChecking {
+    let allowedScopes: Set<RemoteCompletionConsentScope>
+
+    func hasConsent(for scope: RemoteCompletionConsentScope) -> Bool {
+        allowedScopes.contains(scope)
     }
 }
 

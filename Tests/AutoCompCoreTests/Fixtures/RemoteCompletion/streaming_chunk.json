@@ -1,0 +1,14 @@
+{
+  "id": "chatcmpl-streaming-chunk",
+  "object": "chat.completion.chunk",
+  "choices": [
+    {
+      "index": 0,
+      "delta": {
+        "role": "assistant",
+        "content": "review"
+      },
+      "finish_reason": null
+    }
+  ]
+}

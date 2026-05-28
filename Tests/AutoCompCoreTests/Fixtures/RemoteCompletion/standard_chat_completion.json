@@ -1,0 +1,19 @@
+{
+  "id": "chatcmpl-standard",
+  "object": "chat.completion",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "review this today."
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 21,
+    "completion_tokens": 4,
+    "total_tokens": 25
+  }
+}

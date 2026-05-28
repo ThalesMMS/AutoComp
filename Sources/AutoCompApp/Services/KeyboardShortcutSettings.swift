@@ -4,6 +4,8 @@ import Foundation
 enum KeyboardShortcutCommand: String, CaseIterable, Codable, Identifiable, Sendable {
     case acceptNextWord
     case acceptFullSuggestion
+    case selectPreviousSuggestion
+    case selectNextSuggestion
     case manualTrigger
     case dismissSuggestion
     case toggleAutocomplete
@@ -16,6 +18,10 @@ enum KeyboardShortcutCommand: String, CaseIterable, Codable, Identifiable, Senda
             return "Accept next word"
         case .acceptFullSuggestion:
             return "Accept full suggestion"
+        case .selectPreviousSuggestion:
+            return "Previous suggestion"
+        case .selectNextSuggestion:
+            return "Next suggestion"
         case .manualTrigger:
             return "Manual trigger"
         case .dismissSuggestion:
@@ -179,6 +185,10 @@ struct KeyboardShortcutBinding: Codable, Equatable, Sendable {
             return "Space"
         case 50:
             return "`"
+        case CapturedInputEventAdapter.leftBracketKeyCode:
+            return "["
+        case CapturedInputEventAdapter.rightBracketKeyCode:
+            return "]"
         case CapturedInputEventAdapter.escapeKeyCode:
             return "Esc"
         case 125:
@@ -196,6 +206,8 @@ struct KeyboardShortcutBinding: Codable, Equatable, Sendable {
 struct KeyboardShortcutSettings: Codable, Equatable, Sendable {
     var acceptNextWord: KeyboardShortcutBinding
     var acceptFullSuggestion: KeyboardShortcutBinding
+    var selectPreviousSuggestion: KeyboardShortcutBinding
+    var selectNextSuggestion: KeyboardShortcutBinding
     var manualTrigger: KeyboardShortcutBinding
     var dismissSuggestion: KeyboardShortcutBinding
     var toggleAutocomplete: KeyboardShortcutBinding
@@ -203,6 +215,8 @@ struct KeyboardShortcutSettings: Codable, Equatable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case acceptNextWord
         case acceptFullSuggestion
+        case selectPreviousSuggestion
+        case selectNextSuggestion
         case manualTrigger
         case dismissSuggestion
         case toggleAutocomplete
@@ -211,12 +225,16 @@ struct KeyboardShortcutSettings: Codable, Equatable, Sendable {
     init(
         acceptNextWord: KeyboardShortcutBinding = Self.defaultAcceptNextWord,
         acceptFullSuggestion: KeyboardShortcutBinding = Self.defaultAcceptFullSuggestion,
+        selectPreviousSuggestion: KeyboardShortcutBinding = Self.defaultSelectPreviousSuggestion,
+        selectNextSuggestion: KeyboardShortcutBinding = Self.defaultSelectNextSuggestion,
         manualTrigger: KeyboardShortcutBinding = Self.defaultManualTrigger,
         dismissSuggestion: KeyboardShortcutBinding = Self.defaultDismissSuggestion,
         toggleAutocomplete: KeyboardShortcutBinding = Self.defaultToggleAutocomplete
     ) {
         self.acceptNextWord = acceptNextWord
         self.acceptFullSuggestion = acceptFullSuggestion
+        self.selectPreviousSuggestion = selectPreviousSuggestion
+        self.selectNextSuggestion = selectNextSuggestion
         self.manualTrigger = manualTrigger
         self.dismissSuggestion = dismissSuggestion
         self.toggleAutocomplete = toggleAutocomplete
@@ -227,6 +245,8 @@ struct KeyboardShortcutSettings: Codable, Equatable, Sendable {
         self.init(
             acceptNextWord: try container.decodeIfPresent(KeyboardShortcutBinding.self, forKey: .acceptNextWord) ?? Self.defaultAcceptNextWord,
             acceptFullSuggestion: try container.decodeIfPresent(KeyboardShortcutBinding.self, forKey: .acceptFullSuggestion) ?? Self.defaultAcceptFullSuggestion,
+            selectPreviousSuggestion: try container.decodeIfPresent(KeyboardShortcutBinding.self, forKey: .selectPreviousSuggestion) ?? Self.defaultSelectPreviousSuggestion,
+            selectNextSuggestion: try container.decodeIfPresent(KeyboardShortcutBinding.self, forKey: .selectNextSuggestion) ?? Self.defaultSelectNextSuggestion,
             manualTrigger: try container.decodeIfPresent(KeyboardShortcutBinding.self, forKey: .manualTrigger) ?? Self.defaultManualTrigger,
             dismissSuggestion: try container.decodeIfPresent(KeyboardShortcutBinding.self, forKey: .dismissSuggestion) ?? Self.defaultDismissSuggestion,
             toggleAutocomplete: try container.decodeIfPresent(KeyboardShortcutBinding.self, forKey: .toggleAutocomplete) ?? Self.defaultToggleAutocomplete
@@ -242,6 +262,14 @@ struct KeyboardShortcutSettings: Codable, Equatable, Sendable {
         keyCode: CapturedInputEventAdapter.rightShiftKeyCode,
         modifiers: .shift,
         trigger: .flagsChanged
+    )
+    static let defaultSelectPreviousSuggestion = KeyboardShortcutBinding(
+        keyCode: CapturedInputEventAdapter.leftBracketKeyCode,
+        modifiers: .option
+    )
+    static let defaultSelectNextSuggestion = KeyboardShortcutBinding(
+        keyCode: CapturedInputEventAdapter.rightBracketKeyCode,
+        modifiers: .option
     )
     static let defaultManualTrigger = KeyboardShortcutBinding(
         keyCode: CapturedInputEventAdapter.spaceKeyCode,
@@ -262,6 +290,10 @@ struct KeyboardShortcutSettings: Codable, Equatable, Sendable {
                 return acceptNextWord
             case .acceptFullSuggestion:
                 return acceptFullSuggestion
+            case .selectPreviousSuggestion:
+                return selectPreviousSuggestion
+            case .selectNextSuggestion:
+                return selectNextSuggestion
             case .manualTrigger:
                 return manualTrigger
             case .dismissSuggestion:
@@ -276,6 +308,10 @@ struct KeyboardShortcutSettings: Codable, Equatable, Sendable {
                 acceptNextWord = newValue
             case .acceptFullSuggestion:
                 acceptFullSuggestion = newValue
+            case .selectPreviousSuggestion:
+                selectPreviousSuggestion = newValue
+            case .selectNextSuggestion:
+                selectNextSuggestion = newValue
             case .manualTrigger:
                 manualTrigger = newValue
             case .dismissSuggestion:

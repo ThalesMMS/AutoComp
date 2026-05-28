@@ -23,8 +23,21 @@ struct SuggestionDiagnostics: Equatable {
         let focusedElementID: String?
         let contextSource: String
         let geometryQuality: String
+        let contextTrust: String
+        let contextWarning: String?
         let hasCaretRect: Bool
         let hasFocusedElementRect: Bool
+    }
+
+    struct SupplementalContext: Equatable {
+        let sources: String
+        let visualContext: String
+        let clipboardContext: String
+    }
+
+    struct Domain: Equatable {
+        let status: String
+        let value: String
     }
 
     enum FocusFailureStatus: String, Equatable, Sendable {
@@ -56,6 +69,7 @@ struct SuggestionDiagnostics: Equatable {
         case backendCircuitBreaker = "backend-circuit-breaker"
         case ime = "ime"
         case privacyDomainDisabled = "privacy-domain-disabled"
+        case riskyHostApp = "blocked-risky-host-app"
         case noMeaningfulPrefix = "no-meaningful-prefix"
         case sentenceComplete = "sentence-complete"
         case unchangedContext = "unchanged-context"
@@ -87,6 +101,8 @@ struct SuggestionDiagnostics: Equatable {
         let displayMode: String
         let status: String
         let setupRequired: Bool
+        let warningRequired: Bool
+        let ruleSource: String
 
         var summary: String {
             var parts = [
@@ -97,7 +113,19 @@ struct SuggestionDiagnostics: Equatable {
             if setupRequired {
                 parts.append("setup required")
             }
+            if warningRequired {
+                parts.append("warning")
+            }
             return parts.joined(separator: ", ")
+        }
+    }
+
+    struct Privacy: Equatable {
+        let collectionAllowed: Bool
+        let ruleSource: String
+
+        var summary: String {
+            "\(collectionAllowed ? "collection allowed" : "collection blocked"), \(ruleSource)"
         }
     }
 
@@ -135,6 +163,10 @@ struct SuggestionDiagnostics: Equatable {
 
         var lastUsedTitle: String {
             deliveredKind?.displayName ?? "None yet"
+        }
+
+        var destinationTitle: String {
+            requestedKind?.displayName ?? deliveredKind?.displayName ?? "None yet"
         }
 
         func errorTitle(for kind: CompletionEngineKind, storedLocalError: String? = nil) -> String {
@@ -201,13 +233,17 @@ struct SuggestionDiagnostics: Equatable {
     }
 
     var focus: Focus?
+    var supplementalContext: SupplementalContext?
+    var domain: Domain?
     var focusFailure: FocusFailure?
     var lastDecision: LastDecision?
     var eligibility: Eligibility?
     var compatibility: Compatibility?
+    var privacy: Privacy?
     var inputMethod = InputMethod(summary: InputMethodState.asciiCompatible.diagnosticSummary, inputSourceID: nil)
     var backend = Backend(status: .idle, lastError: nil)
     var promptCache: PromptCache?
+    var latencyReport: CompletionLatencyReport?
     var staleDiscardReason: String?
     var output = Output(rawPreview: nil, normalizedPreview: nil)
 
@@ -217,12 +253,25 @@ struct SuggestionDiagnostics: Equatable {
             rows.append(SuggestionDiagnosticRow(id: "focus", title: "Focus", value: focus.appDisplayName))
             rows.append(SuggestionDiagnosticRow(id: "contextSource", title: "Context Source", value: focus.contextSource))
             rows.append(SuggestionDiagnosticRow(id: "geometry", title: "Geometry", value: focus.geometryQuality))
-            if let domain = focus.domain {
-                rows.append(SuggestionDiagnosticRow(id: "domain", title: "Domain", value: domain))
+            rows.append(SuggestionDiagnosticRow(id: "contextTrust", title: "Context Trust", value: focus.contextTrust))
+            if let contextWarning = focus.contextWarning {
+                rows.append(SuggestionDiagnosticRow(id: "contextWarning", title: "Context Warning", value: contextWarning))
             }
+        }
+        if let supplementalContext {
+            rows.append(SuggestionDiagnosticRow(id: "supplementalContext", title: "Context Add-ons", value: supplementalContext.sources))
+            rows.append(SuggestionDiagnosticRow(id: "visualContext", title: "Visual Context", value: supplementalContext.visualContext))
+            rows.append(SuggestionDiagnosticRow(id: "clipboardContext", title: "Clipboard Context", value: supplementalContext.clipboardContext))
+        }
+        if let domain {
+            rows.append(SuggestionDiagnosticRow(id: "domain", title: "Domain", value: domain.value))
         }
         if let compatibility {
             rows.append(SuggestionDiagnosticRow(id: "compatibility", title: "Compatibility", value: compatibility.summary))
+            rows.append(SuggestionDiagnosticRow(id: "compatibilityRuleSource", title: "Rule Source", value: compatibility.ruleSource))
+        }
+        if let privacy {
+            rows.append(SuggestionDiagnosticRow(id: "privacy", title: "Privacy", value: privacy.summary))
         }
         if let eligibility {
             let value = eligibility.skipReason ?? eligibility.outcome
@@ -233,9 +282,19 @@ struct SuggestionDiagnostics: Equatable {
         }
         rows.append(SuggestionDiagnosticRow(id: "ime", title: "IME", value: inputMethod.summary))
         rows.append(SuggestionDiagnosticRow(id: "backend", title: "Backend", value: backend.status.rawValue))
+        rows.append(SuggestionDiagnosticRow(id: "backendDestination", title: "Backend Destination", value: backend.destinationTitle))
         rows.append(SuggestionDiagnosticRow(id: "lastBackend", title: "Last backend", value: backend.lastUsedTitle))
         if let promptCache {
             rows.append(SuggestionDiagnosticRow(id: "promptCache", title: "Prompt Cache", value: promptCache.summary))
+        }
+        if let latencyReport {
+            for row in latencyReport.stageRows {
+                rows.append(SuggestionDiagnosticRow(
+                    id: "latency.\(row.key)",
+                    title: row.title,
+                    value: row.diagnosticValue
+                ))
+            }
         }
         if let staleDiscardReason {
             rows.append(SuggestionDiagnosticRow(id: "stale", title: "Discard", value: staleDiscardReason))
@@ -252,27 +311,56 @@ struct SuggestionDiagnostics: Equatable {
         return rows
     }
 
-    mutating func recordFocus(context: TextContext) {
+    mutating func recordFocus(
+        context: TextContext,
+        domainResolution: BrowserDomainResolution? = nil
+    ) {
         if focusFailure != nil {
             lastDecision = nil
         }
         focusFailure = nil
+        supplementalContext = nil
+        let resolvedDomain = domainResolution ?? BrowserDomainResolution.inferred(domain: context.domain)
+        domain = Domain(
+            status: resolvedDomain.status.rawValue,
+            value: resolvedDomain.diagnosticValue
+        )
+        let captureDiagnostics = ContextCaptureDiagnostics(context: context)
         focus = Focus(
             appDisplayName: context.app.displayName,
             bundleID: context.app.bundleID,
             domain: context.domain,
             focusedElementID: context.focusedElementID,
-            contextSource: context.captureSources
-                .map(\.rawValue)
-                .sorted()
-                .joined(separator: ","),
-            geometryQuality: context.caretGeometryQuality.rawValue,
+            contextSource: captureDiagnostics.contextSourceTitle,
+            geometryQuality: captureDiagnostics.geometryQualityTitle,
+            contextTrust: captureDiagnostics.trustTitle,
+            contextWarning: captureDiagnostics.lowTrustWarning,
             hasCaretRect: context.caretRect != nil,
             hasFocusedElementRect: context.focusedElementRect != nil
         )
     }
 
+    mutating func recordSupplementalContext(
+        context: TextContext,
+        visualContext: VisualContextSnapshot?,
+        clipboardContext: ClipboardContextSnapshot?
+    ) {
+        let captureDiagnostics = ContextCaptureDiagnostics(
+            context: context,
+            visualContext: visualContext,
+            clipboardContext: clipboardContext
+        )
+        supplementalContext = SupplementalContext(
+            sources: captureDiagnostics.supplementalSourceTitle,
+            visualContext: captureDiagnostics.visualContextLogValue,
+            clipboardContext: captureDiagnostics.clipboardContextLogValue
+        )
+    }
+
     mutating func recordFocusFailure(_ error: Error) {
+        focus = nil
+        supplementalContext = nil
+        domain = nil
         guard let contextError = error as? AXTextContextError else {
             focusFailure = FocusFailure(
                 status: .unsupported,
@@ -374,7 +462,16 @@ struct SuggestionDiagnostics: Equatable {
             activationMode: decision.overrideMode.title,
             displayMode: Self.displayModeTitle(decision.mode),
             status: Self.statusTitle(decision.profile.status),
-            setupRequired: decision.setupMessage != nil
+            setupRequired: decision.setupMessage != nil,
+            warningRequired: decision.warningMessage != nil,
+            ruleSource: decision.ruleSource.rawValue
+        )
+    }
+
+    mutating func recordPrivacy(_ decision: PrivacyCollectionDecision) {
+        privacy = Privacy(
+            collectionAllowed: decision.allowed,
+            ruleSource: decision.ruleSource.rawValue
         )
     }
 
@@ -407,8 +504,8 @@ struct SuggestionDiagnostics: Equatable {
         }
         staleDiscardReason = nil
         output = Output(
-            rawPreview: collectionAllowed ? Self.preview(rawText) : nil,
-            normalizedPreview: collectionAllowed ? Self.preview(normalizedText) : nil
+            rawPreview: collectionAllowed ? Self.redactedOutputSummary(rawText) : nil,
+            normalizedPreview: collectionAllowed ? Self.redactedOutputSummary(normalizedText) : nil
         )
     }
 
@@ -460,17 +557,31 @@ struct SuggestionDiagnostics: Equatable {
         )
     }
 
-    private static func preview(_ text: String?) -> String? {
+    mutating func recordLatency(_ report: CompletionLatencyReport?) {
+        latencyReport = report
+    }
+
+    mutating func recordInsertionLatency(_ latencyMs: Int) {
+        latencyReport = (latencyReport ?? CompletionLatencyReport()).withInsertionLatency(latencyMs)
+    }
+
+    mutating func recordRiskyHostAppBlock(action: String) {
+        recordLastDecision(
+            state: .blocked,
+            reason: .riskyHostApp,
+            action: action
+        )
+    }
+
+    func redactedLatencyReport() -> String? {
+        latencyReport?.redactedReport
+    }
+
+    private static func redactedOutputSummary(_ text: String?) -> String? {
         guard let text, !text.isEmpty else {
             return nil
         }
-        let collapsed = text
-            .replacingOccurrences(of: "\n", with: " ")
-            .replacingOccurrences(of: "\t", with: " ")
-        if collapsed.count <= 96 {
-            return collapsed
-        }
-        return String(collapsed.prefix(93)) + "..."
+        return AutoCompLogger.redactedSummary(for: text).description
     }
 
     private static func displayModeTitle(_ mode: SuggestionDisplayMode) -> String {

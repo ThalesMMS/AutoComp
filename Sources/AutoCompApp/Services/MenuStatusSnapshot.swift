@@ -202,7 +202,9 @@ struct MenuStatusSnapshot: Equatable {
                 id: "focus",
                 title: "Focus",
                 value: "Supported",
-                action: compatibilityDecision?.setupMessage ?? "Focused field is readable."
+                action: compatibilityDecision?.warningMessage
+                    ?? compatibilityDecision?.setupMessage
+                    ?? "Focused field is readable."
             )
         }
 
@@ -269,11 +271,14 @@ struct MenuStatusSnapshot: Equatable {
             id: "mode",
             title: "Mode",
             value: "Automatic",
-            action: "Automatic suggestions are enabled here."
+            action: compatibilityDecision.warningMessage ?? "Automatic suggestions are enabled here."
         )
     }
 
     private static func compatibilityAction(for decision: CompatibilityDecision) -> String {
+        if let warningMessage = decision.warningMessage {
+            return warningMessage
+        }
         if let setupMessage = decision.setupMessage {
             return setupMessage
         }

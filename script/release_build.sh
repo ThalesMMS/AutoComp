@@ -16,10 +16,15 @@ APP_BINARY="$APP_MACOS/$APP_NAME"
 INFO_PLIST="$APP_CONTENTS/Info.plist"
 DMG_PATH="$OUTPUT_DIR/$APP_NAME.dmg"
 APPCAST_PATH="$OUTPUT_DIR/appcast.xml"
+CHECKLIST_PATH="$OUTPUT_DIR/release-checklist.md"
+BETA_GATE_RESULTS_PATH="$OUTPUT_DIR/beta-gate-results.tsv"
 
 VERSION=""
 BUILD_NUMBER=""
 DRY_RUN=0
+BETA_GATE=0
+BETA_GATE_ARGS=()
+INCLUDE_LLAMA_RUNTIME=0
 SKIP_NOTARIZE=0
 SKIP_APPCAST=0
 SIGNING_IDENTITY="${AUTOCOMP_RELEASE_SIGNING_IDENTITY:-${AUTOCOMP_CODESIGN_IDENTITY:-}}"
@@ -38,23 +43,34 @@ SPARKLE_FRAMEWORK_PATH="${AUTOCOMP_SPARKLE_FRAMEWORK_PATH:-}"
 SPARKLE_EXTRACT_DIR=""
 SPARKLE_FRAMEWORK_RESOLVED=""
 SPARKLE_SIGN_UPDATE_RESOLVED=""
+LLAMA_ORIGINAL_DYLIBS=()
+LLAMA_BUNDLED_DYLIBS=()
+PRESERVED_BETA_GATE_DIR=""
 
 usage() {
   cat >&2 <<'USAGE'
 usage: release_build.sh --version 1.0.0 --build 100 [options]
 
 Options:
+  --beta-gate               Run the P0 beta readiness gate and exit.
   --dry-run                 Print and validate the release plan without building or signing.
+  --include-llama-runtime   Build and bundle the optional in-process llama runtime.
   --output-dir PATH         Release output directory. Defaults to dist/release.
   --download-url URL        Public DMG URL used in appcast.xml.
   --release-notes-url URL   Public release notes URL used in appcast.xml.
   --skip-notarize           Build and sign locally, but do not submit to notarytool.
   --skip-appcast            Do not generate appcast.xml.
+  --skip-ui-smoke REASON    Beta gate only: structured UI smoke skip reason.
+  --skip-llama-build REASON Beta gate only: structured local-runtime skip reason.
 USAGE
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --beta-gate)
+      BETA_GATE=1
+      shift
+      ;;
     --version)
       VERSION="${2:-}"
       shift 2
@@ -65,6 +81,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --dry-run)
       DRY_RUN=1
+      shift
+      ;;
+    --include-llama-runtime)
+      INCLUDE_LLAMA_RUNTIME=1
       shift
       ;;
     --output-dir)
@@ -78,6 +98,9 @@ while [[ $# -gt 0 ]]; do
       INFO_PLIST="$APP_CONTENTS/Info.plist"
       DMG_PATH="$OUTPUT_DIR/$APP_NAME.dmg"
       APPCAST_PATH="$OUTPUT_DIR/appcast.xml"
+      CHECKLIST_PATH="$OUTPUT_DIR/release-checklist.md"
+      BETA_GATE_RESULTS_PATH="$OUTPUT_DIR/beta-gate-results.tsv"
+      BETA_GATE_ARGS+=(--output-dir "$OUTPUT_DIR")
       shift 2
       ;;
     --download-url)
@@ -96,6 +119,14 @@ while [[ $# -gt 0 ]]; do
       SKIP_APPCAST=1
       shift
       ;;
+    --skip-ui-smoke)
+      BETA_GATE_ARGS+=(--skip-ui-smoke "${2:-}")
+      shift 2
+      ;;
+    --skip-llama-build)
+      BETA_GATE_ARGS+=(--skip-llama-build "${2:-}")
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -106,6 +137,10 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ "$BETA_GATE" == "1" ]]; then
+  exec "$ROOT_DIR/script/beta_gate.sh" "${BETA_GATE_ARGS[@]}"
+fi
 
 if [[ -z "$VERSION" || -z "$BUILD_NUMBER" ]]; then
   usage
@@ -136,18 +171,298 @@ require_non_empty() {
   fi
 }
 
+generate_release_checklist() {
+  local mode="$1"
+  shift
+
+  local checklist_args=(
+    --output "$CHECKLIST_PATH"
+    --output-dir "$OUTPUT_DIR"
+    --version "$VERSION"
+    --build "$BUILD_NUMBER"
+    --mode "$mode"
+    --beta-gate-results "$BETA_GATE_RESULTS_PATH"
+    --app-bundle "$APP_BUNDLE"
+    --dmg "$DMG_PATH"
+    --appcast "$APPCAST_PATH"
+    --download-url "$DOWNLOAD_URL"
+    --release-notes-url "$RELEASE_NOTES_URL"
+    --sparkle-feed-url "$SPARKLE_FEED_URL"
+    --sparkle-public-key "$SPARKLE_PUBLIC_KEY"
+    --frameworks-dir "$APP_FRAMEWORKS"
+  )
+
+  if [[ "$INCLUDE_LLAMA_RUNTIME" == "1" ]]; then
+    checklist_args+=(--include-llama-runtime)
+  fi
+  if [[ "$SKIP_NOTARIZE" == "1" ]]; then
+    checklist_args+=(--skip-notarize)
+  fi
+  if [[ "$SKIP_APPCAST" == "1" ]]; then
+    checklist_args+=(--skip-appcast)
+  fi
+
+  python3 "$ROOT_DIR/script/release_checklist.py" "${checklist_args[@]}" "$@"
+}
+
+assert_beta_gate_allows_release() {
+  if [[ ! -f "$BETA_GATE_RESULTS_PATH" ]]; then
+    return
+  fi
+
+  local failed_rows
+  failed_rows="$(awk -F '\t' 'NR > 1 && $4 == "FAILED" { print "- " $1 ": " $6 }' "$BETA_GATE_RESULTS_PATH")"
+  if [[ -n "$failed_rows" ]]; then
+    echo "Refusing release because beta gate results contain failures:" >&2
+    echo "$failed_rows" >&2
+    exit 1
+  fi
+}
+
+preserve_beta_gate_artifacts() {
+  if [[ ! -f "$BETA_GATE_RESULTS_PATH" ]]; then
+    return
+  fi
+
+  PRESERVED_BETA_GATE_DIR="$(mktemp -d)"
+  /usr/bin/ditto "$BETA_GATE_RESULTS_PATH" "$PRESERVED_BETA_GATE_DIR/beta-gate-results.tsv"
+
+  local gate_log_dir
+  for gate_log_dir in "$OUTPUT_DIR"/beta-gate-logs-*; do
+    if [[ -d "$gate_log_dir" ]]; then
+      /usr/bin/ditto "$gate_log_dir" "$PRESERVED_BETA_GATE_DIR/$(basename "$gate_log_dir")"
+    fi
+  done
+}
+
+restore_beta_gate_artifacts() {
+  if [[ -z "$PRESERVED_BETA_GATE_DIR" ]]; then
+    return
+  fi
+
+  mkdir -p "$OUTPUT_DIR"
+  /usr/bin/ditto "$PRESERVED_BETA_GATE_DIR" "$OUTPUT_DIR"
+  rm -rf "$PRESERVED_BETA_GATE_DIR"
+  PRESERVED_BETA_GATE_DIR=""
+}
+
+run_release_swift() {
+  if [[ "$INCLUDE_LLAMA_RUNTIME" == "1" ]]; then
+    "$@"
+  else
+    env -u AUTOCOMP_ENABLE_LLAMA_RUNTIME -u AUTOCOMP_LLAMA_CFLAGS -u AUTOCOMP_LLAMA_LIBS "$@"
+  fi
+}
+
+configure_llama_runtime_request() {
+  local has_cflags=0
+  local has_libs=0
+
+  [[ -n "${AUTOCOMP_LLAMA_CFLAGS:-}" ]] && has_cflags=1
+  [[ -n "${AUTOCOMP_LLAMA_LIBS:-}" ]] && has_libs=1
+
+  if [[ "$has_cflags" -ne "$has_libs" ]]; then
+    echo "Set both AUTOCOMP_LLAMA_CFLAGS and AUTOCOMP_LLAMA_LIBS, or unset both to use pkg-config llama." >&2
+    exit 1
+  fi
+
+  if [[ "$has_cflags" -eq 0 ]]; then
+    export AUTOCOMP_ENABLE_LLAMA_RUNTIME=1
+  fi
+}
+
+collect_llama_linker_flags() {
+  if [[ -n "${AUTOCOMP_LLAMA_LIBS:-}" ]]; then
+    # shellcheck disable=SC2206
+    local manual_libs=($AUTOCOMP_LLAMA_LIBS)
+    printf '%s\n' "${manual_libs[@]}"
+    return
+  fi
+
+  local packages=()
+  if pkg-config --exists ggml; then
+    packages+=("ggml")
+  fi
+  packages+=("llama")
+
+  local package
+  for package in "${packages[@]}"; do
+    # shellcheck disable=SC2207
+    local package_libs=($(pkg-config --libs "$package"))
+    printf '%s\n' "${package_libs[@]}"
+  done
+}
+
+configure_llama_library_path() {
+  local library_dirs=()
+  local flag
+
+  while IFS= read -r flag; do
+    if [[ "$flag" == -L* && -n "${flag#-L}" ]]; then
+      library_dirs+=("${flag#-L}")
+    fi
+  done < <(collect_llama_linker_flags)
+
+  if [[ "${#library_dirs[@]}" -gt 0 ]]; then
+    local value
+    value="$(IFS=:; echo "${library_dirs[*]}")"
+    export DYLD_LIBRARY_PATH="$value${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+  fi
+}
+
+resolve_path() {
+  python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$1"
+}
+
+otool_dependencies() {
+  otool -L "$1" | awk 'NR > 1 { print $1 }'
+}
+
+is_llama_runtime_dylib() {
+  local path="$1"
+  local name
+  name="$(basename "$path")"
+  [[ "$name" == libllama*.dylib || "$name" == libggml*.dylib ]]
+}
+
+bundled_dylib_for_original() {
+  local original="$1"
+  if [[ "${#LLAMA_ORIGINAL_DYLIBS[@]}" -eq 0 ]]; then
+    return 1
+  fi
+  local index=0
+  for candidate in "${LLAMA_ORIGINAL_DYLIBS[@]}"; do
+    if [[ "$candidate" == "$original" ]]; then
+      printf '%s\n' "${LLAMA_BUNDLED_DYLIBS[$index]}"
+      return 0
+    fi
+    index=$((index + 1))
+  done
+  return 1
+}
+
+record_bundled_dylib() {
+  local original="$1"
+  local bundled="$2"
+  if bundled_dylib_for_original "$original" >/dev/null; then
+    return
+  fi
+  LLAMA_ORIGINAL_DYLIBS+=("$original")
+  LLAMA_BUNDLED_DYLIBS+=("$bundled")
+}
+
+copy_llama_dylib_closure() {
+  local source="$1"
+  local resolved
+  resolved="$(resolve_path "$source")"
+  if [[ ! -f "$resolved" ]]; then
+    echo "Required llama runtime dylib not found: $source" >&2
+    exit 1
+  fi
+
+  local existing_destination=""
+  if existing_destination="$(bundled_dylib_for_original "$resolved" 2>/dev/null)"; then
+    record_bundled_dylib "$source" "$existing_destination"
+    return
+  fi
+
+  local destination="$APP_FRAMEWORKS/$(basename "$resolved")"
+  /usr/bin/ditto "$resolved" "$destination"
+  chmod u+w "$destination"
+  record_bundled_dylib "$source" "$destination"
+  record_bundled_dylib "$resolved" "$destination"
+
+  local dependency
+  while IFS= read -r dependency; do
+    if [[ "$dependency" == /* ]] && is_llama_runtime_dylib "$dependency"; then
+      copy_llama_dylib_closure "$dependency"
+    fi
+  done < <(otool_dependencies "$resolved")
+}
+
+rewrite_llama_runtime_links() {
+  if [[ "${#LLAMA_BUNDLED_DYLIBS[@]}" -eq 0 ]]; then
+    echo "No llama runtime dylibs were discovered in $APP_BINARY." >&2
+    exit 1
+  fi
+
+  /usr/bin/install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP_BINARY"
+
+  local target
+  for target in "$APP_BINARY" "${LLAMA_BUNDLED_DYLIBS[@]}"; do
+    local index=0
+    for original in "${LLAMA_ORIGINAL_DYLIBS[@]}"; do
+      local bundled="${LLAMA_BUNDLED_DYLIBS[$index]}"
+      local name
+      name="$(basename "$bundled")"
+      local original_name
+      original_name="$(basename "$original")"
+      /usr/bin/install_name_tool -change "$original" "@rpath/$name" "$target" 2>/dev/null || true
+      /usr/bin/install_name_tool -change "@rpath/$original_name" "@rpath/$name" "$target" 2>/dev/null || true
+      index=$((index + 1))
+    done
+  done
+
+  for target in "${LLAMA_BUNDLED_DYLIBS[@]}"; do
+    /usr/bin/install_name_tool -id "@rpath/$(basename "$target")" "$target"
+  done
+}
+
+verify_llama_runtime_links() {
+  local target
+  for target in "$APP_BINARY" "${LLAMA_BUNDLED_DYLIBS[@]}"; do
+    if otool -L "$target" | grep -E '(/opt/homebrew|/usr/local|Cellar).*(libllama|libggml)' >/dev/null; then
+      echo "Bundled llama runtime link still points outside the app bundle: $target" >&2
+      otool -L "$target" >&2
+      exit 1
+    fi
+  done
+}
+
+bundle_llama_runtime_dylibs() {
+  mkdir -p "$APP_FRAMEWORKS"
+
+  local dependency
+  while IFS= read -r dependency; do
+    if [[ "$dependency" == /* ]] && is_llama_runtime_dylib "$dependency"; then
+      copy_llama_dylib_closure "$dependency"
+    fi
+  done < <(otool_dependencies "$APP_BINARY")
+
+  rewrite_llama_runtime_links
+  verify_llama_runtime_links
+}
+
 run_dry_plan() {
+  echo "Release dry run:"
+  if [[ "$INCLUDE_LLAMA_RUNTIME" == "1" ]]; then
+    cat <<PLAN
++ script/check_llama_pkg_config.sh
++ AUTOCOMP_ENABLE_LLAMA_RUNTIME=1 swift build -c release --product "$APP_NAME"
++ copy llama/ggml dylibs into "$APP_FRAMEWORKS"
++ rewrite llama/ggml install names and rpaths to @rpath inside the app bundle
++ verify otool links for bundled llama/ggml dylibs do not point at Homebrew paths
+PLAN
+  else
+    echo "+ swift build -c release --product \"$APP_NAME\" with optional llama runtime disabled"
+  fi
   cat <<PLAN
-Release dry run:
-+ swift build -c release --product "$APP_NAME"
 + stage "$APP_BUNDLE" with version "$VERSION" build "$BUILD_NUMBER"
 + fetch Sparkle "$SPARKLE_VERSION" from "$SPARKLE_ARCHIVE_URL" unless AUTOCOMP_SPARKLE_FRAMEWORK_PATH is set
 + embed Sparkle.framework in "$APP_FRAMEWORKS"
 + add SUFeedURL and SUPublicEDKey to "$INFO_PLIST"
++ codesign --force --options runtime --sign "\${AUTOCOMP_RELEASE_SIGNING_IDENTITY}" "$APP_FRAMEWORKS/Sparkle.framework"
+PLAN
+  if [[ "$INCLUDE_LLAMA_RUNTIME" == "1" ]]; then
+    echo '+ codesign --force --options runtime --sign "${AUTOCOMP_RELEASE_SIGNING_IDENTITY}" "$APP_FRAMEWORKS"/lib{llama,ggml}*.dylib'
+  fi
+  cat <<PLAN
 + codesign --force --deep --options runtime --sign "\${AUTOCOMP_RELEASE_SIGNING_IDENTITY}" "$APP_BUNDLE"
++ codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"
 + script/release_dmg.sh --app-path "$APP_BUNDLE" --output-path "$DMG_PATH" --volume-name "$APP_NAME"
 + xcrun notarytool submit "$DMG_PATH" --keychain-profile "\${AUTOCOMP_NOTARY_PROFILE}" --wait
 + xcrun stapler staple "$DMG_PATH"
++ spctl -a -t exec -vv "$APP_BUNDLE"
 + script/release_appcast.py --version "$VERSION" --build "$BUILD_NUMBER" --archive "$DMG_PATH" --download-url "$DOWNLOAD_URL" --release-notes-url "$RELEASE_NOTES_URL" --output "$APPCAST_PATH"
 PLAN
 
@@ -183,6 +498,7 @@ PLAN
       --release-notes-url "$RELEASE_NOTES_URL" \
       --output "$APPCAST_PATH"
   fi
+  generate_release_checklist dry-run
 }
 
 copy_sparkle_framework() {
@@ -303,14 +619,26 @@ require_non_empty "$SPARKLE_PUBLIC_KEY" "Set AUTOCOMP_SPARKLE_PUBLIC_KEY to the 
 if [[ "$SKIP_NOTARIZE" == "0" ]]; then
   require_non_empty "$NOTARY_PROFILE" "Set AUTOCOMP_NOTARY_PROFILE to a notarytool keychain profile, or pass --skip-notarize."
 fi
+assert_beta_gate_allows_release
 
+if [[ "$INCLUDE_LLAMA_RUNTIME" == "1" ]]; then
+  configure_llama_runtime_request
+  "$ROOT_DIR/script/check_llama_pkg_config.sh"
+  configure_llama_library_path
+fi
+
+preserve_beta_gate_artifacts
 rm -rf "$OUTPUT_DIR"
 mkdir -p "$APP_MACOS" "$APP_RESOURCES" "$APP_FRAMEWORKS"
+restore_beta_gate_artifacts
 
-swift build -c release --product "$APP_NAME"
-BUILD_BINARY="$(swift build -c release --show-bin-path)/$APP_NAME"
+run_release_swift swift build -c release --product "$APP_NAME"
+BUILD_BINARY="$(run_release_swift swift build -c release --show-bin-path)/$APP_NAME"
 cp "$BUILD_BINARY" "$APP_BINARY"
 chmod +x "$APP_BINARY"
+if [[ "$INCLUDE_LLAMA_RUNTIME" == "1" ]]; then
+  bundle_llama_runtime_dylibs
+fi
 copy_sparkle_framework
 
 if [[ -d "$ROOT_DIR/Resources" ]]; then
@@ -320,6 +648,11 @@ fi
 write_info_plist
 
 /usr/bin/codesign --force --options runtime --sign "$SIGNING_IDENTITY" "$APP_FRAMEWORKS/Sparkle.framework"
+if [[ "$INCLUDE_LLAMA_RUNTIME" == "1" ]]; then
+  for bundled_dylib in "${LLAMA_BUNDLED_DYLIBS[@]}"; do
+    /usr/bin/codesign --force --options runtime --sign "$SIGNING_IDENTITY" "$bundled_dylib"
+  done
+fi
 /usr/bin/codesign --force --deep --options runtime --sign "$SIGNING_IDENTITY" "$APP_BUNDLE"
 /usr/bin/codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"
 
@@ -331,6 +664,7 @@ write_info_plist
 if [[ "$SKIP_NOTARIZE" == "0" ]]; then
   xcrun notarytool submit "$DMG_PATH" --keychain-profile "$NOTARY_PROFILE" --wait
   xcrun stapler staple "$DMG_PATH"
+  spctl -a -t exec -vv "$APP_BUNDLE"
   spctl -a -vv -t open --context context:primary-signature "$DMG_PATH"
 else
   echo "Skipped notarization for $DMG_PATH"
@@ -358,4 +692,5 @@ if [[ "$SKIP_APPCAST" == "0" ]]; then
   python3 "$ROOT_DIR/script/release_appcast.py" "${APPCAST_ARGS[@]}"
 fi
 
+generate_release_checklist release --enforce-blockers
 echo "Release artifacts written to: $OUTPUT_DIR"

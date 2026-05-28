@@ -335,6 +335,100 @@ static bool autocomp_llama_detokenize(
     }
 }
 
+static char *autocomp_llama_detokenize_to_string(
+    const struct llama_vocab *vocab,
+    const llama_token *tokens,
+    int32_t n_tokens,
+    AutoCompLlamaError *error
+) {
+    int32_t text_capacity = n_tokens * 32 + 64;
+    char *text = (char *)malloc((size_t)text_capacity);
+    if (text == NULL) {
+        autocomp_llama_set_error(error, 19, "Could not allocate generated text.");
+        return NULL;
+    }
+
+    int32_t detokenized = 0;
+    if (!autocomp_llama_detokenize(
+        vocab,
+        tokens,
+        n_tokens,
+        text,
+        text_capacity,
+        false,
+        false,
+        &detokenized,
+        error
+    )) {
+        free(text);
+        return NULL;
+    }
+
+    if (detokenized < 0) {
+        text_capacity = -detokenized + 1;
+        char *larger_text = (char *)realloc(text, (size_t)text_capacity);
+        if (larger_text == NULL) {
+            free(text);
+            autocomp_llama_set_error(error, 20, "Could not grow generated text buffer.");
+            return NULL;
+        }
+        text = larger_text;
+        if (!autocomp_llama_detokenize(
+            vocab,
+            tokens,
+            n_tokens,
+            text,
+            text_capacity,
+            false,
+            false,
+            &detokenized,
+            error
+        )) {
+            free(text);
+            return NULL;
+        }
+    }
+
+    if (detokenized < 0) {
+        free(text);
+        autocomp_llama_set_error(error, 21, "Could not detokenize generated text.");
+        return NULL;
+    }
+
+    text[detokenized] = '\0';
+    return text;
+}
+
+static int32_t autocomp_llama_find_stop_sequence_offset(
+    const char *text,
+    const char * const *stop_sequences,
+    int32_t stop_sequence_count
+) {
+    if (text == NULL || stop_sequences == NULL || stop_sequence_count <= 0) {
+        return -1;
+    }
+
+    int32_t earliest_offset = -1;
+    for (int32_t i = 0; i < stop_sequence_count; i++) {
+        const char *stop_sequence = stop_sequences[i];
+        if (stop_sequence == NULL || stop_sequence[0] == '\0') {
+            continue;
+        }
+
+        const char *match = strstr(text, stop_sequence);
+        if (match == NULL) {
+            continue;
+        }
+
+        int32_t offset = (int32_t)(match - text);
+        if (earliest_offset < 0 || offset < earliest_offset) {
+            earliest_offset = offset;
+        }
+    }
+
+    return earliest_offset;
+}
+
 AutoCompLlamaCacheDecision autocomp_llama_prompt_cache_decision(
     const int32_t *cached_tokens,
     int32_t cached_token_count,
@@ -382,6 +476,10 @@ void autocomp_llama_backend_init(void) {
 
 void autocomp_llama_backend_free(void) {
     llama_backend_free();
+}
+
+const char *autocomp_llama_system_info(void) {
+    return llama_print_system_info();
 }
 
 AutoCompLlamaModel *autocomp_llama_model_load(
@@ -432,6 +530,8 @@ char *autocomp_llama_model_generate(
     const char *prompt,
     int32_t max_tokens,
     float temperature,
+    const char * const *stop_sequences,
+    int32_t stop_sequence_count,
     AutoCompLlamaError *error
 ) {
     if (model == NULL || model->raw == NULL) {
@@ -645,6 +745,23 @@ char *autocomp_llama_model_generate(
         generated_tokens[generated_count] = token;
         generated_count += 1;
 
+        char *partial_text = autocomp_llama_detokenize_to_string(vocab, generated_tokens, generated_count, error);
+        if (partial_text == NULL) {
+            free(generated_tokens);
+            llama_sampler_free(sampler);
+            autocomp_llama_clear_cache(model, true);
+            return NULL;
+        }
+        int32_t stop_offset = autocomp_llama_find_stop_sequence_offset(
+            partial_text,
+            stop_sequences,
+            stop_sequence_count
+        );
+        free(partial_text);
+        if (stop_offset >= 0) {
+            break;
+        }
+
         if (i == max_tokens - 1) {
             break;
         }
@@ -673,76 +790,25 @@ char *autocomp_llama_model_generate(
         return NULL;
     }
 
-    int32_t text_capacity = generated_count * 32 + 64;
-    char *text = (char *)malloc((size_t)text_capacity);
+    char *text = autocomp_llama_detokenize_to_string(vocab, generated_tokens, generated_count, error);
     if (text == NULL) {
         free(generated_tokens);
         llama_sampler_free(sampler);
         autocomp_llama_clear_cache(model, true);
-        autocomp_llama_set_error(error, 19, "Could not allocate generated text.");
         return NULL;
     }
-
-    int32_t detokenized = 0;
-    if (!autocomp_llama_detokenize(
-        vocab,
-        generated_tokens,
-        generated_count,
-        text,
-        text_capacity,
-        false,
-        false,
-        &detokenized,
-        error
-    )) {
-        free(text);
-        free(generated_tokens);
-        llama_sampler_free(sampler);
-        autocomp_llama_clear_cache(model, true);
-        return NULL;
-    }
-    if (detokenized < 0) {
-        text_capacity = -detokenized + 1;
-        char *larger_text = (char *)realloc(text, (size_t)text_capacity);
-        if (larger_text == NULL) {
-            free(text);
-            free(generated_tokens);
-            llama_sampler_free(sampler);
-            autocomp_llama_clear_cache(model, true);
-            autocomp_llama_set_error(error, 20, "Could not grow generated text buffer.");
-            return NULL;
-        }
-        text = larger_text;
-        if (!autocomp_llama_detokenize(
-            vocab,
-            generated_tokens,
-            generated_count,
-            text,
-            text_capacity,
-            false,
-            false,
-            &detokenized,
-            error
-        )) {
-            free(text);
-            free(generated_tokens);
-            llama_sampler_free(sampler);
-            autocomp_llama_clear_cache(model, true);
-            return NULL;
-        }
-    }
-
     free(generated_tokens);
     llama_sampler_free(sampler);
 
-    if (detokenized < 0) {
-        free(text);
-        autocomp_llama_clear_cache(model, true);
-        autocomp_llama_set_error(error, 21, "Could not detokenize generated text.");
-        return NULL;
+    int32_t stop_offset = autocomp_llama_find_stop_sequence_offset(
+        text,
+        stop_sequences,
+        stop_sequence_count
+    );
+    if (stop_offset >= 0) {
+        text[stop_offset] = '\0';
     }
 
-    text[detokenized] = '\0';
     autocomp_llama_set_error(error, 0, "");
     return text;
 }

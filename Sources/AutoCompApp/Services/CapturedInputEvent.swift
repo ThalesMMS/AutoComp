@@ -97,6 +97,8 @@ struct CapturedInputEventAdapter {
     static let spaceKeyCode: UInt16 = 49
     static let escapeKeyCode: UInt16 = 53
     static let rightShiftKeyCode: UInt16 = 60
+    static let leftBracketKeyCode: UInt16 = 33
+    static let rightBracketKeyCode: UInt16 = 30
     static let arrowKeyCodes: Set<UInt16> = [123, 124, 125, 126]
 
     func event(for type: CGEventType, event: CGEvent) -> CapturedInputEvent? {

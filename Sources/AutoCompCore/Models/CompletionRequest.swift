@@ -20,6 +20,7 @@ public struct CompletionRequest: Equatable, Sendable {
     public let model: String
     public let maxTokens: Int
     public let temperature: Double
+    public let stopSequences: [String]
     public let visualContext: VisualContextSnapshot?
     public let clipboardContext: ClipboardContextSnapshot?
     public let promptEchoCandidates: [String]
@@ -39,6 +40,7 @@ public struct CompletionRequest: Equatable, Sendable {
         model: String,
         maxTokens: Int,
         temperature: Double,
+        stopSequences: [String] = [],
         visualContext: VisualContextSnapshot? = nil,
         clipboardContext: ClipboardContextSnapshot? = nil,
         promptEchoCandidates: [String]
@@ -57,6 +59,7 @@ public struct CompletionRequest: Equatable, Sendable {
         self.model = model
         self.maxTokens = maxTokens
         self.temperature = temperature
+        self.stopSequences = stopSequences
         self.visualContext = visualContext
         self.clipboardContext = clipboardContext
         self.promptEchoCandidates = promptEchoCandidates

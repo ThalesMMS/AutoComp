@@ -103,7 +103,11 @@ final class SuggestionControllerExtractionTests: XCTestCase {
 
         let contextDescription = controller.contextDescription(context)
         XCTAssertTrue(contextDescription.contains("app=TextEdit"))
+        XCTAssertTrue(contextDescription.contains("source=accessibility"))
+        XCTAssertTrue(contextDescription.contains("trust=standard"))
+        XCTAssertTrue(contextDescription.contains("geometry=direct"))
         XCTAssertTrue(contextDescription.contains("trailingWhitespace=true"))
+        XCTAssertFalse(contextDescription.contains("Hello"))
 
         let suggestionDescription = controller.suggestionDescription(suggestion)
         XCTAssertTrue(suggestionDescription.contains("visibleLength=5"))

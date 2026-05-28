@@ -31,6 +31,92 @@ final class RemoteCompletionProviderTests: XCTestCase {
         XCTAssertEqual(suggestion.visibleText, "review this today.")
     }
 
+    func testOpenAICompatibleResponseFixturesProduceDeterministicSuggestions() async throws {
+        for fixture in [
+            "standard_chat_completion.json",
+            "text_choice_completion.json",
+            "tool_metadata_completion.json"
+        ] {
+            let provider = RemoteCompletionProvider(
+                configuration: remoteConfiguration(),
+                urlSession: MockURLSession(
+                    data: try fixtureData(fixture),
+                    response: okResponse()
+                )
+            )
+
+            let suggestion = try await provider.complete(context: makeContext())
+
+            XCTAssertEqual(suggestion.visibleText, "review this today.", "Fixture: \(fixture)")
+        }
+    }
+
+    func testOpenAICompatibleEmptyAndStreamingFixturesMapActionably() async throws {
+        let cases: [(fixture: String, issue: BackendConnectivityIssue, messageFragment: String)] = [
+            ("empty_choices.json", .emptyResponse, "empty completion"),
+            ("content_null.json", .emptyResponse, "empty completion"),
+            ("streaming_chunk.json", .streamingUnsupported, "non-streaming chat completions")
+        ]
+
+        for testCase in cases {
+            let provider = RemoteCompletionProvider(
+                configuration: remoteConfiguration(),
+                urlSession: MockURLSession(
+                    data: try fixtureData(testCase.fixture),
+                    response: okResponse()
+                )
+            )
+
+            do {
+                _ = try await provider.complete(context: makeContext())
+                XCTFail("Expected remote error for \(testCase.fixture)")
+            } catch let error as RemoteCompletionError {
+                XCTAssertEqual(error.issue, testCase.issue, "Fixture: \(testCase.fixture)")
+                XCTAssertTrue(error.errorDescription?.contains(testCase.messageFragment) == true)
+            }
+        }
+    }
+
+    func testOpenAICompatibleHTTPErrorFixturesMapActionably() async throws {
+        let cases: [(fixture: String, statusCode: Int, issue: BackendConnectivityIssue, messageFragment: String)] = [
+            ("error_401.json", 401, .unauthorized, "API key"),
+            ("error_404_model_missing.json", 404, .httpStatus(404), "endpoint"),
+            ("error_429.json", 429, .rateLimited, "rate-limiting"),
+            ("error_500.json", 500, .httpStatus(500), "HTTP 500")
+        ]
+
+        for testCase in cases {
+            let provider = RemoteCompletionProvider(
+                configuration: remoteConfiguration(),
+                urlSession: MockURLSession(
+                    data: try fixtureData(testCase.fixture),
+                    response: HTTPURLResponse(
+                        url: URL(string: "http://127.0.0.1:8000/v1/chat/completions")!,
+                        statusCode: testCase.statusCode,
+                        httpVersion: nil,
+                        headerFields: nil
+                    )!
+                )
+            )
+
+            do {
+                _ = try await provider.complete(context: makeContext())
+                XCTFail("Expected HTTP error for \(testCase.fixture)")
+            } catch let error as RemoteCompletionError {
+                XCTAssertEqual(error.issue, testCase.issue, "Fixture: \(testCase.fixture)")
+                XCTAssertTrue(error.errorDescription?.contains(testCase.messageFragment) == true)
+            }
+        }
+    }
+
+    func testTimeoutFixtureMapsActionably() async throws {
+        _ = try fixtureData("timeout.json")
+        let error = try await remoteError(for: URLError(.timedOut))
+
+        XCTAssertEqual(error.issue, .timeout)
+        XCTAssertTrue(error.errorDescription?.contains("timed out") == true)
+    }
+
     func testMultipleCompletionRequestSendsNAndParsesChoices() async throws {
         let provider = RemoteCompletionProvider(
             configuration: RemoteCompletionConfiguration(
@@ -58,6 +144,52 @@ final class RemoteCompletionProviderTests: XCTestCase {
             "send the update.",
             "schedule the review."
         ])
+    }
+
+    func testRequestSendsConfiguredStopSequences() async throws {
+        let provider = RemoteCompletionProvider(
+            configuration: RemoteCompletionConfiguration(
+                baseURL: "http://127.0.0.1:8000",
+                apiKey: "test",
+                model: "default",
+                stopSequences: CompletionStopSequences(
+                    continuation: ["\n", "<|fim_middle|>"],
+                    fillInMiddle: ["<|fim_suffix|>"]
+                )
+            ),
+            urlSession: MockURLSession(
+                data: Data(#"{"choices":[{"message":{"role":"assistant","content":"review this today."}}]}"#.utf8),
+                response: okResponse(),
+                expectedStop: ["\n", "<|fim_middle|>"]
+            )
+        )
+
+        let suggestion = try await provider.complete(context: makeContext())
+
+        XCTAssertEqual(suggestion.visibleText, "review this today.")
+    }
+
+    func testStopSequenceTrimsPromptTagWhenRemoteIgnoresStopParameter() async throws {
+        let provider = RemoteCompletionProvider(
+            configuration: RemoteCompletionConfiguration(
+                baseURL: "http://127.0.0.1:8000",
+                apiKey: "test",
+                model: "default",
+                stopSequences: CompletionStopSequences(
+                    continuation: ["<|fim_suffix|>"],
+                    fillInMiddle: []
+                )
+            ),
+            urlSession: MockURLSession(
+                data: Data(#"{"choices":[{"message":{"role":"assistant","content":"review this <|fim_suffix|> ignored echo"}}]}"#.utf8),
+                response: okResponse(),
+                expectedStop: ["<|fim_suffix|>"]
+            )
+        )
+
+        let suggestion = try await provider.complete(context: makeContext())
+
+        XCTAssertEqual(suggestion.visibleText, "review this")
     }
 
     func testNormalizesCompletionLabelAndNewlineInResponse() async throws {
@@ -333,6 +465,21 @@ final class RemoteCompletionProviderTests: XCTestCase {
         )!
     }
 
+    private func remoteConfiguration() -> RemoteCompletionConfiguration {
+        RemoteCompletionConfiguration(
+            baseURL: "http://127.0.0.1:8000",
+            apiKey: "test",
+            model: "default"
+        )
+    }
+
+    private func fixtureData(_ name: String) throws -> Data {
+        let fixturesDirectory = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("Fixtures/RemoteCompletion")
+        return try Data(contentsOf: fixturesDirectory.appendingPathComponent(name))
+    }
+
     private func makeContext() -> TextContext {
         TextContext(
             app: AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1),
@@ -367,6 +514,7 @@ private struct MockURLSession: URLSessionProtocol {
     var expectedPromptContains: String?
     var forbiddenPromptContains: String? = "Visual context"
     var expectedN: Int?
+    var expectedStop: [String]?
     var expectedURL = "http://127.0.0.1:8000/v1/chat/completions"
 
     func data(for request: URLRequest) async throws -> (Data, URLResponse) {
@@ -380,6 +528,10 @@ private struct MockURLSession: URLSessionProtocol {
             XCTAssertEqual(body?["n"] as? Int, expectedN)
         } else {
             XCTAssertNil(body?["n"])
+        }
+        XCTAssertEqual(body?["stream"] as? Bool, false)
+        if let expectedStop {
+            XCTAssertEqual(body?["stop"] as? [String], expectedStop)
         }
         let template = body?["chat_template_kwargs"] as? [String: Any]
         XCTAssertEqual(template?["enable_thinking"] as? Bool, false)

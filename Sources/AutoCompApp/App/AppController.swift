@@ -18,6 +18,8 @@ final class AppController: ObservableObject {
     let focusTrackingModel: FocusTrackingModel
     let suggestionEngine: SuggestionEngine
     let shortcutSettingsStore: KeyboardShortcutSettingsStore
+    let remoteCompletionConsentStore: RemoteCompletionConsentStore
+    let localLlamaRuntimeStatusStore: LocalLlamaRuntimeStatusStore
     let debugOptionsStore: AutoCompDebugOptionsStore
     let overlayRecoveryAdvisor: OverlayRecoveryAdvisor
     let productivityMetricsStore: LocalProductivityMetricsStore
@@ -30,6 +32,7 @@ final class AppController: ObservableObject {
     private let completionPlaygroundService = CompletionPlaygroundService()
     private let debugArtifactStore: DebugArtifactStore
     private let suggestionDebugLogger: SuggestionDebugLogger
+    private let localPrivacyDataResetService: LocalPrivacyDataResetService
     private let telemetryClient: any TelemetryClient
     private let usesInlinePreviewTestProvider: Bool
     private var onboardingWindow: NSWindow?
@@ -50,6 +53,8 @@ final class AppController: ObservableObject {
         self.focusTrackingModel = environment.focusTrackingModel
         self.suggestionEngine = environment.suggestionEngine
         self.shortcutSettingsStore = environment.shortcutSettingsStore
+        self.remoteCompletionConsentStore = environment.remoteCompletionConsentStore
+        self.localLlamaRuntimeStatusStore = environment.localLlamaRuntimeStatusStore
         self.debugOptionsStore = environment.debugOptionsStore
         self.overlayRecoveryAdvisor = environment.overlayRecoveryAdvisor
         self.productivityMetricsStore = environment.productivityMetricsStore
@@ -58,6 +63,16 @@ final class AppController: ObservableObject {
         self.completionBackendConfigurationService = environment.completionBackendConfigurationService
         self.debugArtifactStore = environment.debugArtifactStore
         self.suggestionDebugLogger = environment.suggestionDebugLogger
+        self.localPrivacyDataResetService = LocalPrivacyDataResetService(
+            personalizationStore: environment.personalizationStore,
+            privacySettingsStore: environment.privacySettingsStore,
+            productivityMetricsStore: environment.productivityMetricsStore,
+            telemetryClient: environment.telemetryClient,
+            remoteCompletionConsentStore: environment.remoteCompletionConsentStore,
+            debugOptionsStore: environment.debugOptionsStore,
+            debugArtifactStore: environment.debugArtifactStore,
+            pasteboardRecoveryStore: environment.pasteboardRecoveryStore
+        )
         self.installationLocationService = environment.installationLocationService
         self.telemetryClient = environment.telemetryClient
         self.usesInlinePreviewTestProvider = environment.usesInlinePreviewTestProvider
@@ -80,7 +95,9 @@ final class AppController: ObservableObject {
 
     func start() {
         installationLocationService.refresh()
+        permissionService.startMonitoring()
         permissionService.refresh()
+        acceptanceService.recoverPendingPasteboardInsertionIfNeeded()
         refreshCompletionBackendSettings()
         suggestionEngine.start()
         startKeyboardShortcuts()
@@ -97,6 +114,14 @@ final class AppController: ObservableObject {
                 Task { @MainActor in
                     self?.suggestionEngine.recordCapturedInputEvent(event)
                 }
+            },
+            shouldInterceptCommand: { [weak self] command in
+                switch command {
+                case .selectPreviousSuggestion, .selectNextSuggestion:
+                    return self?.suggestionEngine.isMultiSuggestionPopupVisible == true
+                case .acceptNextWord, .acceptFullSuggestion, .manualTrigger, .dismissSuggestion, .toggleAutocomplete:
+                    return true
+                }
             }
         )
     }
@@ -111,6 +136,12 @@ final class AppController: ObservableObject {
             }
         case .acceptFullSuggestion:
             await suggestionEngine.acceptAll(using: acceptanceService)
+            syncShortcutStateAfterAcceptance()
+        case .selectPreviousSuggestion:
+            suggestionEngine.selectPreviousAlternative()
+            syncShortcutStateAfterAcceptance()
+        case .selectNextSuggestion:
+            suggestionEngine.selectNextAlternative()
             syncShortcutStateAfterAcceptance()
         case .manualTrigger:
             await suggestionEngine.triggerManualSuggestion()
@@ -144,6 +175,7 @@ final class AppController: ObservableObject {
     func stop() {
         suggestionEngine.stop()
         keyboardShortcuts.stop()
+        permissionService.stopMonitoring()
     }
 
     func relaunch() {
@@ -162,12 +194,7 @@ final class AppController: ObservableObject {
     }
 
     func deleteAllLocalPrivacyData() throws {
-        try personalizationStore.deleteAll()
-        try privacySettingsStore.resetLocalPrivacyDataState()
-        productivityMetricsStore.reset()
-        telemetryClient.deleteAll()
-        saveDebugOptions(.normal)
-        try debugArtifactStore.deleteAll()
+        try localPrivacyDataResetService.deleteAllLocalPrivacyData()
     }
 
     func savePrivacySettings(_ settings: PrivacySettings) {
@@ -188,6 +215,30 @@ final class AppController: ObservableObject {
         debugOptionsStore.load()
     }
 
+    func hasRemoteCompletionConsent(
+        for scope: RemoteCompletionConsentScope,
+        settings: CompletionBackendSettings
+    ) -> Bool {
+        remoteCompletionConsentStore.hasConsent(
+            for: scope,
+            remoteBaseURL: settings.remoteBaseURL
+        )
+    }
+
+    func grantRemoteCompletionConsent(
+        for scope: RemoteCompletionConsentScope,
+        settings: CompletionBackendSettings
+    ) {
+        remoteCompletionConsentStore.grantConsent(
+            for: scope,
+            remoteBaseURL: settings.remoteBaseURL
+        )
+    }
+
+    func resetRemoteCompletionConsent() {
+        remoteCompletionConsentStore.reset()
+    }
+
     func deleteDebugArtifacts() throws {
         try debugArtifactStore.deleteAll()
     }
@@ -197,6 +248,61 @@ final class AppController: ObservableObject {
             to: directory,
             options: debugOptions()
         )
+    }
+
+    func redactedSettingsExportFilename(now: Date = Date()) -> String {
+        RedactedSettingsTransfer.exportFilename(now: now)
+    }
+
+    func exportRedactedSettings(to url: URL) throws {
+        let package = RedactedSettingsTransfer.package(
+            compatibilityOverrides: compatibilitySettings.loadModeOverrides(),
+            privacySettings: privacySettingsStore.load(),
+            shortcutSettings: shortcutSettingsStore.load(),
+            backendSettings: completionBackendSettings,
+            safeOverlayModeEnabled: SafeOverlayMode.isEnabled
+        )
+        let data = try RedactedSettingsTransfer.encodedData(for: package)
+        try data.write(to: url, options: [.atomic])
+    }
+
+    func redactedSettingsImportPreview(from data: Data) throws -> RedactedSettingsImportPreview {
+        let package = try RedactedSettingsTransfer.decodedPackage(from: data)
+        return RedactedSettingsTransfer.preview(
+            package: package,
+            currentCompatibilityOverrides: compatibilitySettings.loadModeOverrides(),
+            currentPrivacySettings: privacySettingsStore.load(),
+            currentShortcutSettings: shortcutSettingsStore.load(),
+            currentBackendSettings: completionBackendSettings,
+            safeOverlayModeEnabled: SafeOverlayMode.isEnabled
+        )
+    }
+
+    func applyRedactedSettingsImport(_ preview: RedactedSettingsImportPreview) throws {
+        let package = preview.package
+        compatibilitySettings.resetOverrides()
+        for (bundleID, mode) in package.compatibility.appOverrides {
+            compatibilitySettings.setMode(mode, for: bundleID)
+        }
+        for (domain, mode) in package.compatibility.domainOverrides {
+            compatibilitySettings.setMode(mode, forDomain: domain)
+        }
+
+        let updatedPrivacySettings = RedactedSettingsTransfer.privacySettings(
+            applying: package.privacy,
+            to: privacySettingsStore.load()
+        )
+        try privacySettingsStore.save(updatedPrivacySettings)
+        telemetryClient.setEnabled(false)
+        productivityMetricsStore.reload()
+
+        saveKeyboardShortcutSettings(package.shortcuts)
+
+        let updatedBackendSettings = RedactedSettingsTransfer.backendSettings(
+            applying: package.backend,
+            to: completionBackendSettings
+        )
+        saveCompletionBackendSettings(updatedBackendSettings)
     }
 
     func debugArtifactCount() -> Int {
@@ -225,6 +331,18 @@ final class AppController: ObservableObject {
             environment.completionProvider(for: settings),
             status: "Completion backend updated",
             reason: switchReason
+        )
+    }
+
+    func unloadLocalLlamaRuntime() {
+        localLlamaRuntimeStatusStore.record(LocalLlamaRuntimeStatus(
+            state: .unloaded,
+            modelPath: completionBackendSettings.localModelPath
+        ))
+        suggestionEngine.updateCompletionProvider(
+            environment.completionProvider(for: completionBackendSettings),
+            status: "Local Llama unloaded",
+            reason: .runtimeModelSwitch
         )
     }
 
@@ -320,6 +438,7 @@ final class AppController: ObservableObject {
                 .environmentObject(self)
                 .environmentObject(permissionService)
                 .environmentObject(suggestionEngine)
+                .environmentObject(localLlamaRuntimeStatusStore)
         )
         settingsWindow = window
         show(window)

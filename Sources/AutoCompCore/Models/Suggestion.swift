@@ -105,6 +105,32 @@ public struct Suggestion: Identifiable, Codable, Equatable, Sendable {
         alternatives.count > 1
     }
 
+    @discardableResult
+    public mutating func selectAlternative(offset: Int) -> Bool {
+        guard hasMultipleAlternatives else {
+            return false
+        }
+
+        let count = alternatives.count
+        let nextIndex = (selectedAlternativeIndex + offset % count + count) % count
+        guard nextIndex != selectedAlternativeIndex else {
+            return false
+        }
+
+        self = Suggestion(
+            id: id,
+            baseContextID: baseContextID,
+            visibleText: alternatives[nextIndex].visibleText,
+            rawText: alternatives[nextIndex].rawText ?? rawText,
+            alternatives: alternatives,
+            selectedAlternativeIndex: nextIndex,
+            completionRoute: completionRoute,
+            createdAt: createdAt,
+            latencyMs: latencyMs
+        )
+        return true
+    }
+
     public mutating func collapseAlternativesToCurrentText() {
         alternatives = [SuggestionAlternative(visibleText: remainingText, rawText: rawText)]
         selectedAlternativeIndex = 0

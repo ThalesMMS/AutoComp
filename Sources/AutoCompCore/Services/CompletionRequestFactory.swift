@@ -19,14 +19,16 @@ public struct CompletionRequestFactory: Sendable {
         visualContext: VisualContextSnapshot? = nil,
         clipboardContext: ClipboardContextSnapshot? = nil
     ) -> CompletionRequest {
-        let allowedVisualContext = allowedVisualContext(
+        let privacyAllowedVisualContext = allowedVisualContext(
             visualContext,
             privacySettings: privacySettings
         )
-        let allowedClipboardContext = allowedClipboardContext(
+        let privacyAllowedClipboardContext = allowedClipboardContext(
             clipboardContext,
             privacySettings: privacySettings
         )
+        let allowedVisualContext = promptBuilder.truncatedVisualContext(privacyAllowedVisualContext)
+        let allowedClipboardContext = promptBuilder.truncatedClipboardContext(privacyAllowedClipboardContext)
         let prompt = promptBuilder.prompt(
             for: context,
             privacySettings: privacySettings,
@@ -62,6 +64,7 @@ public struct CompletionRequestFactory: Sendable {
             model: configuration.model,
             maxTokens: configuration.maxTokens,
             temperature: temperature,
+            stopSequences: configuration.stopSequences.sequences(for: requestMode),
             visualContext: allowedVisualContext,
             clipboardContext: allowedClipboardContext,
             promptEchoCandidates: promptEchoCandidates(

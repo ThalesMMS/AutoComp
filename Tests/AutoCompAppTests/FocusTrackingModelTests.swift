@@ -315,6 +315,7 @@ final class FocusTrackingModelTests: XCTestCase {
             focusedElement: AXUIElementCreateSystemWide(),
             focusedElementID: focusedElementID,
             domain: domain,
+            domainResolution: .inferred(domain: domain),
             role: role,
             subrole: subrole,
             isGoogleDocsElement: false,

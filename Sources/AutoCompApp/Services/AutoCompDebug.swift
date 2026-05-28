@@ -131,6 +131,20 @@ struct DebugArtifactStore {
         return url
     }
 
+    @discardableResult
+    func saveRedactedArtifact(
+        named name: String,
+        data: Data,
+        fileExtension: String = "json",
+        createdAt: Date = Date()
+    ) throws -> URL {
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        let filename = "\(timestamp(createdAt))-\(sanitized(name)).\(sanitized(fileExtension))"
+        let url = directory.appendingPathComponent(filename, isDirectory: false)
+        try data.write(to: url, options: [.atomic])
+        return url
+    }
+
     func deleteAll() throws {
         guard fileManager.fileExists(atPath: directory.path) else {
             return
@@ -321,7 +335,12 @@ struct SuggestionDebugLogger {
         let normalizedSummary = AutoCompLogger.redactedSummary(
             for: suggestions.map(\.visibleText).joined(separator: "\n---\n")
         )
-        logger.info("autocomplete id=\(id.uuidString) invocation=\(invocation) outcome=\(outcome) prompt=\(promptSummary) raw=\(rawSummary) normalized=\(normalizedSummary)")
+        let captureDiagnostics = ContextCaptureDiagnostics(
+            context: context,
+            visualContext: visualContext,
+            clipboardContext: clipboardContext
+        )
+        logger.info("autocomplete id=\(id.uuidString) invocation=\(invocation) outcome=\(outcome) source=\(captureDiagnostics.contextSourceLogValue) geometry=\(captureDiagnostics.geometryQualityLogValue) trust=\(captureDiagnostics.trustTitle) supplemental=\(captureDiagnostics.supplementalSourceLogValue) visualContext=\(captureDiagnostics.visualContextLogValue) clipboardContext=\(captureDiagnostics.clipboardContextLogValue) prompt=\(promptSummary) raw=\(rawSummary) normalized=\(normalizedSummary)")
 
         guard options.allowsSensitiveDebug else {
             return
@@ -341,8 +360,11 @@ struct SuggestionDebugLogger {
         Bundle ID: \(context.app.bundleID)
         Domain: \(context.domain ?? "none")
         Focused element ID: \(context.focusedElementID)
-        Capture sources: \(captureSourcesDescription(context.captureSources))
-        Geometry quality: \(context.caretGeometryQuality.rawValue)
+        Capture sources: \(captureDiagnostics.contextSourceTitle)
+        Geometry quality: \(captureDiagnostics.geometryQualityTitle)
+        Context trust: \(captureDiagnostics.trustTitle)
+        Context warning: \(captureDiagnostics.lowTrustWarning ?? "none")
+        Supplemental sources: \(captureDiagnostics.supplementalSourceTitle)
 
         Request mode: \(request.mode.rawValue)
         FIM suffix injected: \(request.fimSuffixInjected)
@@ -371,10 +393,6 @@ struct SuggestionDebugLogger {
         } catch {
             logger.error("debug-artifact-save-failed reason=\(String(describing: error))")
         }
-    }
-
-    private func captureSourcesDescription(_ sources: Set<TextCaptureSource>) -> String {
-        sources.map(\.rawValue).sorted().joined(separator: ",")
     }
 
     private func suggestionsDescription(_ suggestions: [Suggestion]) -> String {

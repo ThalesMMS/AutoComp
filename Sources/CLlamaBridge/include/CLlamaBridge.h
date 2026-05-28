@@ -31,6 +31,7 @@ typedef struct AutoCompLlamaCacheDecision {
 
 void autocomp_llama_backend_init(void);
 void autocomp_llama_backend_free(void);
+const char *autocomp_llama_system_info(void);
 
 AutoCompLlamaModel *autocomp_llama_model_load(
     const char *path,
@@ -43,6 +44,8 @@ char *autocomp_llama_model_generate(
     const char *prompt,
     int32_t max_tokens,
     float temperature,
+    const char * const *stop_sequences,
+    int32_t stop_sequence_count,
     AutoCompLlamaError *error
 );
 

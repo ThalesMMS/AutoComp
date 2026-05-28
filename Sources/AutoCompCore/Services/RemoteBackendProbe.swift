@@ -42,7 +42,11 @@ public struct RemoteBackendProbe: Sendable {
 
         let modelsResult = await requestModels(url: modelsURL, configuration: configuration)
         switch modelsResult {
-        case .connected(let suggestedModel):
+        case .connected(let suggestedModel, let configuredModelAvailable):
+            if !configuration.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+               !configuredModelAvailable {
+                return failure(.modelNotFound)
+            }
             if let suggestedModel {
                 return RemoteBackendProbeResult(
                     status: .connected,
@@ -95,8 +99,13 @@ public struct RemoteBackendProbe: Sendable {
             return .failed(.malformedResponse)
         }
 
-        let suggestedModel = decoded.data.first?.id.trimmingCharacters(in: .whitespacesAndNewlines)
-        return .connected(suggestedModel?.isEmpty == false ? suggestedModel : nil)
+        let modelIDs = decoded.data
+            .map { $0.id.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        let suggestedModel = modelIDs.first
+        let configuredModel = configuration.model.trimmingCharacters(in: .whitespacesAndNewlines)
+        let configuredModelAvailable = configuredModel.isEmpty || modelIDs.contains(configuredModel)
+        return .connected(suggestedModel, configuredModelAvailable: configuredModelAvailable)
     }
 
     private func requestCompletion(
@@ -142,7 +151,16 @@ public struct RemoteBackendProbe: Sendable {
     }
 
     private func issue(forHTTPStatus statusCode: Int) -> BackendConnectivityIssue {
-        statusCode == 401 ? .unauthorized : .httpStatus(statusCode)
+        switch statusCode {
+        case 401:
+            return .unauthorized
+        case 404:
+            return .httpStatus(404)
+        case 429:
+            return .rateLimited
+        default:
+            return .httpStatus(statusCode)
+        }
     }
 
     private func failure(_ issue: BackendConnectivityIssue) -> RemoteBackendProbeResult {
@@ -155,7 +173,7 @@ public struct RemoteBackendProbe: Sendable {
 }
 
 private enum ModelsProbeResult: Equatable {
-    case connected(String?)
+    case connected(String?, configuredModelAvailable: Bool)
     case failed(BackendConnectivityIssue)
 }
 

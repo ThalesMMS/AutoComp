@@ -108,6 +108,65 @@ final class CompatibilityCatalogTests: XCTestCase {
         }
     }
 
+    func testTerminalEnablementIsManualOnlyUnlessAutomaticOverrideIsExplicit() {
+        let catalog = CompatibilityCatalog()
+
+        let legacyEnabled = catalog.decision(
+            bundleID: "com.apple.Terminal",
+            domain: nil,
+            userEnabledOverrides: ["com.apple.Terminal": true]
+        )
+        XCTAssertTrue(legacyEnabled.enabled)
+        XCTAssertEqual(legacyEnabled.mode, .mirrorWindow)
+        XCTAssertEqual(legacyEnabled.overrideMode, .manualOnly)
+        XCTAssertFalse(legacyEnabled.allowsAutomaticSuggestions)
+        XCTAssertEqual(
+            legacyEnabled.warningMessage,
+            "Terminal enablement defaults to Manual only unless Automatic is selected explicitly."
+        )
+        XCTAssertNil(legacyEnabled.setupMessage)
+
+        let manualOnly = catalog.decision(
+            bundleID: "com.apple.Terminal",
+            domain: nil,
+            userModeOverrides: ["com.apple.Terminal": .manualOnly]
+        )
+        XCTAssertTrue(manualOnly.enabled)
+        XCTAssertEqual(manualOnly.mode, .mirrorWindow)
+        XCTAssertEqual(manualOnly.overrideMode, .manualOnly)
+        XCTAssertFalse(manualOnly.allowsAutomaticSuggestions)
+        XCTAssertNil(manualOnly.setupMessage)
+        XCTAssertNil(manualOnly.warningMessage)
+
+        let automatic = catalog.decision(
+            bundleID: "com.apple.Terminal",
+            domain: nil,
+            userModeOverrides: ["com.apple.Terminal": .automatic]
+        )
+        XCTAssertTrue(automatic.enabled)
+        XCTAssertEqual(automatic.mode, .mirrorWindow)
+        XCTAssertEqual(automatic.overrideMode, .automatic)
+        XCTAssertTrue(automatic.allowsAutomaticSuggestions)
+        XCTAssertEqual(
+            automatic.warningMessage,
+            "Warning: automatic terminal suggestions can execute commands. Prefer Manual only unless this override is intentional."
+        )
+        XCTAssertNil(automatic.setupMessage)
+    }
+
+    func testBrowserChatDomainsUseManualOnlyCompatibility() {
+        let decision = CompatibilityCatalog().decision(
+            bundleID: "com.google.Chrome",
+            domain: "https://chatgpt.com/c/example"
+        )
+
+        XCTAssertTrue(decision.enabled)
+        XCTAssertEqual(decision.mode, .inline)
+        XCTAssertEqual(decision.overrideMode, .manualOnly)
+        XCTAssertFalse(decision.allowsAutomaticSuggestions)
+        XCTAssertEqual(decision.profile.status, .partial)
+    }
+
     func testFirefoxUsesMirrorWindowMode() {
         let decision = CompatibilityCatalog().decision(bundleID: "org.mozilla.firefox", domain: nil)
 
@@ -176,6 +235,30 @@ final class CompatibilityCatalogTests: XCTestCase {
         XCTAssertEqual(decision.overrideMode, .manualOnly)
         XCTAssertFalse(decision.allowsAutomaticSuggestions)
         XCTAssertEqual(decision.profile.status, .setupNeeded)
+        XCTAssertEqual(decision.ruleSource, .domainRule)
+    }
+
+    func testCompatibilityRuleSourceDistinguishesDefaultAppAndUnknownDomain() {
+        let catalog = CompatibilityCatalog()
+        let defaultDecision = catalog.decision(bundleID: "com.google.Chrome", domain: nil)
+        let appRuleDecision = catalog.decision(
+            bundleID: "com.google.Chrome",
+            domain: nil,
+            userModeOverrides: ["com.google.Chrome": .manualOnly]
+        )
+        let unknownDomainDecision = catalog.decision(
+            bundleID: "com.google.Chrome",
+            domain: nil,
+            userModeOverrides: [
+                CompatibilityCatalog.overrideKey(forDomain: "docs.google.com"): .disabled
+            ]
+        )
+
+        XCTAssertEqual(defaultDecision.ruleSource, .default)
+        XCTAssertEqual(appRuleDecision.ruleSource, .appRule)
+        XCTAssertTrue(unknownDomainDecision.enabled)
+        XCTAssertEqual(unknownDomainDecision.overrideMode, .automatic)
+        XCTAssertEqual(unknownDomainDecision.ruleSource, .default)
     }
 
     func testCompatibilityProfileCodablePreservesLegacyEnabledAndActivationMode() throws {

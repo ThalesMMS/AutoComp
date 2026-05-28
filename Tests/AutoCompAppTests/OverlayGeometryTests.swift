@@ -977,6 +977,7 @@ final class OverlayGeometryTests: XCTestCase {
             focusedElement: AXUIElementCreateSystemWide(),
             focusedElementID: "docs-field",
             domain: "docs.google.com",
+            domainResolution: .known("docs.google.com"),
             role: "AXTextArea",
             subrole: nil,
             isGoogleDocsElement: true,

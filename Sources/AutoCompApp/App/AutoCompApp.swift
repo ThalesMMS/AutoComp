@@ -34,6 +34,7 @@ struct AutoCompApp: App {
                 .environmentObject(controller)
                 .environmentObject(controller.permissionService)
                 .environmentObject(controller.suggestionEngine)
+                .environmentObject(controller.localLlamaRuntimeStatusStore)
                 .frame(minWidth: 720, minHeight: 520)
         }
     }

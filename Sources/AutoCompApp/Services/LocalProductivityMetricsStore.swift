@@ -11,6 +11,29 @@ struct ProductivityMetricsSnapshot: Equatable {
     let suggestionsDismissed: Int
     let latencySampleCount: Int
     let averageBackendLatencyMs: Int?
+    let lastLatencyReport: CompletionLatencyReport?
+
+    init(
+        isEnabled: Bool,
+        dayKey: String,
+        wordsAcceptedToday: Int,
+        wordsAcceptedTotal: Int,
+        suggestionsAccepted: Int,
+        suggestionsDismissed: Int,
+        latencySampleCount: Int,
+        averageBackendLatencyMs: Int?,
+        lastLatencyReport: CompletionLatencyReport? = nil
+    ) {
+        self.isEnabled = isEnabled
+        self.dayKey = dayKey
+        self.wordsAcceptedToday = wordsAcceptedToday
+        self.wordsAcceptedTotal = wordsAcceptedTotal
+        self.suggestionsAccepted = suggestionsAccepted
+        self.suggestionsDismissed = suggestionsDismissed
+        self.latencySampleCount = latencySampleCount
+        self.averageBackendLatencyMs = averageBackendLatencyMs
+        self.lastLatencyReport = lastLatencyReport
+    }
 
     var menuValue: String {
         guard isEnabled else {
@@ -37,7 +60,8 @@ struct ProductivityMetricsSnapshot: Equatable {
             suggestionsAccepted: 0,
             suggestionsDismissed: 0,
             latencySampleCount: 0,
-            averageBackendLatencyMs: nil
+            averageBackendLatencyMs: nil,
+            lastLatencyReport: nil
         )
     }
 }
@@ -47,6 +71,8 @@ protocol ProductivityMetricsRecording: AnyObject {
     func recordAcceptedText(_ text: String)
     func recordDismissedSuggestion()
     func recordBackendLatency(_ latencyMs: Int)
+    func recordCompletionLatency(_ report: CompletionLatencyReport)
+    func recordInsertionLatency(_ latencyMs: Int)
 }
 
 @MainActor
@@ -120,6 +146,36 @@ final class LocalProductivityMetricsStore: ObservableObject, ProductivityMetrics
         var stored = loadNormalizedStoredMetrics()
         stored.latencySampleCount += 1
         stored.latencyTotalMs += latencyMs
+        stored.lastLatencyReport = CompletionLatencyReport(backendMs: latencyMs)
+        saveAndPublish(stored)
+    }
+
+    func recordCompletionLatency(_ report: CompletionLatencyReport) {
+        guard privacyStore.load().productivityMetricsEnabled,
+              !report.isEmpty else {
+            reload()
+            return
+        }
+
+        var stored = loadNormalizedStoredMetrics()
+        if let backendMs = report.backendMs, backendMs >= 0 {
+            stored.latencySampleCount += 1
+            stored.latencyTotalMs += backendMs
+        }
+        stored.lastLatencyReport = report
+        saveAndPublish(stored)
+    }
+
+    func recordInsertionLatency(_ latencyMs: Int) {
+        guard privacyStore.load().productivityMetricsEnabled,
+              latencyMs >= 0 else {
+            reload()
+            return
+        }
+
+        var stored = loadNormalizedStoredMetrics()
+        stored.lastLatencyReport = (stored.lastLatencyReport ?? CompletionLatencyReport())
+            .withInsertionLatency(latencyMs)
         saveAndPublish(stored)
     }
 
@@ -180,7 +236,8 @@ final class LocalProductivityMetricsStore: ObservableObject, ProductivityMetrics
             suggestionsAccepted: stored.suggestionsAccepted,
             suggestionsDismissed: stored.suggestionsDismissed,
             latencySampleCount: stored.latencySampleCount,
-            averageBackendLatencyMs: stored.averageBackendLatencyMs
+            averageBackendLatencyMs: stored.averageBackendLatencyMs,
+            lastLatencyReport: stored.lastLatencyReport
         )
     }
 
@@ -241,6 +298,7 @@ private struct StoredProductivityMetrics: Codable, Equatable {
     var suggestionsDismissed: Int
     var latencyTotalMs: Int
     var latencySampleCount: Int
+    var lastLatencyReport: CompletionLatencyReport?
 
     init(
         dayKey: String,
@@ -249,7 +307,8 @@ private struct StoredProductivityMetrics: Codable, Equatable {
         suggestionsAccepted: Int = 0,
         suggestionsDismissed: Int = 0,
         latencyTotalMs: Int = 0,
-        latencySampleCount: Int = 0
+        latencySampleCount: Int = 0,
+        lastLatencyReport: CompletionLatencyReport? = nil
     ) {
         self.dayKey = dayKey
         self.wordsAcceptedToday = wordsAcceptedToday
@@ -258,6 +317,7 @@ private struct StoredProductivityMetrics: Codable, Equatable {
         self.suggestionsDismissed = suggestionsDismissed
         self.latencyTotalMs = latencyTotalMs
         self.latencySampleCount = latencySampleCount
+        self.lastLatencyReport = lastLatencyReport
     }
 
     var averageBackendLatencyMs: Int? {

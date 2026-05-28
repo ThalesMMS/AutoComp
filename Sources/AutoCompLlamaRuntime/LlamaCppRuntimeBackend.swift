@@ -8,6 +8,17 @@ public final class LlamaCppRuntimeBackend: LocalLlamaRuntimeBackend, @unchecked 
     private var loadedModel: OpaquePointer?
     private var backendInitialized = false
 
+    public static func runtimeSystemInfo() -> String {
+        guard let info = autocomp_llama_system_info() else {
+            return "unavailable"
+        }
+        let value = String(cString: info).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else {
+            return "not reported by linked llama.cpp"
+        }
+        return value
+    }
+
     public init(loadVocabularyOnly: Bool = false) {
         self.loadVocabularyOnly = loadVocabularyOnly
     }
@@ -40,7 +51,10 @@ public final class LlamaCppRuntimeBackend: LocalLlamaRuntimeBackend, @unchecked 
                 autocomp_llama_model_load(path, loadVocabularyOnly, &error)
             }
             guard let model else {
-                throw LocalLlamaError.loadFailed(String(cString: autocomp_llama_error_message(&error)))
+                throw Self.loadError(
+                    message: String(cString: autocomp_llama_error_message(&error)),
+                    code: error.code
+                )
             }
             loadedModel = model
         }
@@ -57,14 +71,21 @@ public final class LlamaCppRuntimeBackend: LocalLlamaRuntimeBackend, @unchecked 
                 }
 
                 var error = AutoCompLlamaError()
+                let stopSequences = request.stopSequences
                 let generated = request.prompt.withCString { prompt in
-                    autocomp_llama_model_generate(
-                        loadedModel,
-                        prompt,
-                        Int32(max(1, request.maxTokens)),
-                        Float(request.temperature),
-                        &error
-                    )
+                    withCStringArray(stopSequences) { stopSequencePointers in
+                        stopSequencePointers.withUnsafeBufferPointer { stopSequenceBuffer in
+                            autocomp_llama_model_generate(
+                                loadedModel,
+                                prompt,
+                                Int32(max(1, request.maxTokens)),
+                                Float(request.temperature),
+                                stopSequenceBuffer.baseAddress,
+                                Int32(stopSequenceBuffer.count),
+                                &error
+                            )
+                        }
+                    }
                 }
                 guard let generated else {
                     throw LocalLlamaError.generationFailed(String(cString: autocomp_llama_error_message(&error)))
@@ -135,9 +156,49 @@ public final class LlamaCppRuntimeBackend: LocalLlamaRuntimeBackend, @unchecked 
                 fromByteCount: Int64(min(configuration.maxRAMBytes, UInt64(Int64.max))),
                 countStyle: .memory
             )
-            throw LocalLlamaError.loadFailed(
+            throw LocalLlamaError.allocationFailed(
                 "Model file size \(fileSizeLabel) exceeds configured local memory limit \(limitLabel)."
             )
         }
+    }
+
+    static func loadError(message: String, code: Int32) -> LocalLlamaError {
+        guard code == 3 || message.isAllocationFailureMessage else {
+            return .loadFailed(message)
+        }
+        return .allocationFailed(message)
+    }
+
+    private func withCStringArray<Result>(
+        _ strings: [String],
+        _ body: ([UnsafePointer<CChar>?]) -> Result
+    ) -> Result {
+        var pointers: [UnsafePointer<CChar>?] = []
+
+        func appendPointer(at index: Int) -> Result {
+            guard index < strings.count else {
+                return body(pointers)
+            }
+
+            return strings[index].withCString { pointer in
+                pointers.append(pointer)
+                defer {
+                    pointers.removeLast()
+                }
+                return appendPointer(at: index + 1)
+            }
+        }
+
+        return appendPointer(at: 0)
+    }
+}
+
+private extension String {
+    var isAllocationFailureMessage: Bool {
+        let value = lowercased()
+        return value.contains("allocat")
+            || value.contains("insufficient memory")
+            || value.contains("out of memory")
+            || value.contains("memory pressure")
     }
 }
