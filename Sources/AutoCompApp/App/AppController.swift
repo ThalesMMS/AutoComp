@@ -6,6 +6,8 @@ import SwiftUI
 
 @MainActor
 final class AppController: ObservableObject {
+    private static let settingsWindowMinimumContentSize = NSSize(width: 880, height: 560)
+
     @Published var selectedSettingsSection: SettingsSection = .permissions
     @Published private(set) var completionBackendSummary: String
     @Published var completionBackendSettings: CompletionBackendSettings
@@ -34,6 +36,9 @@ final class AppController: ObservableObject {
     private let suggestionDebugLogger: SuggestionDebugLogger
     private let localPrivacyDataResetService: LocalPrivacyDataResetService
     private let telemetryClient: any TelemetryClient
+    private let settingsWindowResizeDelegate = MinimumContentSizeWindowDelegate(
+        minContentSize: AppController.settingsWindowMinimumContentSize
+    )
     private let usesInlinePreviewTestProvider: Bool
     private var onboardingWindow: NSWindow?
     private var settingsWindow: NSWindow?
@@ -431,20 +436,28 @@ final class AppController: ObservableObject {
     }
 
     func showSettingsWindow() {
+        let settingsWindowSize = Self.settingsWindowMinimumContentSize
         let window = settingsWindow ?? makeWindow(
             title: "AutoComp Settings",
-            size: NSSize(width: 760, height: 560),
+            size: settingsWindowSize,
+            minSize: settingsWindowSize,
             content: SettingsRootView()
                 .environmentObject(self)
                 .environmentObject(permissionService)
                 .environmentObject(suggestionEngine)
                 .environmentObject(localLlamaRuntimeStatusStore)
         )
+        window.delegate = settingsWindowResizeDelegate
         settingsWindow = window
         show(window)
     }
 
-    private func makeWindow<Content: View>(title: String, size: NSSize, content: Content) -> NSWindow {
+    private func makeWindow<Content: View>(
+        title: String,
+        size: NSSize,
+        minSize: NSSize? = nil,
+        content: Content
+    ) -> NSWindow {
         let window = NSWindow(
             contentRect: NSRect(origin: .zero, size: size),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -452,6 +465,10 @@ final class AppController: ObservableObject {
             defer: false
         )
         window.title = title
+        if let minSize {
+            window.minSize = minSize
+            window.contentMinSize = minSize
+        }
         window.center()
         window.isReleasedWhenClosed = false
         window.contentView = NSHostingView(rootView: content)
@@ -500,5 +517,21 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .model:
             return "cpu"
         }
+    }
+}
+
+private final class MinimumContentSizeWindowDelegate: NSObject, NSWindowDelegate {
+    private let minContentSize: NSSize
+
+    init(minContentSize: NSSize) {
+        self.minContentSize = minContentSize
+    }
+
+    func windowWillResize(_ sender: NSWindow, to frameSize: NSSize) -> NSSize {
+        let minFrameSize = sender.frameRect(forContentRect: NSRect(origin: .zero, size: minContentSize)).size
+        return NSSize(
+            width: max(frameSize.width, minFrameSize.width),
+            height: max(frameSize.height, minFrameSize.height)
+        )
     }
 }

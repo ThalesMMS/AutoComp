@@ -4,10 +4,12 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct SettingsRootView: View {
+    private let sidebarWidth: CGFloat = 210
+
     @EnvironmentObject private var controller: AppController
 
     var body: some View {
-        NavigationSplitView(columnVisibility: .constant(.all)) {
+        HStack(spacing: 0) {
             List(selection: $controller.selectedSettingsSection) {
                 ForEach(SettingsSection.allCases) { section in
                     Label(section.rawValue, systemImage: section.systemImage)
@@ -15,21 +17,30 @@ struct SettingsRootView: View {
                 }
             }
             .listStyle(.sidebar)
-        } detail: {
-            switch controller.selectedSettingsSection {
-            case .permissions:
-                PermissionSettingsView()
-            case .apps:
-                AppCompatibilitySettingsView()
-            case .privacy:
-                PrivacySettingsView()
-            case .shortcuts:
-                ShortcutSettingsView()
-            case .model:
-                ModelSettingsView()
-            }
+            .frame(width: sidebarWidth)
+
+            Divider()
+
+            selectedSectionView
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .toolbar(removing: .sidebarToggle)
+        .frame(minWidth: 880, minHeight: 560)
+    }
+
+    @ViewBuilder
+    private var selectedSectionView: some View {
+        switch controller.selectedSettingsSection {
+        case .permissions:
+            PermissionSettingsView()
+        case .apps:
+            AppCompatibilitySettingsView()
+        case .privacy:
+            PrivacySettingsView()
+        case .shortcuts:
+            ShortcutSettingsView()
+        case .model:
+            ModelSettingsView()
+        }
     }
 }
 
