@@ -93,6 +93,34 @@ final class AcceptanceServiceTests: XCTestCase {
         )
     }
 
+    func testBrowserAcceptedTextUsesPerCharacterEventsForShortText() async throws {
+        let poster = RecordingAcceptanceKeyboardEventPoster()
+        let suppressionController = InputSuppressionController()
+        let service = acceptanceService(
+            keyboardEventPoster: poster,
+            inputSuppressionController: suppressionController,
+            insertionPolicy: AcceptanceInsertionPolicy(singleUnicodeFastPathEnabled: true),
+            frontmostBundleID: "com.google.Chrome"
+        )
+        var suggestion = Suggestion(
+            baseContextID: UUID(),
+            visibleText: "done ",
+            latencyMs: 20
+        )
+
+        let acceptedText = try await service.acceptAll(from: &suggestion)
+
+        XCTAssertEqual(acceptedText, "done ")
+        XCTAssertEqual(poster.unicodeStrings, ["d", "o", "n", "e", " "])
+        XCTAssertTrue(poster.keyEvents.isEmpty)
+        try assertSyntheticPairs(
+            suppressionController,
+            keyCode: 0,
+            flags: [],
+            count: 5
+        )
+    }
+
     func testAcceptAllShortTextUsesSingleUnicodeEvent() async throws {
         let poster = RecordingAcceptanceKeyboardEventPoster()
         let service = acceptanceService(keyboardEventPoster: poster)
@@ -413,5 +441,9 @@ private final class RecordingAcceptancePasteboard: AcceptancePasteboard {
 
     func containsRecoveryMarker(id: String) -> Bool {
         activeRecoveryMarkerID == id
+    }
+
+    func currentRecoveryMarkerID() -> String? {
+        activeRecoveryMarkerID
     }
 }

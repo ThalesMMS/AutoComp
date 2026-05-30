@@ -371,12 +371,16 @@ final class FakeTextInserter: TextInserter {
     private(set) var acceptAllCalls = 0
     private(set) var insertedTexts: [String] = []
 
+    func insert(_ text: String) throws {
+        insertedTexts.append(text)
+    }
+
     func acceptNextWord(from suggestion: inout Suggestion) async throws -> String? {
         nextWordCalls += 1
         guard let text = suggestion.acceptNextWord() else {
             return nil
         }
-        insertedTexts.append(text)
+        try insert(text)
         return text
     }
 
@@ -385,7 +389,7 @@ final class FakeTextInserter: TextInserter {
         guard let text = suggestion.acceptAll() else {
             return nil
         }
-        insertedTexts.append(text)
+        try insert(text)
         return text
     }
 }

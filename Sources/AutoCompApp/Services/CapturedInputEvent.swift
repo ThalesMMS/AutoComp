@@ -96,6 +96,8 @@ struct CapturedInputEventAdapter {
     static let tabKeyCode: UInt16 = 48
     static let spaceKeyCode: UInt16 = 49
     static let escapeKeyCode: UInt16 = 53
+    static let deleteKeyCode: UInt16 = 51
+    static let forwardDeleteKeyCode: UInt16 = 117
     static let rightShiftKeyCode: UInt16 = 60
     static let leftBracketKeyCode: UInt16 = 33
     static let rightBracketKeyCode: UInt16 = 30

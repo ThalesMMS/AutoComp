@@ -4,7 +4,7 @@ import XCTest
 
 @MainActor
 final class PermissionRecoveryTests: XCTestCase {
-    func testGrantingInputMonitoringTwiceKeepsOneKeyboardTapSet() {
+    func testGrantingInputMonitoringTwiceKeepsExistingKeyboardTapSet() {
         let installer = RecordingKeyboardShortcutTapInstaller()
         let service = KeyboardShortcutService(tapInstaller: installer)
 
@@ -21,9 +21,9 @@ final class PermissionRecoveryTests: XCTestCase {
         XCTAssertEqual(service.diagnostics.activeTapSetCount, 1)
         XCTAssertEqual(service.diagnostics.activeTapNames, ["hid", "session", "annotated-session"])
         XCTAssertEqual(installer.liveTapCount, 3)
-        XCTAssertEqual(installer.installedTaps.count, 6)
-        XCTAssertTrue(firstTapSet.allSatisfy(\.invalidated))
-        XCTAssertTrue(firstTapSet.allSatisfy(\.removedFromRunLoop))
+        XCTAssertEqual(installer.installedTaps.count, 3)
+        XCTAssertFalse(firstTapSet.contains(where: \.invalidated))
+        XCTAssertFalse(firstTapSet.contains(where: \.removedFromRunLoop))
     }
 
     func testRevokingAndRegrantingInputMonitoringRestartsKeyboardTapSetOnce() {

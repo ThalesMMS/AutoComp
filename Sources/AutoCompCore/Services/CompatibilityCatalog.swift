@@ -138,25 +138,8 @@ public struct CompatibilityCatalog: Sendable {
     }
 
     public static func overrideKey(forDomain domain: String) -> String {
-        "domain:\(normalizedDomain(domain))"
-    }
-
-    public static func normalizedDomain(_ domain: String) -> String {
-        var normalized = domain
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-
-        if normalized.hasPrefix("https://") {
-            normalized.removeFirst("https://".count)
-        } else if normalized.hasPrefix("http://") {
-            normalized.removeFirst("http://".count)
-        }
-
-        if let fragmentIndex = normalized.firstIndex(where: { $0 == "?" || $0 == "#" }) {
-            normalized = String(normalized[..<fragmentIndex])
-        }
-
-        return normalized.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let normalized = DomainNormalization.canonicalDomainStringAllowingEmpty(from: domain)
+        return "domain:\(normalized)"
     }
 
     private static func modeOverride(
@@ -172,21 +155,9 @@ public struct CompatibilityCatalog: Sendable {
     }
 
     private static func domainOverrideCandidates(for domain: String) -> [String] {
-        let normalized = normalizedDomain(domain)
-        guard !normalized.isEmpty else {
-            return []
-        }
-
-        let components = normalized.split(separator: "/").map(String.init)
-        guard components.count > 1 else {
-            return [overrideKey(forDomain: normalized)]
-        }
-
-        var candidates: [String] = []
-        for count in stride(from: components.count, through: 1, by: -1) {
-            candidates.append(overrideKey(forDomain: components.prefix(count).joined(separator: "/")))
-        }
-        return candidates
+        DomainNormalization
+            .specificityCandidates(for: domain)
+            .map(overrideKey(forDomain:))
     }
 }
 

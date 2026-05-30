@@ -1,5 +1,14 @@
 import AppKit
+import AutoCompCore
 import Foundation
+
+// Validation rules (see spec 009-warn-and-block-conflicting-shortcut-bindings):
+// - Each AutoComp command must have a unique KeyboardShortcutBinding; duplicates are invalid because
+//   command(matching:event:) uses first-match semantics across allCases.
+// - "Unsafe" bindings are reserved by the OS or are likely to conflict with common app behavior
+//   (e.g., Command-Q / Command-W) and should not be allowed for AutoComp commands.
+// - Empty bindings are not currently supported: every command always has some binding.
+//   (If we later allow clearing a shortcut, validation should treat nil/cleared as valid.)
 
 enum KeyboardShortcutCommand: String, CaseIterable, Codable, Identifiable, Sendable {
     case acceptNextWord
@@ -129,6 +138,16 @@ struct KeyboardShortcutModifiers: OptionSet, Codable, Equatable, Sendable {
 }
 
 struct KeyboardShortcutBinding: Codable, Equatable, Sendable {
+    /// Sentinel used by the settings recorder to represent a cleared shortcut.
+    ///
+    /// The current settings model does not support persisting a truly "unset" binding,
+    /// so the UI interprets this sentinel as "restore default for that command".
+    static let clear = KeyboardShortcutBinding(
+        keyCode: CapturedInputEventAdapter.deleteKeyCode,
+        modifiers: [],
+        trigger: .keyDown
+    )
+
     let keyCode: UInt16
     let modifiers: KeyboardShortcutModifiers
     let trigger: KeyboardShortcutTrigger
@@ -255,6 +274,45 @@ struct KeyboardShortcutSettings: Codable, Equatable, Sendable {
 
     static let defaults = KeyboardShortcutSettings()
 
+    /// Returns a copy of `settings` with any invalid bindings (duplicates or reserved shortcuts)
+    /// normalized to their command defaults.
+    ///
+    /// This is primarily a migration-safety mechanism: older versions could persist duplicates,
+    /// and `command(matching:event:)` uses first-match semantics which would otherwise make behavior
+    /// unpredictable.
+    static func sanitizingInvalidBindings(in settings: KeyboardShortcutSettings) -> KeyboardShortcutSettings {
+        let coreBindings: [KeyboardShortcutBindingValidation.CommandID: KeyboardShortcutBindingValidation.Binding] =
+            Dictionary(uniqueKeysWithValues: KeyboardShortcutCommand.allCases.map { cmd in
+                (cmd.rawValue, settings[cmd].asCoreBinding)
+            })
+
+        let issues = KeyboardShortcutBindingValidation.validate(
+            coreBindings,
+            commandSortKey: { commandId in
+                KeyboardShortcutCommand(rawValue: commandId)?.title ?? commandId
+            }
+        )
+
+        guard issues.isEmpty == false else {
+            return settings
+        }
+
+        var sanitized = settings
+
+        for issue in issues {
+            switch issue {
+            case let .reservedBinding(command: commandId, binding: _),
+                 let .duplicateBinding(command: commandId, conflictsWith: _, binding: _):
+                guard let command = KeyboardShortcutCommand(rawValue: commandId) else {
+                    continue
+                }
+                sanitized[command] = KeyboardShortcutSettings.defaults[command]
+            }
+        }
+
+        return sanitized
+    }
+
     static let defaultAcceptNextWord = KeyboardShortcutBinding(
         keyCode: CapturedInputEventAdapter.tabKeyCode
     )
@@ -327,6 +385,112 @@ struct KeyboardShortcutSettings: Codable, Equatable, Sendable {
             self[command].matches(type: type, event: event)
         }
     }
+
+    /// Finds the command that currently owns the given binding.
+    ///
+    /// Note: If multiple commands have the same binding (which should be prevented by validation),
+    /// this returns the first match based on `KeyboardShortcutCommand.allCases`.
+    func ownerCommand(for binding: KeyboardShortcutBinding) -> KeyboardShortcutCommand? {
+        KeyboardShortcutCommand.allCases.first { command in
+            self[command] == binding
+        }
+    }
+
+    struct ProposedUpdateRejection: Error, Equatable, Sendable {
+        enum Reason: Equatable, Sendable {
+            case reservedShortcut
+            case duplicateShortcut(conflictsWith: KeyboardShortcutCommand)
+        }
+
+        let command: KeyboardShortcutCommand
+        let binding: KeyboardShortcutBinding
+        let reason: Reason
+    }
+
+    /// Attempts to update the binding for a command, validating against reserved shortcuts and duplicates.
+    ///
+    /// This is intended to be used by the settings UI before persisting.
+    func proposingUpdate(
+        command: KeyboardShortcutCommand,
+        binding: KeyboardShortcutBinding
+    ) -> Result<KeyboardShortcutSettings, ProposedUpdateRejection> {
+        if let owner = ownerCommand(for: binding),
+           owner != command {
+            return .failure(.init(command: command, binding: binding, reason: .duplicateShortcut(conflictsWith: owner)))
+        }
+
+        var proposed = self
+        proposed[command] = binding
+
+        let coreBindings: [KeyboardShortcutBindingValidation.CommandID: KeyboardShortcutBindingValidation.Binding] =
+            Dictionary(uniqueKeysWithValues: KeyboardShortcutCommand.allCases.map { cmd in
+                (cmd.rawValue, proposed[cmd].asCoreBinding)
+            })
+
+        let issues = KeyboardShortcutBindingValidation.validate(
+            coreBindings,
+            commandSortKey: { commandId in
+                KeyboardShortcutCommand(rawValue: commandId)?.title ?? commandId
+            }
+        )
+
+        if let reserved = issues.first(where: { issue in
+            if case let .reservedBinding(command: issueCommand, binding: issueBinding) = issue {
+                return issueCommand == command.rawValue && issueBinding == binding.asCoreBinding
+            }
+            return false
+        }) {
+            if case .reservedBinding = reserved {
+                return .failure(.init(command: command, binding: binding, reason: .reservedShortcut))
+            }
+        }
+
+        if let duplicate = issues.first(where: { issue in
+            if case let .duplicateBinding(command: loser, conflictsWith: winner, binding: issueBinding) = issue {
+                return loser == command.rawValue && issueBinding == binding.asCoreBinding
+            }
+            return false
+        }) {
+            if case let .duplicateBinding(_, conflictsWith: winnerId, _) = duplicate,
+               let winner = KeyboardShortcutCommand(rawValue: winnerId) {
+                return .failure(.init(command: command, binding: binding, reason: .duplicateShortcut(conflictsWith: winner)))
+            }
+        }
+
+        return .success(proposed)
+    }
+}
+
+private extension KeyboardShortcutBinding {
+    var asCoreBinding: KeyboardShortcutBindingValidation.Binding {
+        KeyboardShortcutBindingValidation.Binding(
+            keyCode: keyCode,
+            modifiers: modifiers.asCoreModifiers,
+            trigger: trigger.asCoreTrigger
+        )
+    }
+}
+
+private extension KeyboardShortcutTrigger {
+    var asCoreTrigger: KeyboardShortcutBindingValidation.Binding.Trigger {
+        switch self {
+        case .keyDown:
+            return .keyDown
+        case .flagsChanged:
+            return .flagsChanged
+        }
+    }
+}
+
+private extension KeyboardShortcutModifiers {
+    var asCoreModifiers: KeyboardShortcutKeycapFormatter.Modifiers {
+        var result: KeyboardShortcutKeycapFormatter.Modifiers = []
+        if contains(.command) { result.insert(.command) }
+        if contains(.option) { result.insert(.option) }
+        if contains(.control) { result.insert(.control) }
+        if contains(.shift) { result.insert(.shift) }
+        return result
+    }
 }
 
 final class KeyboardShortcutSettingsStore: @unchecked Sendable {
@@ -343,7 +507,10 @@ final class KeyboardShortcutSettingsStore: @unchecked Sendable {
               let settings = try? JSONDecoder().decode(KeyboardShortcutSettings.self, from: data) else {
             return .defaults
         }
-        return settings
+
+        // Migration safety: older versions may have persisted duplicate/reserved bindings.
+        // We avoid "first-match shadowing" by normalizing on load.
+        return KeyboardShortcutSettings.sanitizingInvalidBindings(in: settings)
     }
 
     func save(_ settings: KeyboardShortcutSettings) {

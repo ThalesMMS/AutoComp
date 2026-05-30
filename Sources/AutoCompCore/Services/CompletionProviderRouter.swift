@@ -159,7 +159,20 @@ public struct CompletionProviderRouter: ClipboardContextAwareCompletionProvider,
             guard let fallbackProvider = fallbackProvider() else {
                 throw error
             }
-            try requireRemoteConsent(for: fallbackKind, scope: .remoteFallback)
+
+            // When local loading fails, capture context for user-facing diagnostics.
+            if activeKind == .localLlama {
+                await LocalModelFailureDiagnosticsSink.shared.record(error: error)
+            }
+
+            // Remote fallback is explicitly opt-in and only attempted after a local failure.
+            // If consent is missing, the original error is surfaced.
+            do {
+                try requireRemoteConsent(for: fallbackKind, scope: .remoteFallback)
+            } catch {
+                throw error
+            }
+
             let suggestion = try await complete(
                 with: fallbackProvider,
                 context: context,
@@ -213,7 +226,20 @@ public struct CompletionProviderRouter: ClipboardContextAwareCompletionProvider,
             guard let fallbackProvider = fallbackProvider() else {
                 throw error
             }
-            try requireRemoteConsent(for: fallbackKind, scope: .remoteFallback)
+
+            // When local loading fails, capture context for user-facing diagnostics.
+            if activeKind == .localLlama {
+                await LocalModelFailureDiagnosticsSink.shared.record(error: error)
+            }
+
+            // Remote fallback is explicitly opt-in and only attempted after a local failure.
+            // If consent is missing, the original error is surfaced.
+            do {
+                try requireRemoteConsent(for: fallbackKind, scope: .remoteFallback)
+            } catch {
+                throw error
+            }
+
             let suggestions = try await completeMultiple(
                 with: fallbackProvider,
                 context: context,

@@ -1001,6 +1001,310 @@ final class SuggestionEngineAcceptanceTests: XCTestCase {
         engine.stop()
     }
 
+    func testGuardrailsBlockAcceptAllOnFocusedElementMismatchAndRequestsRegeneration() async throws {
+        let app = AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1)
+        let initialContext = TextContext(
+            app: app,
+            focusedElementID: "field-a",
+            stableFieldIdentity: StableFieldIdentity(app: app, role: "AXTextArea"),
+            textBeforeCursor: "Please "
+        )
+        let mismatchedContext = TextContext(
+            app: app,
+            focusedElementID: "field-b",
+            stableFieldIdentity: StableFieldIdentity(app: app, role: "AXTextArea"),
+            textBeforeCursor: "Other "
+        )
+
+        let contextProvider = MutableContextProvider(context: initialContext)
+        let completionProvider = CountingCompletionProvider(
+            suggestion: Suggestion(
+                baseContextID: initialContext.id,
+                visibleText: "continue this",
+                latencyMs: 25
+            )
+        )
+        let presenter = RecordingSuggestionPresenter()
+        let engine = SuggestionEngine(
+            contextProvider: contextProvider,
+            completionProvider: completionProvider,
+            presenter: presenter
+        )
+
+        engine.start()
+        defer { engine.stop() }
+
+        await engine.triggerManualSuggestion()
+        try await Task.sleep(nanoseconds: 250_000_000)
+        XCTAssertEqual(engine.currentSuggestion?.visibleText, "continue this")
+
+        // Change focus/element identity before acceptance. Accept should be blocked by guardrails.
+        await contextProvider.updateContext(mismatchedContext)
+        let inserter = RecordingTextInserter()
+        let outcome = await engine.acceptAll(using: inserter)
+
+        XCTAssertEqual(outcome, .passedThrough)
+        XCTAssertEqual(inserter.insertedText, "")
+
+        // Guardrails should clear current suggestion immediately.
+        XCTAssertNil(engine.currentSuggestion)
+        XCTAssertNil(presenter.lastSuggestion)
+
+        // And it should request a fresh suggestion for the live context.
+        try await Task.sleep(nanoseconds: 950_000_000)
+        let callCountAfterRegenerate = await completionProvider.getCallCount()
+        XCTAssertGreaterThanOrEqual(callCountAfterRegenerate, 2)
+    }
+
+    func testGoogleDocsAcceptAllAllowsDirectToOCRIdentityDriftBeforeInsertion() async throws {
+        let app = AppIdentity(bundleID: "com.google.Chrome", displayName: "Google Chrome", processID: 1)
+        let publishedIdentity = StableFieldIdentity(
+            app: app,
+            domain: "docs.google.com",
+            role: "AXTextArea",
+            subrole: "AXDocument",
+            focusedElementFrame: CGRect(x: 320, y: 210, width: 980, height: 720),
+            focusChangeSequence: 1
+        )
+        let ocrIdentity = StableFieldIdentity(
+            app: app,
+            domain: "docs.google.com",
+            role: "AXTextArea",
+            subrole: "AXDocument",
+            focusedElementFrame: CGRect(x: 360, y: 476, width: 640, height: 52),
+            focusChangeSequence: 2
+        )
+        let publishedContext = TextContext(
+            app: app,
+            domain: "docs.google.com",
+            focusedElementID: "docs-direct-field",
+            stableFieldIdentity: publishedIdentity,
+            textBeforeCursor: "Please ",
+            selectedRange: NSRange(location: 7, length: 0),
+            focusedElementRect: CGRect(x: 320, y: 210, width: 980, height: 720)
+        )
+        let ocrContext = TextContext(
+            app: app,
+            domain: "docs.google.com",
+            focusedElementID: "docs-ocr-line",
+            stableFieldIdentity: ocrIdentity,
+            textBeforeCursor: "Please ",
+            selectedRange: NSRange(location: 7, length: 0),
+            focusedElementRect: CGRect(x: 360, y: 476, width: 640, height: 52),
+            caretGeometryQuality: .screenOCR,
+            captureSources: [.accessibility, .screenOCR]
+        )
+        let contextProvider = MutableContextProvider(context: publishedContext)
+        let completionProvider = CountingCompletionProvider(
+            suggestion: Suggestion(
+                baseContextID: publishedContext.id,
+                visibleText: "continue this",
+                latencyMs: 25
+            )
+        )
+        let presenter = RecordingSuggestionPresenter()
+        let engine = SuggestionEngine(
+            contextProvider: contextProvider,
+            completionProvider: completionProvider,
+            presenter: presenter
+        )
+
+        engine.start()
+        defer { engine.stop() }
+
+        await engine.triggerManualSuggestion()
+        try await Task.sleep(nanoseconds: 250_000_000)
+        XCTAssertEqual(engine.currentSuggestion?.visibleText, "continue this")
+
+        await contextProvider.updateContext(ocrContext)
+        let inserter = RecordingTextInserter()
+        let outcome = await engine.acceptAll(using: inserter)
+
+        XCTAssertEqual(outcome, .accepted)
+        XCTAssertEqual(inserter.insertedText, "continue this")
+    }
+
+    func testGoogleDocsAcceptAllAllowsMissingCurrentStableIdentityBeforeInsertion() async throws {
+        let app = AppIdentity(bundleID: "com.google.Chrome", displayName: "Google Chrome", processID: 1)
+        let publishedIdentity = StableFieldIdentity(
+            app: app,
+            domain: "docs.google.com",
+            role: "AXTextArea",
+            subrole: "AXDocument",
+            focusedElementFrame: CGRect(x: 360, y: 430, width: 520, height: 34),
+            focusChangeSequence: 1
+        )
+        let publishedContext = TextContext(
+            app: app,
+            domain: "docs.google.com",
+            focusedElementID: "docs-ax-field",
+            stableFieldIdentity: publishedIdentity,
+            textBeforeCursor: "Please ",
+            selectedRange: NSRange(location: 7, length: 0),
+            focusedElementRect: CGRect(x: 360, y: 430, width: 520, height: 34),
+            caretGeometryQuality: .screenOCR,
+            captureSources: [.accessibility, .screenOCR]
+        )
+        let ocrContext = TextContext(
+            app: app,
+            domain: "docs.google.com",
+            focusedElementID: "docs-ocr-field",
+            stableFieldIdentity: nil,
+            textBeforeCursor: "Please ",
+            selectedRange: NSRange(location: 7, length: 0),
+            focusedElementRect: CGRect(x: 360, y: 476, width: 640, height: 52),
+            caretGeometryQuality: .screenOCR,
+            captureSources: [.accessibility, .screenOCR]
+        )
+        let contextProvider = MutableContextProvider(context: publishedContext)
+        let completionProvider = CountingCompletionProvider(
+            suggestion: Suggestion(
+                baseContextID: publishedContext.id,
+                visibleText: "continue this",
+                latencyMs: 25
+            )
+        )
+        let presenter = RecordingSuggestionPresenter()
+        let engine = SuggestionEngine(
+            contextProvider: contextProvider,
+            completionProvider: completionProvider,
+            presenter: presenter
+        )
+
+        engine.start()
+        defer { engine.stop() }
+
+        await engine.triggerManualSuggestion()
+        try await Task.sleep(nanoseconds: 250_000_000)
+        XCTAssertEqual(engine.currentSuggestion?.visibleText, "continue this")
+
+        await contextProvider.updateContext(ocrContext)
+        let inserter = RecordingTextInserter()
+        let outcome = await engine.acceptAll(using: inserter)
+
+        XCTAssertEqual(outcome, .accepted)
+        XCTAssertEqual(inserter.insertedText, "continue this")
+    }
+
+    func testGoogleDocsAcceptNextWordAllowsCollapsedSelectionRangeDriftBeforeInsertion() async throws {
+        let app = AppIdentity(bundleID: "com.google.Chrome", displayName: "Google Chrome", processID: 1)
+        let publishedIdentity = StableFieldIdentity(
+            app: app,
+            domain: "docs.google.com",
+            role: "AXTextArea",
+            subrole: "AXDocument",
+            focusedElementFrame: CGRect(x: 360, y: 430, width: 520, height: 34),
+            focusChangeSequence: 1
+        )
+        let ocrIdentity = StableFieldIdentity(
+            app: app,
+            domain: "docs.google.com",
+            role: "AXTextArea",
+            subrole: "AXDocument",
+            focusedElementFrame: CGRect(x: 360, y: 476, width: 640, height: 52),
+            focusChangeSequence: 2
+        )
+        let publishedContext = TextContext(
+            app: app,
+            domain: "docs.google.com",
+            focusedElementID: "docs-ax-field",
+            stableFieldIdentity: publishedIdentity,
+            textBeforeCursor: "Please ",
+            selectedRange: NSRange(location: 7, length: 0),
+            focusedElementRect: CGRect(x: 360, y: 430, width: 520, height: 34),
+            caretGeometryQuality: .screenOCR,
+            captureSources: [.accessibility, .screenOCR]
+        )
+        let ocrContext = TextContext(
+            app: app,
+            domain: "docs.google.com",
+            focusedElementID: "docs-ocr-field",
+            stableFieldIdentity: ocrIdentity,
+            textBeforeCursor: "Please ",
+            selectedRange: nil,
+            focusedElementRect: CGRect(x: 360, y: 476, width: 640, height: 52),
+            caretGeometryQuality: .screenOCR,
+            captureSources: [.accessibility, .screenOCR]
+        )
+        let contextProvider = MutableContextProvider(context: publishedContext)
+        let completionProvider = CountingCompletionProvider(
+            suggestion: Suggestion(
+                baseContextID: publishedContext.id,
+                visibleText: "continue this",
+                latencyMs: 25
+            )
+        )
+        let presenter = RecordingSuggestionPresenter()
+        let engine = SuggestionEngine(
+            contextProvider: contextProvider,
+            completionProvider: completionProvider,
+            presenter: presenter
+        )
+
+        engine.start()
+        defer { engine.stop() }
+
+        await engine.triggerManualSuggestion()
+        try await Task.sleep(nanoseconds: 250_000_000)
+        XCTAssertEqual(engine.currentSuggestion?.visibleText, "continue this")
+
+        await contextProvider.updateContext(ocrContext)
+        let inserter = RecordingTextInserter()
+        let outcome = await engine.acceptNextWord(using: inserter)
+
+        XCTAssertEqual(outcome, .accepted)
+        XCTAssertEqual(inserter.insertedText, "continue ")
+    }
+
+    func testGuardrailsBlockAcceptAllOnStaleSuggestionAndRequestsRegeneration() async throws {
+        let app = AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1)
+        let context = TextContext(
+            app: app,
+            focusedElementID: "field-a",
+            stableFieldIdentity: StableFieldIdentity(app: app, role: "AXTextArea"),
+            textBeforeCursor: "Please "
+        )
+
+        let contextProvider = MutableContextProvider(context: context)
+        let completionProvider = CountingCompletionProvider(
+            suggestion: Suggestion(
+                baseContextID: context.id,
+                visibleText: "continue this",
+                latencyMs: 25
+            )
+        )
+        let presenter = RecordingSuggestionPresenter()
+        let engine = SuggestionEngine(
+            contextProvider: contextProvider,
+            completionProvider: completionProvider,
+            presenter: presenter
+        )
+
+        engine.start()
+        defer { engine.stop() }
+
+        await engine.triggerManualSuggestion()
+        try await Task.sleep(nanoseconds: 250_000_000)
+        XCTAssertEqual(engine.currentSuggestion?.visibleText, "continue this")
+
+        // Wait past the freshness window before attempting acceptance.
+        // (Policy defined in core guardrails. Keep this test tolerant and just sleep past it.)
+        try await Task.sleep(nanoseconds: 12_000_000_000)
+
+        let inserter = RecordingTextInserter()
+        let outcome = await engine.acceptAll(using: inserter)
+
+        XCTAssertEqual(outcome, .passedThrough)
+        XCTAssertEqual(inserter.insertedText, "")
+        XCTAssertNil(engine.currentSuggestion)
+        XCTAssertNil(presenter.lastSuggestion)
+
+        // Regeneration should have been requested.
+        try await Task.sleep(nanoseconds: 950_000_000)
+        let callCountAfterRegenerate = await completionProvider.getCallCount()
+        XCTAssertGreaterThanOrEqual(callCountAfterRegenerate, 2)
+    }
+
     func testRiskyHostAcceptanceBlocksUnclearEditableTarget() async throws {
         let app = AppIdentity(bundleID: "com.microsoft.VSCode", displayName: "VS Code", processID: 1)
         let context = TextContext(
@@ -3612,11 +3916,15 @@ private final class RecordingSuggestionPresenter: SuggestionPresenter {
 private final class RecordingTextInserter: TextInserter {
     private(set) var insertedText = ""
 
+    func insert(_ text: String) throws {
+        insertedText += text
+    }
+
     func acceptNextWord(from suggestion: inout Suggestion) async throws -> String? {
         guard let token = suggestion.acceptNextWord() else {
             return nil
         }
-        insertedText += token
+        try insert(token)
         return token
     }
 
@@ -3624,7 +3932,7 @@ private final class RecordingTextInserter: TextInserter {
         guard let token = suggestion.acceptAll() else {
             return nil
         }
-        insertedText += token
+        try insert(token)
         return token
     }
 }
@@ -3647,7 +3955,7 @@ private final class ReplacingSelectionTextInserter: TextInserter {
         guard let token = suggestion.acceptNextWord() else {
             return nil
         }
-        insert(token)
+        try insert(token)
         return token
     }
 
@@ -3655,11 +3963,11 @@ private final class ReplacingSelectionTextInserter: TextInserter {
         guard let token = suggestion.acceptAll() else {
             return nil
         }
-        insert(token)
+        try insert(token)
         return token
     }
 
-    private func insert(_ text: String) {
+    func insert(_ text: String) throws {
         let replacementRange = NSRange(
             location: insertionLocation,
             length: hasReplacedSelection ? 0 : selectedRange.length

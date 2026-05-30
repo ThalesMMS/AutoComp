@@ -6,6 +6,9 @@ import SwiftUI
 
 @MainActor
 final class AppController: ObservableObject {
+    private static let onboardingWindowContentSize = NSSize(width: 560, height: 560)
+    private static let onboardingWindowMinimumContentSize = NSSize(width: 520, height: 440)
+    private static let onboardingWindowMaximumContentSize = NSSize(width: 680, height: 600)
     private static let settingsWindowMinimumContentSize = NSSize(width: 880, height: 560)
 
     @Published var selectedSettingsSection: SettingsSection = .permissions
@@ -20,6 +23,7 @@ final class AppController: ObservableObject {
     let focusTrackingModel: FocusTrackingModel
     let suggestionEngine: SuggestionEngine
     let shortcutSettingsStore: KeyboardShortcutSettingsStore
+    let healthSnapshotService: HealthSnapshotService
     let remoteCompletionConsentStore: RemoteCompletionConsentStore
     let localLlamaRuntimeStatusStore: LocalLlamaRuntimeStatusStore
     let debugOptionsStore: AutoCompDebugOptionsStore
@@ -43,6 +47,7 @@ final class AppController: ObservableObject {
     private var onboardingWindow: NSWindow?
     private var settingsWindow: NSWindow?
     private var cancellables: Set<AnyCancellable> = []
+    private var hasStarted = false
 
     convenience init() {
         self.init(environment: AutoCompAppEnvironment())
@@ -58,6 +63,7 @@ final class AppController: ObservableObject {
         self.focusTrackingModel = environment.focusTrackingModel
         self.suggestionEngine = environment.suggestionEngine
         self.shortcutSettingsStore = environment.shortcutSettingsStore
+        self.healthSnapshotService = environment.healthSnapshotService
         self.remoteCompletionConsentStore = environment.remoteCompletionConsentStore
         self.localLlamaRuntimeStatusStore = environment.localLlamaRuntimeStatusStore
         self.debugOptionsStore = environment.debugOptionsStore
@@ -102,9 +108,12 @@ final class AppController: ObservableObject {
         installationLocationService.refresh()
         permissionService.startMonitoring()
         permissionService.refresh()
-        acceptanceService.recoverPendingPasteboardInsertionIfNeeded()
         refreshCompletionBackendSettings()
-        suggestionEngine.start()
+        if !hasStarted {
+            acceptanceService.recoverPendingPasteboardInsertionIfNeeded()
+            suggestionEngine.start()
+            hasStarted = true
+        }
         startKeyboardShortcuts()
     }
 
@@ -181,6 +190,7 @@ final class AppController: ObservableObject {
         suggestionEngine.stop()
         keyboardShortcuts.stop()
         permissionService.stopMonitoring()
+        hasStarted = false
     }
 
     func relaunch() {
@@ -426,7 +436,9 @@ final class AppController: ObservableObject {
     func showOnboardingWindow() {
         let window = onboardingWindow ?? makeWindow(
             title: "AutoComp Onboarding",
-            size: NSSize(width: 560, height: 500),
+            size: Self.onboardingWindowContentSize,
+            minSize: Self.onboardingWindowMinimumContentSize,
+            maxSize: Self.onboardingWindowMaximumContentSize,
             content: OnboardingView()
                 .environmentObject(self)
                 .environmentObject(permissionService)
@@ -456,6 +468,7 @@ final class AppController: ObservableObject {
         title: String,
         size: NSSize,
         minSize: NSSize? = nil,
+        maxSize: NSSize? = nil,
         content: Content
     ) -> NSWindow {
         let window = NSWindow(
@@ -468,6 +481,10 @@ final class AppController: ObservableObject {
         if let minSize {
             window.minSize = minSize
             window.contentMinSize = minSize
+        }
+        if let maxSize {
+            window.contentMaxSize = maxSize
+            window.maxSize = window.frameRect(forContentRect: NSRect(origin: .zero, size: maxSize)).size
         }
         window.center()
         window.isReleasedWhenClosed = false
@@ -496,6 +513,7 @@ final class AppController: ObservableObject {
 }
 
 enum SettingsSection: String, CaseIterable, Identifiable {
+    case health = "Health"
     case permissions = "Permissions"
     case apps = "Apps"
     case privacy = "Privacy"
@@ -506,6 +524,8 @@ enum SettingsSection: String, CaseIterable, Identifiable {
 
     var systemImage: String {
         switch self {
+        case .health:
+            return "heart.text.square"
         case .permissions:
             return "lock.shield"
         case .apps:

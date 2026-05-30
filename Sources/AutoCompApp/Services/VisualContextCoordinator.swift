@@ -3,6 +3,12 @@ import CoreGraphics
 import Foundation
 
 final class VisualContextCoordinator: StableFieldVisualContextProvider, VisualContextSessionClearing, @unchecked Sendable {
+    var canAttemptCapture: Bool {
+        // Non-invasive eligibility signal used for activation gating.
+        // This does not attempt to capture; it only reflects whether capture could be attempted.
+        screenCaptureAllowed()
+    }
+
     private let privacyStore: PrivacySettingsStore
     private let visualTextCapturer: any VisualTextCapturing
     private let visualContextSummarizer: any VisualContextSummarizing

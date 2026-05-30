@@ -39,6 +39,8 @@ enum LeakedShortcutRepairResult: Equatable {
     case failed(statusMessage: String)
 }
 
+private let acceptanceGuardLogger = AutoCompLogger(category: "acceptance-guard")
+
 enum AcceptanceSessionValidationResult: Equatable {
     case valid
     case passedThrough(AcceptanceSessionPassThroughReason)
@@ -161,12 +163,15 @@ final class AcceptanceSessionController {
         guard context.app == state.session.target.app,
               context.domain == state.session.target.domain else {
             clearAll()
+            acceptanceGuardLogger.info("acceptance rejected reason=target-changed")
             return .passedThrough(.targetChanged)
         }
 
         let sameFocusedElement = sameFocusedElement(context: context, stateFocusIdentity: state.focusIdentity)
+            || isSameGoogleDocsTextTarget(context: context, state: state)
         guard sameFocusedElement else {
             clearAll()
+            acceptanceGuardLogger.info("acceptance rejected reason=target-changed")
             return .passedThrough(.targetChanged)
         }
 
@@ -196,6 +201,7 @@ final class AcceptanceSessionController {
             return .valid
         case .targetChanged:
             clearAll()
+            acceptanceGuardLogger.info("acceptance rejected reason=target-changed")
             return .passedThrough(.targetChanged)
         case .typedThrough, .diverged, .exhausted:
             clearAll()
@@ -295,7 +301,8 @@ final class AcceptanceSessionController {
             return .cleared
         }
 
-        guard sameFocusedElement(context: context, stateFocusIdentity: state.focusIdentity) else {
+        guard sameFocusedElement(context: context, stateFocusIdentity: state.focusIdentity)
+            || isSameGoogleDocsCompletedAcceptAllTextTarget(context: context, state: state) else {
             GeometryDebug.log("completed-accept-all cleared reason=focused-target")
             completedAcceptAllState = nil
             return .cleared
@@ -371,6 +378,7 @@ final class AcceptanceSessionController {
         }
 
         let sameFocusedElement = sameFocusedElement(context: context, stateFocusIdentity: state.focusIdentity)
+            || isSameGoogleDocsTextTarget(context: context, state: state)
         guard sameFocusedElement else {
             acceptanceState = nil
             return .cleared
@@ -530,12 +538,47 @@ final class AcceptanceSessionController {
         return contextFocusIdentity.matchesStableField(stateFocusIdentity)
             || contextFocusIdentity.matches(stateFocusIdentity)
             || approximatelySameRect(context.focusedElementRect, stateFocusIdentity.focusedElementRect)
-            || isSameGoogleDocsBrailleLineTarget(
+            || isSameGoogleDocsVolatileLineTarget(
                 app: context.app,
                 domain: context.domain,
                 context.focusedElementRect,
                 stateFocusIdentity.focusedElementRect
             )
+    }
+
+    private func isSameGoogleDocsTextTarget(context: TextContext, state: AcceptanceState) -> Bool {
+        guard isGoogleDocsChromeContext(app: state.session.target.app, domain: state.session.target.domain),
+              context.app == state.session.target.app,
+              context.domain == state.session.target.domain,
+              isSelectionCompatible(context.selectedText, state.session.target.selectedText) else {
+            return false
+        }
+
+        return context.textBeforeCursor == state.session.baseTextBeforeCursor
+            || context.textBeforeCursor == state.session.expectedTextBeforeCursor
+    }
+
+    private func isSameGoogleDocsCompletedAcceptAllTextTarget(
+        context: TextContext,
+        state: CompletedAcceptAllState
+    ) -> Bool {
+        guard isGoogleDocsChromeContext(app: state.app, domain: state.domain),
+              context.app == state.app,
+              context.domain == state.domain else {
+            return false
+        }
+
+        return completedAcceptAllTextMatchesExpected(context.textBeforeCursor, state: state)
+            || isCompletedAcceptAllPotentialDelayedEcho(context.textBeforeCursor, state: state)
+    }
+
+    private func isGoogleDocsChromeContext(app: AppIdentity, domain: String?) -> Bool {
+        app.bundleID == "com.google.Chrome"
+            && domain?.contains("docs.google.com") == true
+    }
+
+    private func isSelectionCompatible(_ lhs: String?, _ rhs: String?) -> Bool {
+        ((lhs?.isEmpty ?? true) && (rhs?.isEmpty ?? true)) || lhs == rhs
     }
 
     private func approximatelySameRect(_ lhs: CGRect?, _ rhs: CGRect?) -> Bool {
@@ -550,7 +593,7 @@ final class AcceptanceSessionController {
             && abs(lhs.height - rhs.height) <= tolerance
     }
 
-    private func isSameGoogleDocsBrailleLineTarget(
+    private func isSameGoogleDocsVolatileLineTarget(
         app: AppIdentity,
         domain: String?,
         _ lhs: CGRect?,
@@ -563,18 +606,8 @@ final class AcceptanceSessionController {
             return false
         }
 
-        return isGoogleDocsBrailleLineMetric(lhs)
-            && isGoogleDocsBrailleLineMetric(rhs)
-    }
-
-    private func isGoogleDocsBrailleLineMetric(_ rect: CGRect) -> Bool {
-        rect.minX.isFinite
-            && rect.minY.isFinite
-            && rect.width.isFinite
-            && rect.height.isFinite
-            && rect.width >= 80
-            && rect.height > 0
-            && rect.height <= 4
+        return StableFieldIdentity.isGoogleDocsVolatileLineMetric(lhs)
+            && StableFieldIdentity.isGoogleDocsVolatileLineMetric(rhs)
     }
 }
 
@@ -611,7 +644,7 @@ private enum LeakedShortcutAction {
     }
 
     var statusMessage: String {
-        "Accepted leaked Tab"
+        "Accepted leaked shortcut"
     }
 }
 

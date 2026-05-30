@@ -42,7 +42,7 @@ Backend modes:
 
 - Remote OpenAI-compatible sends autocomplete text to the configured endpoint.
 - Apple Intelligence uses FoundationModels only when the framework is available and the OS supports it; otherwise the app reports the backend as unavailable. Remote fallback is opt-in. Settings > Model shows Apple availability, OS/SDK requirement text, fallback state, and the last Apple error.
-- Local in-process is available only in app builds that link the optional llama.cpp runtime and have a configured GGUF model file. The default package build does not link that runtime. Set `AUTOCOMP_ENABLE_LLAMA_RUNTIME=1` to build it through `pkg-config llama`, or set both `AUTOCOMP_LLAMA_CFLAGS` and `AUTOCOMP_LLAMA_LIBS` to provide explicit compiler and linker flags. Remote fallback is opt-in. Settings > Model shows the local runtime state, model path, load state, last local error, memory limit, and remote fallback state.
+- Local in-process is available only in app builds that link the optional llama.cpp runtime and have a configured GGUF model file. The default package build does not link that runtime. Set `AUTOCOMP_ENABLE_LLAMA_RUNTIME=1` to build it through `pkg-config llama`, or set both `AUTOCOMP_LLAMA_CFLAGS` and `AUTOCOMP_LLAMA_LIBS` to provide explicit compiler and linker flags. Remote fallback is opt-in. Settings > Model shows the local runtime state, model path, load state, last local error, memory limit, remote fallback state, and a diagnostics report that checks the GGUF file, runtime dylibs, architecture compatibility, and estimated memory fit.
 
 AutoComp's baseline is macOS 14+. Apple Intelligence remains conditional and may require a newer macOS release such as macOS 26. Local in-process completion is also conditional; the app should not be treated as local-capable unless Settings reports both runtime and model file availability.
 
@@ -56,6 +56,11 @@ To validate a local-runtime build environment before enabling it, run:
 ./script/check_llama_pkg_config.sh
 AUTOCOMP_ENABLE_LLAMA_RUNTIME=1 swift build
 ```
+
+To validate the **local model diagnostics** UX (GGUF validation, dylib discovery, architecture checks, and memory-fit estimates), use:
+
+- Manual checklist: `Docs/LocalModelDiagnosticsManualQA.md`
+- Troubleshooting guide: `Docs/TroubleshootingLocalModels.md`
 
 If `pkg-config llama` is unavailable or incomplete, provide the same flags manually:
 

@@ -30,6 +30,8 @@ struct SettingsRootView: View {
     @ViewBuilder
     private var selectedSectionView: some View {
         switch controller.selectedSettingsSection {
+        case .health:
+            HealthDashboardView()
         case .permissions:
             PermissionSettingsView()
         case .apps:
@@ -163,6 +165,53 @@ struct AppCompatibilitySettingsView: View {
         .sorted { $0.domain < $1.domain }
     }
 
+    private var domainRuleConflicts: [DomainRuleConflictRow] {
+        let domains = domainRows.map(\.domain)
+        var conflicts: [DomainRuleConflictRow] = []
+
+        for i in 0..<domains.count {
+            for j in (i + 1)..<domains.count {
+                let a = domains[i]
+                let b = domains[j]
+                if domainsConflict(a: a, b: b) {
+                    conflicts.append(DomainRuleConflictRow(domainA: a, domainB: b))
+                }
+            }
+        }
+
+        return conflicts.sorted { lhs, rhs in
+            if lhs.domainA != rhs.domainA { return lhs.domainA < rhs.domainA }
+            return lhs.domainB < rhs.domainB
+        }
+    }
+
+    private func domainsConflict(a: String, b: String) -> Bool {
+        let hostA = DomainNormalization.canonicalDomainStringAllowingEmpty(from: a).split(separator: "/", omittingEmptySubsequences: true).first.map(String.init) ?? ""
+        let hostB = DomainNormalization.canonicalDomainStringAllowingEmpty(from: b).split(separator: "/", omittingEmptySubsequences: true).first.map(String.init) ?? ""
+        guard !hostA.isEmpty, !hostB.isEmpty else {
+            return false
+        }
+
+        if hostA == hostB {
+            return true
+        }
+
+        // Treat a rule on a parent domain as overlapping with any subdomain rule.
+        // Example: example.com overlaps foo.example.com.
+        if hostA.hasSuffix("." + hostB) || hostB.hasSuffix("." + hostA) {
+            return true
+        }
+
+        return false
+    }
+
+    private struct DomainRuleConflictRow: Identifiable {
+        let domainA: String
+        let domainB: String
+
+        var id: String { "\(domainA)|\(domainB)" }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
@@ -192,6 +241,25 @@ struct AppCompatibilitySettingsView: View {
                     } else {
                         ForEach(domainRows) { row in
                             domainRuleRow(row)
+                        }
+
+                        let conflicts = domainRuleConflicts
+                        if !conflicts.isEmpty {
+                            Divider()
+                            VStack(alignment: .leading, spacing: 6) {
+                                Label("Some rules overlap", systemImage: "exclamationmark.triangle")
+                                    .foregroundStyle(.orange)
+                                Text("Overlapping rules can both match the same host. The more specific rule wins.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+
+                                ForEach(conflicts) { conflict in
+                                    Text("• \(conflict.domainA) ↔ \(conflict.domainB)")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            .padding(.vertical, 6)
                         }
                     }
                 }
@@ -232,6 +300,7 @@ struct AppCompatibilitySettingsView: View {
             .labelsHidden()
             .pickerStyle(.menu)
             .frame(width: 130)
+            .help(newDomainMode.helpText)
 
             Button {
                 addDomainRule()
@@ -239,7 +308,7 @@ struct AppCompatibilitySettingsView: View {
                 Image(systemName: "plus")
             }
             .help("Add domain rule")
-            .disabled(CompatibilityCatalog.normalizedDomain(domainText).isEmpty)
+            .disabled(DomainNormalization.canonicalDomainStringAllowingEmpty(from: domainText).isEmpty)
         }
     }
 
@@ -265,6 +334,7 @@ struct AppCompatibilitySettingsView: View {
             }
             .pickerStyle(.menu)
             .frame(width: 130)
+            .help((overrides[CompatibilityCatalog.overrideKey(forDomain: row.domain)] ?? .manualOnly).helpText)
 
             Button {
                 removeDomainRule(row.domain)
@@ -341,7 +411,7 @@ struct AppCompatibilitySettingsView: View {
     }
 
     private func addDomainRule() {
-        let domain = CompatibilityCatalog.normalizedDomain(domainText)
+        let domain = DomainNormalization.canonicalDomainStringAllowingEmpty(from: domainText)
         guard !domain.isEmpty else {
             return
         }
@@ -665,7 +735,8 @@ struct PrivacySettingsView: View {
     }
 
     private var normalizedDraftPrivacyDomain: String {
-        PrivacySettings.normalizedDomain(draftPrivacyDomain)
+        // PrivacySettings.normalizedDomain legacy contract: domain input is canonicalized before saving.
+        DomainNormalization.canonicalDomainStringAllowingEmpty(from: draftPrivacyDomain)
     }
 
     private func remoteBackendExposure(sourceEnabled: Bool) -> String {
@@ -1061,6 +1132,7 @@ struct ShortcutSettingsView: View {
     @EnvironmentObject private var controller: AppController
     @State private var settings = KeyboardShortcutSettings.defaults
     @State private var recordingCommand: KeyboardShortcutCommand?
+    @State private var preRecordingBinding: KeyboardShortcutBinding?
 
     var body: some View {
         Form {
@@ -1079,6 +1151,7 @@ struct ShortcutSettingsView: View {
                 Button("Restore Defaults") {
                     settings = .defaults
                     recordingCommand = nil
+                    preRecordingBinding = nil
                     controller.saveKeyboardShortcutSettings(settings)
                 }
             }
@@ -1096,18 +1169,40 @@ struct ShortcutSettingsView: View {
             Text(command.title)
             Spacer()
             ShortcutRecorderButton(
+                label: command.title,
                 binding: settings[command],
                 isRecording: recordingCommand == command,
                 startRecording: {
+                    // Cancel any other in-flight recording and restore its previous value.
+                    if let recordingCommand, let preRecordingBinding {
+                        settings[recordingCommand] = preRecordingBinding
+                    }
+
+                    preRecordingBinding = settings[command]
                     recordingCommand = command
                 },
                 record: { binding in
+                    // Commit the new shortcut immediately.
                     settings[command] = binding
+
                     recordingCommand = nil
+                    preRecordingBinding = nil
                     controller.saveKeyboardShortcutSettings(settings)
+
+                    // Announce the successful commit for VoiceOver users.
+                    let announcement = NSAccessibility.Notification.announcementRequested
+                    let userInfo: [NSAccessibility.NotificationUserInfoKey: Any] = [
+                        .announcement: "Saved shortcut",
+                        .priority: NSAccessibilityPriorityLevel.high.rawValue
+                    ]
+                    NSAccessibility.post(element: NSApp as Any, notification: announcement, userInfo: userInfo)
                 },
                 cancel: {
+                    if let preRecordingBinding {
+                        settings[command] = preRecordingBinding
+                    }
                     recordingCommand = nil
+                    preRecordingBinding = nil
                 }
             )
         }
@@ -1115,25 +1210,82 @@ struct ShortcutSettingsView: View {
 }
 
 private struct ShortcutRecorderButton: View {
+    let label: String
     let binding: KeyboardShortcutBinding
     let isRecording: Bool
     let startRecording: () -> Void
     let record: (KeyboardShortcutBinding) -> Void
     let cancel: () -> Void
 
+    @State private var inlineConfirmationText: String?
+    @State private var pendingDismissTask: Task<Void, Never>?
+
     var body: some View {
-        Button(isRecording ? "Recording..." : binding.displayName) {
-            startRecording()
-        }
-        .buttonStyle(.bordered)
-        .background(
-            ShortcutCaptureView(
-                isActive: isRecording,
-                record: record,
-                cancel: cancel
+        VStack(alignment: .trailing, spacing: 4) {
+            Button(isRecording ? "Recording..." : binding.displayName) {
+                startRecording()
+            }
+            .buttonStyle(.bordered)
+            .accessibilityLabel(label)
+            .accessibilityValue(isRecording ? "Recording" : (binding.displayName.isEmpty ? "Not set" : binding.displayName))
+            .accessibilityHint(
+                isRecording
+                    ? "Type a key combination. Press Escape to cancel."
+                    : "Press to record a new shortcut."
             )
-            .frame(width: 0, height: 0)
-        )
+            .background(
+                ShortcutCaptureView(
+                    isActive: isRecording,
+                    record: { binding in
+                        record(binding)
+                        showInlineConfirmation("Saved")
+                    },
+                    cancel: cancel
+                )
+                .frame(width: 0, height: 0)
+            )
+
+            if isRecording {
+                Text("Press Esc to cancel")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    // Keep the guidance accessible even if VoiceOver focus remains on the button.
+                    .accessibilityLabel("Press Escape to cancel")
+            } else if let inlineConfirmationText {
+                Text(inlineConfirmationText)
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    // Prevent layout jumps by reserving roughly the same height as the guidance row.
+                    .transition(.opacity)
+                    .accessibilityLabel(inlineConfirmationText)
+            }
+        }
+        .onChange(of: isRecording) { _, newValue in
+            if newValue {
+                clearInlineConfirmation()
+            }
+        }
+        .onDisappear {
+            pendingDismissTask?.cancel()
+        }
+    }
+
+    private func showInlineConfirmation(_ text: String) {
+        inlineConfirmationText = text
+
+        pendingDismissTask?.cancel()
+        pendingDismissTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            withAnimation(.easeOut(duration: 0.15)) {
+                inlineConfirmationText = nil
+            }
+        }
+    }
+
+    private func clearInlineConfirmation() {
+        pendingDismissTask?.cancel()
+        pendingDismissTask = nil
+        inlineConfirmationText = nil
     }
 }
 
@@ -1172,6 +1324,7 @@ private final class ShortcutCaptureNSView: NSView {
 
     override func keyDown(with event: NSEvent) {
         guard isActive else {
+            super.keyDown(with: event)
             return
         }
 
@@ -1183,6 +1336,40 @@ private final class ShortcutCaptureNSView: NSView {
         }
 
         record?(KeyboardShortcutBinding(event: event, trigger: .keyDown))
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        // Clicking elsewhere in the window should cancel recording so we don't
+        // leave the recorder in a stuck state.
+        if isActive {
+            cancel?()
+            return
+        }
+        super.mouseDown(with: event)
+    }
+
+    override func resignFirstResponder() -> Bool {
+        let resigned = super.resignFirstResponder()
+        if isActive {
+            cancel?()
+        }
+        return resigned
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil, isActive {
+            cancel?()
+        }
+    }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        super.viewWillMove(toWindow: newWindow)
+
+        // Losing the hosting window (settings closed) should cancel any in-flight recording.
+        if newWindow == nil, isActive {
+            cancel?()
+        }
     }
 
     override func flagsChanged(with event: NSEvent) {
@@ -1207,7 +1394,7 @@ struct ModelSettingsView: View {
     @StateObject private var modelDownloadManager = ModelDownloadManager()
     @StateObject private var runtimeBootstrapModel = RuntimeBootstrapModel()
     @State private var draft = CompletionBackendSettings()
-    @State private var selectedRemotePreset = RemoteEndpointPreset.custom
+    @State private var selectedRemotePreset = AutoCompCore.RemoteEndpointPreset.custom
     @State private var connectionTestState = RemoteConnectionTestState.idle
     @State private var localModelActionState: LocalModelActionState?
     @State private var playgroundPrefix = "Please write "
@@ -1299,19 +1486,19 @@ struct ModelSettingsView: View {
                     .foregroundStyle(.secondary)
 
                 Picker("Endpoint preset", selection: $selectedRemotePreset) {
-                    ForEach(RemoteEndpointPreset.allCases) { preset in
+                    ForEach(AutoCompCore.RemoteEndpointPreset.allCases) { preset in
                         Text(preset.title).tag(preset)
                     }
                 }
                 .onChange(of: selectedRemotePreset) { _, preset in
-                    guard let baseURL = preset.baseURL else {
+                    guard let baseURL = preset.defaultBaseURL else {
                         return
                     }
                     draft.remoteBaseURL = baseURL
                 }
                 TextField("Base URL", text: $draft.remoteBaseURL)
                     .onChange(of: draft.remoteBaseURL) { _, baseURL in
-                        selectedRemotePreset = RemoteEndpointPreset.matching(baseURL)
+                        selectedRemotePreset = AutoCompCore.RemoteEndpointPreset.preset(forBaseURL: baseURL)
                     }
                 SecureField("API key", text: $draft.remoteAPIKey)
                 TextField("Model", text: $draft.remoteModel)
@@ -1443,7 +1630,7 @@ struct ModelSettingsView: View {
                 TextField("Max RAM bytes", text: localMaxRAMBinding)
                 Toggle("Fallback to remote if local fails", isOn: $draft.fallbackToRemoteOnLocalFailure)
                 if draft.fallbackToRemoteOnLocalFailure {
-                    Text("Remote fallback is enabled: if local completion fails, autocomplete text may be sent to \(draft.remoteBaseURL).")
+                    Text("Remote fallback is enabled: if local completion fails, autocomplete text may be sent after explicit consent below.")
                         .font(.caption)
                         .foregroundStyle(.orange)
                 }
@@ -1498,7 +1685,7 @@ struct ModelSettingsView: View {
                 Toggle("Fallback to remote if Apple fails", isOn: $draft.fallbackToRemoteOnAppleIntelligenceFailure)
                 LabeledContent("Fallback", value: diagnostic.fallbackTitle)
                 if draft.fallbackToRemoteOnAppleIntelligenceFailure {
-                    Text("Apple Intelligence fallback uses the remote backend settings above.")
+                    Text("Apple Intelligence fallback uses the remote backend settings above. Remote fallback is enabled: if Apple Intelligence fails, autocomplete text may be sent after explicit consent below.")
                         .font(.caption)
                         .foregroundStyle(.orange)
                 }
@@ -1548,7 +1735,7 @@ struct ModelSettingsView: View {
             }
 
             Section("Privacy") {
-                Text("Autocomplete text is sent to the request destination above, and to the remote backend only when remote fallback is enabled after a local or Apple failure.")
+                Text("autocomplete text may be sent to the request destination above, and to the remote backend only when remote fallback is enabled after a local or Apple failure.")
                     .foregroundStyle(.secondary)
             }
         }
@@ -1558,7 +1745,7 @@ struct ModelSettingsView: View {
         .onAppear {
             draft = controller.completionBackendSettings
             debugOptions = controller.debugOptions()
-            selectedRemotePreset = RemoteEndpointPreset.matching(draft.remoteBaseURL)
+            selectedRemotePreset = AutoCompCore.RemoteEndpointPreset.preset(forBaseURL: draft.remoteBaseURL)
             connectionTestState = .idle
             backendSaveMessage = nil
             modelDownloadManager.onModelDirectoryChanged = {
@@ -1572,14 +1759,14 @@ struct ModelSettingsView: View {
     private func saveBackend() {
         controller.saveCompletionBackendSettings(draft)
         draft = controller.completionBackendSettings
-        selectedRemotePreset = RemoteEndpointPreset.matching(draft.remoteBaseURL)
+        selectedRemotePreset = AutoCompCore.RemoteEndpointPreset.preset(forBaseURL: draft.remoteBaseURL)
         backendSaveMessage = savedBackendMessage(for: draft)
     }
 
     private func reloadSavedBackend() {
         controller.refreshCompletionBackendSettings()
         draft = controller.completionBackendSettings
-        selectedRemotePreset = RemoteEndpointPreset.matching(draft.remoteBaseURL)
+        selectedRemotePreset = AutoCompCore.RemoteEndpointPreset.preset(forBaseURL: draft.remoteBaseURL)
         connectionTestState = .idle
         backendSaveMessage = nil
     }
@@ -1818,54 +2005,6 @@ struct ModelSettingsView: View {
     }
 }
 
-private enum RemoteEndpointPreset: String, CaseIterable, Identifiable {
-    case lmStudio
-    case ollama
-    case llamaCpp
-    case vLLMLocalAI
-    case custom
-
-    var id: String { rawValue }
-
-    var title: String {
-        switch self {
-        case .lmStudio:
-            return "LM Studio"
-        case .ollama:
-            return "Ollama"
-        case .llamaCpp:
-            return "llama.cpp server"
-        case .vLLMLocalAI:
-            return "vLLM / LocalAI"
-        case .custom:
-            return "Custom"
-        }
-    }
-
-    var baseURL: String? {
-        switch self {
-        case .lmStudio:
-            return "http://127.0.0.1:1234"
-        case .ollama:
-            return "http://127.0.0.1:11434"
-        case .llamaCpp:
-            return "http://127.0.0.1:8080"
-        case .vLLMLocalAI:
-            return "http://127.0.0.1:8000"
-        case .custom:
-            return nil
-        }
-    }
-
-    static func matching(_ baseURL: String) -> RemoteEndpointPreset {
-        allCases.first { preset in
-            guard let presetURL = preset.baseURL else {
-                return false
-            }
-            return presetURL == baseURL
-        } ?? .custom
-    }
-}
 
 private enum RemoteConnectionTestState: Equatable {
     case idle

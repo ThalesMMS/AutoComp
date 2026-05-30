@@ -106,6 +106,13 @@ struct MenuBarContentView: View {
             }
 
             Button {
+                controller.showSettingsWindow()
+                controller.selectedSettingsSection = .health
+            } label: {
+                Label("Health", systemImage: SettingsSection.health.systemImage)
+            }
+
+            Button {
                 checkForUpdates()
             } label: {
                 Label("Check for Updates...", systemImage: "arrow.down.circle")
@@ -137,9 +144,6 @@ struct MenuBarContentView: View {
         }
         .padding()
         .frame(width: 320)
-        .onAppear {
-            controller.start()
-        }
     }
 
     private var menuStatusSnapshot: MenuStatusSnapshot {

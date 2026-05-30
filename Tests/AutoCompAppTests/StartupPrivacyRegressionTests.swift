@@ -139,6 +139,15 @@ final class StartupPrivacyRegressionTests: XCTestCase {
         XCTAssertFalse(environmentSource.contains("RedactingTelemetryClient"))
     }
 
+    func testOpeningMenuDoesNotRestartController() throws {
+        let menuSource = try String(
+            contentsOf: try packageRoot().appendingPathComponent("Sources/AutoCompApp/Views/MenuBarContentView.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertFalse(menuSource.contains("controller.start()"))
+    }
+
     private func makePrivacyStore(
         clipboardEnabled: Bool,
         screenEnabled: Bool

@@ -31,6 +31,17 @@ public enum SuggestionActivationMode: String, Codable, CaseIterable, Sendable, I
             return "Disabled"
         }
     }
+
+    public var helpText: String {
+        switch self {
+        case .automatic:
+            return "Autocomplete can activate automatically while you type."
+        case .manualOnly:
+            return "Autocomplete will not activate automatically. Use the manual trigger shortcut to request suggestions."
+        case .disabled:
+            return "Autocomplete is turned off for this target."
+        }
+    }
 }
 
 public typealias CompatibilityOverrideMode = SuggestionActivationMode

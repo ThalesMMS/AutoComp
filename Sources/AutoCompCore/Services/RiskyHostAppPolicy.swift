@@ -123,20 +123,6 @@ public struct RiskyHostAppPolicy: Sendable {
     }
 
     private static func normalizedDomain(_ domain: String) -> String {
-        var normalized = domain
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-
-        if normalized.hasPrefix("https://") {
-            normalized.removeFirst("https://".count)
-        } else if normalized.hasPrefix("http://") {
-            normalized.removeFirst("http://".count)
-        }
-
-        if let fragmentIndex = normalized.firstIndex(where: { $0 == "?" || $0 == "#" }) {
-            normalized = String(normalized[..<fragmentIndex])
-        }
-
-        return normalized.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        DomainNormalization.canonicalDomainStringAllowingEmpty(from: domain)
     }
 }

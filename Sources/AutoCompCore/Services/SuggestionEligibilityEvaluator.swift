@@ -11,6 +11,11 @@ public enum SuggestionEligibilitySkipReason: String, Codable, CaseIterable, Send
     case unchangedContext = "unchanged-context"
     case awaitingSpaceTrigger = "awaiting-space-trigger"
     case manualOnlyWaitingForTrigger = "manual-only-waiting-for-trigger"
+
+    // Domain / web-app rules.
+    case domainDenied = "domain-denied"
+    case domainManualOnly = "domain-manual-only"
+    case domainNeedsVisualContext = "domain-needs-visual-context"
 }
 
 public enum SuggestionEligibilityTriggerReason: String, Codable, CaseIterable, Sendable {
@@ -168,7 +173,10 @@ public struct SuggestionEligibilityEvaluator: Sendable {
             return skip(.sentenceComplete, context: context, statusMessage: "Sentence complete")
         }
 
+        let hasRecentTriggerKey = now.timeIntervalSince(lastSuggestionTriggerKeyAt) <= suggestionTriggerKeyGraceInterval
+
         if let previousContext,
+           !hasRecentTriggerKey,
            previousContext.textBeforeCursor == context.textBeforeCursor,
            previousContext.app == context.app,
            previousContext.domain == context.domain {
@@ -196,7 +204,6 @@ public struct SuggestionEligibilityEvaluator: Sendable {
             return SuggestionEligibilityDecision(outcome: .eligible, logs: logs)
         }
 
-        let hasRecentTriggerKey = now.timeIntervalSince(lastSuggestionTriggerKeyAt) <= suggestionTriggerKeyGraceInterval
         if hasRecentTriggerKey {
             logs.append(triggerLog(.recentSpaceKey, context: context))
             return SuggestionEligibilityDecision(outcome: .eligible, logs: logs)
@@ -289,7 +296,7 @@ public struct SuggestionEligibilityEvaluator: Sendable {
             return true
         }
 
-        return isSameGoogleDocsBrailleLineTarget(
+        return isSameGoogleDocsVolatileLineTarget(
             app: context.app,
             domain: context.domain,
             context.focusedElementRect,
@@ -336,7 +343,7 @@ public struct SuggestionEligibilityEvaluator: Sendable {
             && abs(lhs.height - rhs.height) <= tolerance
     }
 
-    private func isSameGoogleDocsBrailleLineTarget(
+    private func isSameGoogleDocsVolatileLineTarget(
         app: AppIdentity,
         domain: String?,
         _ lhs: CGRect?,
@@ -349,17 +356,7 @@ public struct SuggestionEligibilityEvaluator: Sendable {
             return false
         }
 
-        return isGoogleDocsBrailleLineMetric(lhs)
-            && isGoogleDocsBrailleLineMetric(rhs)
-    }
-
-    private func isGoogleDocsBrailleLineMetric(_ rect: CGRect) -> Bool {
-        rect.minX.isFinite
-            && rect.minY.isFinite
-            && rect.width.isFinite
-            && rect.height.isFinite
-            && rect.width >= 80
-            && rect.height > 0
-            && rect.height <= 4
+        return StableFieldIdentity.isGoogleDocsVolatileLineMetric(lhs)
+            && StableFieldIdentity.isGoogleDocsVolatileLineMetric(rhs)
     }
 }

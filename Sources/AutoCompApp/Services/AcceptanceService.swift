@@ -2,6 +2,9 @@ import AppKit
 import AutoCompCore
 import Foundation
 
+private let acceptanceLogger = AutoCompLogger(category: "acceptance")
+
+
 enum AcceptanceError: Error {
     case insertionFailed
     case riskyHostReturnBlocked
@@ -16,9 +19,18 @@ enum AcceptanceInsertionStrategy: Equatable {
 struct AcceptanceInsertionPolicy: Equatable {
     var singleUnicodeFastPathEnabled = true
     var keyboardEventUTF16Limit = 64
-    var singleUnicodeIncompatibleBundleIDs: Set<String> = []
+    var singleUnicodeIncompatibleBundleIDs = Self.browserBundleIDs
     var clipboardPreferredBundleIDs: Set<String> = []
     var returnBlockedBundleIDs = RiskyHostAppPolicy.chatBundleIDs
+
+    static let browserBundleIDs: Set<String> = [
+        "com.apple.Safari",
+        "com.google.Chrome",
+        "com.brave.Browser",
+        "com.microsoft.edgemac",
+        "company.thebrowser.Browser",
+        "company.thebrowser.dia"
+    ]
 
     static var productionDefault: AcceptanceInsertionPolicy {
         AcceptanceInsertionPolicy(
@@ -133,10 +145,11 @@ protocol AcceptancePasteboard: AnyObject {
     func setString(_ text: String, recoveryMarkerID: String?)
     func writeItems(_ items: [PreservedPasteboardItem])
     func containsRecoveryMarker(id: String) -> Bool
+    func currentRecoveryMarkerID() -> String?
 }
 
 final class SystemAcceptancePasteboard: AcceptancePasteboard {
-    private static let recoveryMarkerType = NSPasteboard.PasteboardType("com.autocomp.pending-pasteboard-insertion")
+    static let recoveryMarkerType = NSPasteboard.PasteboardType("com.autocomp.pending-pasteboard-insertion")
     private let pasteboard: NSPasteboard
 
     init(pasteboard: NSPasteboard = .general) {
@@ -180,6 +193,10 @@ final class SystemAcceptancePasteboard: AcceptancePasteboard {
     func containsRecoveryMarker(id: String) -> Bool {
         pasteboard.string(forType: Self.recoveryMarkerType) == id
     }
+
+    func currentRecoveryMarkerID() -> String? {
+        pasteboard.string(forType: Self.recoveryMarkerType)
+    }
 }
 
 @MainActor
@@ -192,6 +209,10 @@ protocol ShortcutLeakRepairing: AnyObject {
 
 @MainActor
 final class AcceptanceService: TextInserter, ShortcutLeakRepairing {
+    // Note: acceptance insertion is currently performed via synthetic typing/paste events.
+    // Suffix-overlap trimming (avoid duplicating text already present after the cursor) is handled
+    // at the acceptance computation layer where the full `TextContext` is available.
+
     private let inputSuppressionController: InputSuppressionController?
     private let insertionPolicy: AcceptanceInsertionPolicy
     private let keyboardEventPoster: AcceptanceKeyboardEventPosting
@@ -269,15 +290,16 @@ final class AcceptanceService: TextInserter, ShortcutLeakRepairing {
 
         guard pasteboard.containsRecoveryMarker(id: snapshot.id) else {
             try? pasteboardRecoveryStore?.delete(matchingID: snapshot.id)
-            GeometryDebug.log("pasteboard-recovery skipped reason=marker-mismatch")
+            acceptanceLogger.info("pasteboard-recovery skipped reason=marker-mismatch")
             return
         }
 
-        restore(previousItems: snapshot.previousItems, recoveryID: snapshot.id)
-        GeometryDebug.log("pasteboard-recovery restored")
+        let transaction = PasteboardTransaction(recoveryID: snapshot.id, previousItems: snapshot.previousItems)
+        transaction.restore(using: pasteboard, recoveryStore: pasteboardRecoveryStore)
+        acceptanceLogger.info("pasteboard-recovery restored")
     }
 
-    private func insert(_ text: String) throws {
+    func insert(_ text: String) throws {
         guard !text.isEmpty else {
             return
         }
@@ -334,56 +356,45 @@ final class AcceptanceService: TextInserter, ShortcutLeakRepairing {
     }
 
     private func insertByClipboard(_ text: String) throws {
-        let previousItems = pasteboard.preservedItems()
-        let recoveryID = UUID().uuidString
+        let transaction = PasteboardTransaction.begin(using: pasteboard)
+
         let recoverySnapshot = PasteboardInsertionRecoverySnapshot(
-            id: recoveryID,
+            id: transaction.recoveryID,
             createdAt: Date(),
-            previousItems: previousItems
+            previousItems: transaction.previousItems
         )
-        let recoveryMarkerID: String?
+
+        let shouldUseRecoveryMarker: Bool
         do {
             try pasteboardRecoveryStore?.save(recoverySnapshot)
-            recoveryMarkerID = pasteboardRecoveryStore == nil ? nil : recoveryID
+            shouldUseRecoveryMarker = pasteboardRecoveryStore != nil
         } catch {
-            recoveryMarkerID = nil
-            GeometryDebug.log("pasteboard-recovery skipped reason=snapshot-save-failed")
+            shouldUseRecoveryMarker = false
+            acceptanceLogger.error("pasteboard-recovery skipped reason=snapshot-save-failed")
         }
-        pasteboard.clearContents()
-        pasteboard.setString(text, recoveryMarkerID: recoveryMarkerID)
+
+        transaction.writeTemporaryString(text, to: pasteboard, includeRecoveryMarker: shouldUseRecoveryMarker)
+
+        // Ensure clipboard restoration is attempted on *all* exit paths.
+        //
+        // Note: restoration itself is guarded by a recovery marker to avoid overwriting newer user clipboard
+        // data if the clipboard changed during insertion.
+        defer {
+            if clipboardRestoreDelay <= 0 {
+                transaction.restore(using: pasteboard, recoveryStore: pasteboardRecoveryStore)
+            } else {
+                DispatchQueue.main.asyncAfter(deadline: .now() + clipboardRestoreDelay) {
+                    transaction.restore(using: self.pasteboard, recoveryStore: self.pasteboardRecoveryStore)
+                }
+            }
+        }
 
         guard keyboardEventPoster.postKey(0x09, flags: .maskCommand) else {
-            restore(previousItems: previousItems, recoveryID: recoveryMarkerID)
             throw AcceptanceError.insertionFailed
         }
 
         registerSyntheticKeyboardPairs(1)
         GeometryDebug.log("insertion-strategy strategy=clipboard utf16Length=\(text.utf16.count)")
-
-        if clipboardRestoreDelay <= 0 {
-            restore(previousItems: previousItems, recoveryID: recoveryMarkerID)
-        } else {
-            DispatchQueue.main.asyncAfter(deadline: .now() + clipboardRestoreDelay) {
-                self.restore(previousItems: previousItems, recoveryID: recoveryMarkerID)
-            }
-        }
-    }
-
-    private func restore(previousItems: [PreservedPasteboardItem]?, recoveryID: String?) {
-        if let recoveryID,
-           !pasteboard.containsRecoveryMarker(id: recoveryID) {
-            try? pasteboardRecoveryStore?.delete(matchingID: recoveryID)
-            GeometryDebug.log("pasteboard-restore skipped reason=marker-mismatch")
-            return
-        }
-
-        pasteboard.clearContents()
-        if let previousItems {
-            pasteboard.writeItems(previousItems)
-        }
-        if let recoveryID {
-            try? pasteboardRecoveryStore?.delete(matchingID: recoveryID)
-        }
     }
 
     private func registerSyntheticKeyboardPairs(_ count: Int) {

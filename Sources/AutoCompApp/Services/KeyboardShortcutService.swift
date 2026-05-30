@@ -147,16 +147,26 @@ final class KeyboardShortcutService: @unchecked Sendable {
         onInputEvent: ((CapturedInputEvent) -> Void)? = nil,
         shouldInterceptCommand: @escaping (KeyboardShortcutCommand) -> Bool = { _ in true }
     ) {
-        stop()
         configureHandlers(
             onCommand: onCommand,
             onInputEvent: onInputEvent,
             shouldInterceptCommand: shouldInterceptCommand
         )
 
-        guard tapInstaller.hasInputMonitoringPermission() else {
+        let hasPermission = tapInstaller.hasInputMonitoringPermission()
+        guard hasPermission else {
+            if !eventTaps.isEmpty {
+                removeEventTaps()
+                passthroughReplay = nil
+                inputSuppressionController.reset()
+            }
             NSLog("AutoComp cannot monitor keyboard shortcuts until Input Monitoring permission is enabled.")
             GeometryDebug.log("shortcut-start rejected reason=input-monitoring-missing")
+            return
+        }
+
+        guard eventTaps.isEmpty else {
+            GeometryDebug.log("shortcut-start skipped reason=already-running taps=\(eventTaps.map(\.name).joined(separator: ","))")
             return
         }
 
@@ -210,6 +220,15 @@ final class KeyboardShortcutService: @unchecked Sendable {
     }
 
     func stop() {
+        removeEventTaps()
+        onCommand = nil
+        onInputEvent = nil
+        shouldInterceptCommand = { _ in true }
+        passthroughReplay = nil
+        inputSuppressionController.reset()
+    }
+
+    private func removeEventTaps() {
         for eventTap in eventTaps {
             eventTap.removeFromRunLoop()
             eventTap.enable(false)
@@ -217,11 +236,6 @@ final class KeyboardShortcutService: @unchecked Sendable {
         }
 
         eventTaps = []
-        onCommand = nil
-        onInputEvent = nil
-        shouldInterceptCommand = { _ in true }
-        passthroughReplay = nil
-        inputSuppressionController.reset()
     }
 
     func setSuggestionActive(_ active: Bool) {

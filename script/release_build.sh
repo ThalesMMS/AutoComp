@@ -148,11 +148,11 @@ if [[ -z "$VERSION" || -z "$BUILD_NUMBER" ]]; then
 fi
 
 if [[ -z "$DOWNLOAD_URL" ]]; then
-  DOWNLOAD_URL="https://github.com/ThalesMMS/AutoComp-dev/releases/download/v$VERSION/$APP_NAME.dmg"
+  DOWNLOAD_URL="https://github.com/ThalesMMS/AutoComp/releases/download/v$VERSION/$APP_NAME.dmg"
 fi
 
 if [[ -z "$RELEASE_NOTES_URL" ]]; then
-  RELEASE_NOTES_URL="https://github.com/ThalesMMS/AutoComp-dev/releases/tag/v$VERSION"
+  RELEASE_NOTES_URL="https://github.com/ThalesMMS/AutoComp/releases/tag/v$VERSION"
 fi
 
 case "$OUTPUT_DIR" in

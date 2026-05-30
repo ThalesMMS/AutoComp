@@ -190,7 +190,10 @@ final class PreviewCoordinatorTests: XCTestCase {
         let mirror = RecordingPreviewPresenter(canPresentResult: true)
         let coordinator = PreviewCoordinator(
             nativeInlinePresenter: native,
-            visualInlinePresenter: VisualInlineOverlayPresenter(),
+            visualInlinePresenter: VisualInlineOverlayPresenter(
+                shortcutSettingsStore: KeyboardShortcutSettingsStore(),
+                hintsProvider: OverlayShortcutHintsProvider()
+            ),
             mirrorWindowPresenter: mirror
         )
 
@@ -319,6 +322,33 @@ final class PreviewCoordinatorTests: XCTestCase {
         XCTAssertFalse(panel.canBecomeKey)
         XCTAssertFalse(panel.canBecomeMain)
         XCTAssertTrue(panel.ignoresMouseEvents)
+    }
+
+    func testPopupContentViewsUseManualAppKitLayout() {
+        let simpleView = SimpleCaretPopupContentView(frame: NSRect(x: 0, y: 0, width: 180, height: 32))
+        simpleView.update(text: "continue", acceptKeycapHint: "Tab", size: NSSize(width: 96, height: 29))
+        simpleView.layoutSubtreeIfNeeded()
+
+        XCTAssertEqual(simpleView.frame.size, NSSize(width: 96, height: 29))
+        XCTAssertTrue(simpleView.constraints.isEmpty)
+
+        let multiView = MultiSuggestionPopupContentView(frame: NSRect(x: 0, y: 0, width: 320, height: 102))
+        multiView.update(
+            alternatives: [
+                SuggestionAlternative(visibleText: " first"),
+                SuggestionAlternative(visibleText: " second"),
+                SuggestionAlternative(visibleText: " third")
+            ],
+            selectedIndex: 1,
+            acceptKeycapHint: "Tab",
+            previousKeycapHint: "[",
+            nextKeycapHint: "]",
+            size: NSSize(width: 240, height: 102)
+        )
+        multiView.layoutSubtreeIfNeeded()
+
+        XCTAssertEqual(multiView.frame.size, NSSize(width: 240, height: 102))
+        XCTAssertTrue(multiView.constraints.isEmpty)
     }
 
     private func suggestion(visibleText: String = " continuation") -> Suggestion {

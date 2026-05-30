@@ -28,6 +28,9 @@ public struct PrivacySettings: Codable, Equatable, Sendable {
     public var perAppRules: [String: Bool]
     public var perDomainRules: [String: Bool]
 
+    // v2+ domain/web-app rule builder settings
+    public var domainWebAppRules: DomainWebAppRules
+
     public init(
         collectionEnabled: Bool = false,
         clipboardContextEnabled: Bool = false,
@@ -37,7 +40,8 @@ public struct PrivacySettings: Codable, Equatable, Sendable {
         personalizationStrength: Double = 0.35,
         writingPreferences: WritingPreferences = WritingPreferences(),
         perAppRules: [String: Bool] = [:],
-        perDomainRules: [String: Bool] = [:]
+        perDomainRules: [String: Bool] = [:],
+        domainWebAppRules: DomainWebAppRules = DomainWebAppRules()
     ) {
         self.collectionEnabled = collectionEnabled
         self.clipboardContextEnabled = clipboardContextEnabled
@@ -48,6 +52,7 @@ public struct PrivacySettings: Codable, Equatable, Sendable {
         self.writingPreferences = writingPreferences
         self.perAppRules = perAppRules
         self.perDomainRules = perDomainRules
+        self.domainWebAppRules = domainWebAppRules
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -60,6 +65,7 @@ public struct PrivacySettings: Codable, Equatable, Sendable {
         case writingPreferences
         case perAppRules
         case perDomainRules
+        case domainWebAppRules
     }
 
     public init(from decoder: Decoder) throws {
@@ -73,7 +79,8 @@ public struct PrivacySettings: Codable, Equatable, Sendable {
             personalizationStrength: try container.decodeIfPresent(Double.self, forKey: .personalizationStrength) ?? 0.35,
             writingPreferences: try container.decodeIfPresent(WritingPreferences.self, forKey: .writingPreferences) ?? WritingPreferences(),
             perAppRules: try container.decodeIfPresent([String: Bool].self, forKey: .perAppRules) ?? [:],
-            perDomainRules: try container.decodeIfPresent([String: Bool].self, forKey: .perDomainRules) ?? [:]
+            perDomainRules: try container.decodeIfPresent([String: Bool].self, forKey: .perDomainRules) ?? [:],
+            domainWebAppRules: try container.decodeIfPresent(DomainWebAppRules.self, forKey: .domainWebAppRules) ?? DomainWebAppRules()
         )
     }
 
@@ -102,13 +109,13 @@ public struct PrivacySettings: Codable, Equatable, Sendable {
             return nil
         }
 
-        for candidate in Self.domainRuleCandidates(for: domain) {
+        for candidate in DomainNormalization.specificityCandidates(for: domain) {
             if let directRule = perDomainRules[candidate] {
                 return directRule
             }
 
             for (storedDomain, rule) in perDomainRules
-                where Self.normalizedDomain(storedDomain) == candidate {
+                where DomainNormalization.canonicalDomainString(from: storedDomain) == candidate {
                 return rule
             }
         }
@@ -116,39 +123,4 @@ public struct PrivacySettings: Codable, Equatable, Sendable {
         return nil
     }
 
-    public static func normalizedDomain(_ domain: String) -> String {
-        var normalized = domain
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-
-        if normalized.hasPrefix("https://") {
-            normalized.removeFirst("https://".count)
-        } else if normalized.hasPrefix("http://") {
-            normalized.removeFirst("http://".count)
-        }
-
-        if let fragmentIndex = normalized.firstIndex(where: { $0 == "?" || $0 == "#" }) {
-            normalized = String(normalized[..<fragmentIndex])
-        }
-
-        return normalized.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-    }
-
-    public static func domainRuleCandidates(for domain: String) -> [String] {
-        let normalized = normalizedDomain(domain)
-        guard !normalized.isEmpty else {
-            return []
-        }
-
-        let components = normalized.split(separator: "/").map(String.init)
-        guard components.count > 1 else {
-            return [normalized]
-        }
-
-        var candidates: [String] = []
-        for count in stride(from: components.count, through: 1, by: -1) {
-            candidates.append(components.prefix(count).joined(separator: "/"))
-        }
-        return candidates
-    }
 }

@@ -13,6 +13,13 @@ public struct SuggestionAlternative: Codable, Equatable, Sendable {
 public struct Suggestion: Identifiable, Codable, Equatable, Sendable {
     public let id: UUID
     public let baseContextID: UUID
+
+    /// Guardrail metadata for binding a suggestion to the context it was generated for.
+    ///
+    /// This is intentionally **not** `Codable`: suggestions may flow through Codable pipelines
+    /// (e.g. diagnostics), but binding is in-memory only and should be cleared on hide/invalidate.
+    public var binding: SuggestionBinding?
+
     public var visibleText: String
     public var remainingText: String
     public var acceptedPrefix: String
@@ -42,6 +49,7 @@ public struct Suggestion: Identifiable, Codable, Equatable, Sendable {
         baseContextID: UUID,
         visibleText: String,
         remainingText: String? = nil,
+        binding: SuggestionBinding? = nil,
         acceptedPrefix: String = "",
         rawText: String? = nil,
         alternatives: [SuggestionAlternative] = [],
@@ -57,6 +65,7 @@ public struct Suggestion: Identifiable, Codable, Equatable, Sendable {
         let selectedAlternative = normalizedAlternatives[boundedIndex]
         self.id = id
         self.baseContextID = baseContextID
+        self.binding = binding
         self.visibleText = selectedAlternative.visibleText
         self.remainingText = remainingText ?? selectedAlternative.visibleText
         self.acceptedPrefix = acceptedPrefix
@@ -87,6 +96,7 @@ public struct Suggestion: Identifiable, Codable, Equatable, Sendable {
             baseContextID: baseContextID,
             visibleText: visibleText,
             remainingText: remainingText,
+            binding: nil,
             acceptedPrefix: acceptedPrefix,
             rawText: rawText,
             alternatives: alternatives,
@@ -121,6 +131,7 @@ public struct Suggestion: Identifiable, Codable, Equatable, Sendable {
             id: id,
             baseContextID: baseContextID,
             visibleText: alternatives[nextIndex].visibleText,
+            binding: binding,
             rawText: alternatives[nextIndex].rawText ?? rawText,
             alternatives: alternatives,
             selectedAlternativeIndex: nextIndex,

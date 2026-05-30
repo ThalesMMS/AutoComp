@@ -1,6 +1,18 @@
 import AutoCompCore
 import Foundation
 
+private enum AcceptanceTextDelta {
+    static func trimmingSuffixOverlap(token: String, suffix: String?) -> String {
+        guard let suffix, !suffix.isEmpty, !token.isEmpty else {
+            return token
+        }
+        guard token.hasSuffix(suffix) else {
+            return token
+        }
+        return String(token.dropLast(suffix.count))
+    }
+}
+
 struct SuggestionAcceptanceResult: Equatable {
     let currentSuggestion: Suggestion?
     let presentationContext: TextContext?
@@ -31,8 +43,20 @@ final class SuggestionAcceptanceController {
 
         let previousContext = currentContext
         let previousSuggestion = suggestion
-        guard let acceptedText = try await inserter.acceptNextWord(from: &suggestion) else {
+
+        // Compute the insertion delta against the *current* host suffix so we don't duplicate
+        // text already present after the cursor in fill-in-middle scenarios.
+        let expectedSuffix = previousContext?.textAfterCursor
+        guard let acceptedToken = suggestion.acceptNextWord() else {
             return nil
+        }
+        let acceptedText = AcceptanceTextDelta.trimmingSuffixOverlap(
+            token: acceptedToken,
+            suffix: expectedSuffix
+        )
+
+        if !acceptedText.isEmpty {
+            try inserter.insert(acceptedText)
         }
 
         sessionController.recordAcceptance(
@@ -69,8 +93,18 @@ final class SuggestionAcceptanceController {
 
         let previousContext = currentContext
         let previousSuggestion = suggestion
-        guard let acceptedText = try await inserter.acceptAll(from: &suggestion) else {
+
+        let expectedSuffix = previousContext?.textAfterCursor
+        guard let acceptedToken = suggestion.acceptAll() else {
             return nil
+        }
+        let acceptedText = AcceptanceTextDelta.trimmingSuffixOverlap(
+            token: acceptedToken,
+            suffix: expectedSuffix
+        )
+
+        if !acceptedText.isEmpty {
+            try inserter.insert(acceptedText)
         }
 
         sessionController.recordAcceptance(

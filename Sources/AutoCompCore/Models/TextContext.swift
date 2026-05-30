@@ -66,18 +66,79 @@ public struct StableFieldIdentity: Codable, Equatable, Sendable {
         )
     }
 
+    /// Best-effort comparison for determining whether two focus snapshots refer to the
+    /// same logical input field.
+    ///
+    /// This is intentionally tolerant of missing fields (e.g. some apps do not expose
+    /// reliable frames/roles). We require bundleID + pid to match, then:
+    /// - If both sides have a focusChangeSequence, it must match (most reliable signal).
+    /// - Otherwise, we compare any available optional fields; if a field is present on
+    ///   both sides it must match, but if either side lacks it we ignore it.
     public func matchesStableTarget(_ other: StableFieldIdentity) -> Bool {
-        guard let roundedFocusedElementFrame,
+        guard bundleID == other.bundleID, processID == other.processID else {
+            return false
+        }
+
+        if isSameGoogleDocsVolatileLineTarget(as: other) {
+            return true
+        }
+
+        if let focusChangeSequence, let otherFocusChangeSequence = other.focusChangeSequence {
+            return focusChangeSequence == otherFocusChangeSequence
+        }
+
+        if let domain, let otherDomain = other.domain, domain != otherDomain {
+            return false
+        }
+        if let role, let otherRole = other.role, role != otherRole {
+            return false
+        }
+        if let subrole, let otherSubrole = other.subrole, subrole != otherSubrole {
+            return false
+        }
+        if let roundedFocusedElementFrame,
+           let otherRoundedFocusedElementFrame = other.roundedFocusedElementFrame,
+           roundedFocusedElementFrame != otherRoundedFocusedElementFrame {
+            return false
+        }
+
+        return true
+    }
+
+    private func isSameGoogleDocsVolatileLineTarget(as other: StableFieldIdentity) -> Bool {
+        guard bundleID == "com.google.Chrome",
+              hasGoogleDocsDomain(domain) || hasGoogleDocsDomain(other.domain),
+              compatible(domain, other.domain),
+              compatible(role, other.role),
+              compatible(subrole, other.subrole),
+              let roundedFocusedElementFrame,
               let otherRoundedFocusedElementFrame = other.roundedFocusedElementFrame else {
             return false
         }
 
-        return bundleID == other.bundleID
-            && processID == other.processID
-            && domain == other.domain
-            && role == other.role
-            && subrole == other.subrole
-            && roundedFocusedElementFrame == otherRoundedFocusedElementFrame
+        return Self.isGoogleDocsVolatileLineMetric(roundedFocusedElementFrame)
+            && Self.isGoogleDocsVolatileLineMetric(otherRoundedFocusedElementFrame)
+    }
+
+    private func hasGoogleDocsDomain(_ value: String?) -> Bool {
+        value?.contains("docs.google.com") == true
+    }
+
+    private func compatible(_ lhs: String?, _ rhs: String?) -> Bool {
+        guard let lhs, let rhs else {
+            return true
+        }
+        return lhs == rhs
+    }
+
+    public static func isGoogleDocsVolatileLineMetric(_ rect: CGRect) -> Bool {
+        rect.minX.isFinite
+            && rect.minY.isFinite
+            && rect.width.isFinite
+            && rect.height.isFinite
+            && rect.width >= 80
+            && rect.height > 0
+            && rect.height <= 80
     }
 
     private static func normalized(_ value: String?) -> String? {

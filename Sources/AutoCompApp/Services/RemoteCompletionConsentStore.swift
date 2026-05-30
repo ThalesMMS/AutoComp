@@ -176,7 +176,7 @@ extension CompletionBackendSettings {
                 RemoteCompletionConsentRequirement(
                     scope: .remoteFallback,
                     title: "Remote fallback",
-                    detail: "Local Llama is tried first. If local completion fails, text from the active field may be sent to \(remoteBaseURL).",
+                    detail: "Text from the active field may be sent to \(remoteBaseURL) after local completion fails.",
                     buttonTitle: "Allow Remote Fallback"
                 )
             ]
@@ -185,7 +185,7 @@ extension CompletionBackendSettings {
                 RemoteCompletionConsentRequirement(
                     scope: .remoteFallback,
                     title: "Remote fallback",
-                    detail: "Apple Intelligence is tried first. If Apple completion fails, text from the active field may be sent to \(remoteBaseURL).",
+                    detail: "Text from the active field may be sent to \(remoteBaseURL) after Apple Intelligence fails.",
                     buttonTitle: "Allow Remote Fallback"
                 )
             ]

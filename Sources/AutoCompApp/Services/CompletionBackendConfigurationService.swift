@@ -38,6 +38,47 @@ struct AppleIntelligenceDiagnostic: Equatable {
 }
 
 struct CompletionBackendSettings: Equatable {
+    /// The user's selected completion backend.
+    ///
+    /// Source of truth:
+    /// - Persisted by `CompletionBackendConfigurationService` in UserDefaults under key
+    ///   `completionBackend.kind` (defaults prefix `completionBackend.`).
+    /// - Loaded at app startup into `AppController.completionBackendSettings`.
+    ///
+    /// Supported backends:
+    /// - `.remote`: Remote OpenAI-compatible endpoint.
+    /// - `.localLlama`: Local llama.cpp runtime with optional remote fallback.
+    /// - `.appleIntelligence`: Apple Foundation Models (when available) with optional remote fallback.
+    ///
+    /// Configuration fields by backend:
+    ///
+    /// Remote (`engineKind == .remote`)
+    /// - Required:
+    ///   - `remoteBaseURL`
+    ///   - `remoteModel`
+    /// - Optional:
+    ///   - `remoteAPIKey`
+    /// - Advanced:
+    ///   - `stopSequences`
+    ///   - `multiSuggestionEnabled`
+    ///
+    /// Local Llama (`engineKind == .localLlama`)
+    /// - Required:
+    ///   - `localModelPath`
+    /// - Optional:
+    ///   - `localMaxRAMBytes`
+    /// - Advanced:
+    ///   - `fallbackToRemoteOnLocalFailure` (uses `remoteBaseURL`/`remoteModel`/`remoteAPIKey` when enabled)
+    ///   - `stopSequences`
+    ///   - `multiSuggestionEnabled`
+    ///
+    /// Apple Intelligence (`engineKind == .appleIntelligence`)
+    /// - Required:
+    ///   - None (availability is determined by the OS/hardware).
+    /// - Advanced:
+    ///   - `fallbackToRemoteOnAppleIntelligenceFailure` (uses `remoteBaseURL`/`remoteModel`/`remoteAPIKey` when enabled)
+    ///   - `stopSequences`
+    ///   - `multiSuggestionEnabled`
     static let defaultMultiSuggestionEnabled = false
 
     var engineKind: CompletionEngineKind

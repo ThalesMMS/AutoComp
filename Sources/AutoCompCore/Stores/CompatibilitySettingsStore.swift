@@ -37,7 +37,7 @@ public final class CompatibilitySettingsStore: @unchecked Sendable {
     }
 
     public func setMode(_ mode: CompatibilityOverrideMode?, forDomain domain: String) {
-        let normalizedDomain = CompatibilityCatalog.normalizedDomain(domain)
+        let normalizedDomain = DomainNormalization.canonicalDomainStringAllowingEmpty(from: domain)
         guard !normalizedDomain.isEmpty else {
             return
         }

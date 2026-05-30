@@ -63,6 +63,7 @@ public protocol SuggestionPresenter: AnyObject {
 
 @MainActor
 public protocol TextInserter: AnyObject {
+    func insert(_ text: String) throws
     func acceptNextWord(from suggestion: inout Suggestion) async throws -> String?
     func acceptAll(from suggestion: inout Suggestion) async throws -> String?
 }

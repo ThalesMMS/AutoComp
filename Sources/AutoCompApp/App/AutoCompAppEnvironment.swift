@@ -21,6 +21,7 @@ struct AutoCompAppEnvironment {
     let inputSourceMonitor: InputSourceMonitor
     let shortcutSettingsStore: KeyboardShortcutSettingsStore
     let completionBackendConfigurationService: CompletionBackendConfigurationService
+    let healthSnapshotService: HealthSnapshotService
     let localLlamaRuntimeStatusStore: LocalLlamaRuntimeStatusStore
     let remoteCompletionConsentStore: RemoteCompletionConsentStore
     let debugOptionsStore: AutoCompDebugOptionsStore
@@ -119,6 +120,15 @@ struct AutoCompAppEnvironment {
             }
         )
 
+        let healthSnapshotService = HealthSnapshotService(
+            permissionService: permissionService,
+            focusTrackingModel: focusTrackingModel,
+            completionBackendConfigurationService: completionBackendConfigurationService,
+            compatibilityCatalog: compatibilityCatalog,
+            compatibilitySettings: compatibilitySettings,
+            backendStatusProvider: { suggestionEngine.backendStatusSummary }
+        )
+
         self.permissionService = permissionService
         self.compatibilityCatalog = compatibilityCatalog
         self.compatibilitySettings = compatibilitySettings
@@ -133,6 +143,7 @@ struct AutoCompAppEnvironment {
         self.inputSourceMonitor = inputSourceMonitor
         self.shortcutSettingsStore = shortcutSettingsStore
         self.completionBackendConfigurationService = completionBackendConfigurationService
+        self.healthSnapshotService = healthSnapshotService
         self.localLlamaRuntimeStatusStore = localLlamaRuntimeStatusStore
         self.remoteCompletionConsentStore = remoteCompletionConsentStore
         self.debugOptionsStore = debugOptionsStore

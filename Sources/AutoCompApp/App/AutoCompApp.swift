@@ -28,6 +28,7 @@ struct AutoCompApp: App {
                 .environmentObject(controller.permissionService)
                 .frame(minWidth: 520, minHeight: 440)
         }
+        .defaultSize(width: 560, height: 560)
 
         Settings {
             SettingsRootView()

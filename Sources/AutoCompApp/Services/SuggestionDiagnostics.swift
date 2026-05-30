@@ -68,7 +68,15 @@ struct SuggestionDiagnostics: Equatable {
         case poorGeometry = "poor-geometry"
         case backendCircuitBreaker = "backend-circuit-breaker"
         case ime = "ime"
+
+        // Domain / web-app rules (non-sensitive; never include full URLs).
+        case domainDenied = "domain-denied"
+        case domainManualOnly = "domain-manual-only"
+        case domainNeedsVisualContext = "domain-needs-visual-context"
+
+        // Legacy privacy switch (retained for compatibility with existing diagnostics).
         case privacyDomainDisabled = "privacy-domain-disabled"
+
         case riskyHostApp = "blocked-risky-host-app"
         case noMeaningfulPrefix = "no-meaningful-prefix"
         case sentenceComplete = "sentence-complete"
@@ -453,7 +461,38 @@ struct SuggestionDiagnostics: Equatable {
             statusMessage: decision.statusMessage
         )
         recordLastDecision(for: decision)
+
+        if case .ineligible(let reason) = decision.outcome {
+            skipReasonCounts[reason, default: 0] += 1
+        }
     }
+
+    mutating func recordDomainRuleDecision(
+        _ skipReason: SuggestionEligibilitySkipReason,
+        domainResolution: BrowserDomainResolution
+    ) {
+        guard skipReason == .domainDenied
+                || skipReason == .domainManualOnly
+                || skipReason == .domainNeedsVisualContext else {
+            return
+        }
+
+        // Reuse the existing eligibility recording so last-decision mapping stays consistent.
+        recordEligibility(
+            SuggestionEligibilityDecision(
+                outcome: .ineligible(skipReason),
+                statusMessage: nil,
+                logs: []
+            )
+        )
+
+        // Non-sensitive: only a host-ish domain string (no full URLs, no titles).
+        let effective = domainResolution.diagnosticValue
+        domainRuleSkipCountsByEffectiveDomain[effective, default: 0] += 1
+    }
+
+    private(set) var skipReasonCounts: [SuggestionEligibilitySkipReason: Int] = [:]
+    private(set) var domainRuleSkipCountsByEffectiveDomain: [String: Int] = [:]
 
     mutating func recordCompatibility(_ decision: CompatibilityDecision) {
         compatibility = Compatibility(
@@ -511,6 +550,10 @@ struct SuggestionDiagnostics: Equatable {
 
     mutating func recordBackendFailure(_ error: Error, kind: CompletionEngineKind?) {
         let message = Self.message(for: error)
+        recordBackendFailure(message: message, kind: kind)
+    }
+
+    mutating func recordBackendFailure(message: String, kind: CompletionEngineKind?) {
         backend = backend
             .preservingState(status: .failed, lastError: message, requestedKind: kind)
             .recordingError(message, for: kind)
@@ -697,6 +740,24 @@ struct SuggestionDiagnostics: Equatable {
                 .waiting,
                 .manualTriggerOnly,
                 "Use the manual trigger in this app or domain."
+            )
+        case .domainDenied:
+            return (
+                .blocked,
+                .domainDenied,
+                "AutoComp is disabled by a domain rule."
+            )
+        case .domainManualOnly:
+            return (
+                .waiting,
+                .domainManualOnly,
+                "AutoComp is manual-only by a domain rule."
+            )
+        case .domainNeedsVisualContext:
+            return (
+                .waiting,
+                .domainNeedsVisualContext,
+                "AutoComp requires visual context for this domain."
             )
         }
     }

@@ -24,18 +24,13 @@ final class SuggestionControllerExtractionTests: XCTestCase {
         XCTAssertEqual(clearAction.clearEventKind, .textMutation)
     }
 
-    func testLifecycleControllerStartsAndStopsRefreshTimer() async {
-        let controller = SuggestionLifecycleController(refreshInterval: 0.01)
-        let refreshed = expectation(description: "refresh fired")
-        refreshed.expectedFulfillmentCount = 2
-        refreshed.assertForOverFulfill = false
+    func testLifecycleControllerStartsAndStops() {
+        let controller = SuggestionLifecycleController()
+        XCTAssertFalse(controller.isRunning)
 
-        controller.start {
-            refreshed.fulfill()
-        }
+        controller.start()
         XCTAssertTrue(controller.isRunning)
 
-        await fulfillment(of: [refreshed], timeout: 1)
         controller.stop()
         XCTAssertFalse(controller.isRunning)
     }
@@ -127,11 +122,25 @@ final class SuggestionControllerExtractionTests: XCTestCase {
 }
 
 private final class RecordingTextInserter: TextInserter {
+    private(set) var insertedTexts: [String] = []
+
+    func insert(_ text: String) throws {
+        insertedTexts.append(text)
+    }
+
     func acceptNextWord(from suggestion: inout Suggestion) async throws -> String? {
-        suggestion.acceptNextWord()
+        guard let token = suggestion.acceptNextWord() else {
+            return nil
+        }
+        try insert(token)
+        return token
     }
 
     func acceptAll(from suggestion: inout Suggestion) async throws -> String? {
-        suggestion.acceptAll()
+        guard let token = suggestion.acceptAll() else {
+            return nil
+        }
+        try insert(token)
+        return token
     }
 }
