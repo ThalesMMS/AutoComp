@@ -10,6 +10,7 @@ final class PrivacySettingsTests: XCTestCase {
         XCTAssertFalse(settings.screenContextEnabled)
         XCTAssertFalse(settings.telemetryEnabled)
         XCTAssertTrue(settings.productivityMetricsEnabled)
+        XCTAssertFalse(settings.localPersonalizationEnabled)
         XCTAssertFalse(settings.writingPreferences.enabled)
         XCTAssertTrue(settings.writingPreferences.rules.isEmpty)
     }
@@ -79,6 +80,7 @@ final class PrivacySettingsTests: XCTestCase {
             screenContextEnabled: true,
             telemetryEnabled: true,
             productivityMetricsEnabled: false,
+            localPersonalizationEnabled: true,
             personalizationStrength: 0.82,
             writingPreferences: WritingPreferences(
                 enabled: true,
@@ -131,6 +133,7 @@ final class PrivacySettingsTests: XCTestCase {
             clipboardContextEnabled: true,
             screenContextEnabled: true,
             telemetryEnabled: true,
+            localPersonalizationEnabled: true,
             writingPreferences: WritingPreferences(enabled: true, rules: ["Write objectively"]),
             perDomainRules: ["docs.google.com": false]
         ))
@@ -143,6 +146,7 @@ final class PrivacySettingsTests: XCTestCase {
         XCTAssertTrue(loaded.screenContextEnabled)
         XCTAssertFalse(loaded.telemetryEnabled)
         XCTAssertTrue(loaded.productivityMetricsEnabled)
+        XCTAssertFalse(loaded.localPersonalizationEnabled)
         XCTAssertFalse(loaded.writingPreferences.enabled)
         XCTAssertTrue(loaded.writingPreferences.rules.isEmpty)
         XCTAssertEqual(loaded.perDomainRules["docs.google.com"], false)
@@ -166,6 +170,7 @@ final class PrivacySettingsTests: XCTestCase {
         XCTAssertTrue(decoded.clipboardContextEnabled)
         XCTAssertFalse(decoded.telemetryEnabled)
         XCTAssertTrue(decoded.productivityMetricsEnabled)
+        XCTAssertFalse(decoded.localPersonalizationEnabled)
         XCTAssertEqual(decoded.personalizationStrength, 0.5)
         XCTAssertEqual(decoded.writingPreferences, WritingPreferences())
     }

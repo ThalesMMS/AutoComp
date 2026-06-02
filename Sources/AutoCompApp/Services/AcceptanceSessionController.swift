@@ -83,11 +83,9 @@ final class AcceptanceSessionController {
         suggestion: Suggestion,
         now: Date = Date()
     ) {
+        let anchor = SuggestionAnchor(context: context, suggestion: suggestion)
         let session = ActiveSuggestionSession(
-            baseContext: context,
-            fullText: suggestion.acceptedPrefix + suggestion.remainingText,
-            acceptedText: suggestion.acceptedPrefix,
-            remainingText: suggestion.remainingText,
+            anchor: anchor,
             latencyMs: suggestion.latencyMs,
             lastAcceptedAt: now
         )
@@ -114,12 +112,15 @@ final class AcceptanceSessionController {
         let baseText = acceptanceState?.session.baseTextBeforeCursor ?? previousContext.textBeforeCursor
         let acceptedPrefix = (acceptanceState?.session.acceptedText ?? previousSuggestion.acceptedPrefix) + acceptedText
         let fullText = previousSuggestion.acceptedPrefix + previousSuggestion.remainingText
-        let session = ActiveSuggestionSession(
+        let anchor = SuggestionAnchor(
             target: ActiveSuggestionTarget(context: previousContext),
             baseTextBeforeCursor: baseText,
             fullText: fullText,
             acceptedText: acceptedPrefix,
-            remainingText: updatedSuggestion.remainingText,
+            remainingText: updatedSuggestion.remainingText
+        )
+        let session = ActiveSuggestionSession(
+            anchor: anchor,
             latencyMs: previousSuggestion.latencyMs,
             lastAcceptedAt: now
         )

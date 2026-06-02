@@ -20,6 +20,64 @@ final class AutoCompDebugTests: XCTestCase {
         XCTAssertFalse(description.contains(secret))
     }
 
+    func testPipelineLogSummariesDoNotExposeFocusedTextOrSuggestionText() {
+        let prefix = "SECRET google docs draft"
+        let suffix = "SECRET suffix"
+        let suggestionText = "SECRET completion"
+        let context = TextContextFixtures.googleDocs(prefix: prefix, suffix: suffix)
+        let suggestion = Suggestion(
+            baseContextID: context.id,
+            visibleText: suggestionText,
+            latencyMs: 12
+        )
+
+        let line = SuggestionPipelineLog.line(event: "probe", fields: [
+            "context=\(SuggestionPipelineLog.contextDescription(context))",
+            "suggestion=\(SuggestionPipelineLog.suggestionDescription(suggestion))"
+        ])
+
+        XCTAssertTrue(line.contains("event=probe"))
+        XCTAssertTrue(line.contains("appBundle=com.google.Chrome"))
+        XCTAssertTrue(line.contains("domain=docs.google.com"))
+        XCTAssertTrue(line.contains("prefixLen=\((prefix as NSString).length)"))
+        XCTAssertTrue(line.contains("suffixLen=\((suffix as NSString).length)"))
+        XCTAssertTrue(line.contains("visibleLen=\((suggestionText as NSString).length)"))
+        XCTAssertFalse(line.contains(prefix))
+        XCTAssertFalse(line.contains(suffix))
+        XCTAssertFalse(line.contains(suggestionText))
+        XCTAssertFalse(line.contains("SECRET"))
+    }
+
+    func testPipelineErrorSummaryDoesNotExposeErrorDescription() {
+        let error = NSError(
+            domain: "SECRET_ERROR_DOMAIN",
+            code: 7,
+            userInfo: [NSLocalizedDescriptionKey: "SECRET backend failure text"]
+        )
+
+        let summary = SuggestionPipelineLog.privacySafeErrorSummary(error)
+
+        XCTAssertTrue(summary.contains("chars:"))
+        XCTAssertTrue(summary.contains("bytes:"))
+        XCTAssertTrue(summary.contains("sha256:"))
+        XCTAssertFalse(summary.contains("SECRET"))
+        XCTAssertFalse(summary.contains("backend failure"))
+    }
+
+    func testPipelineDiscardReasonSummaryDoesNotExposeMessage() {
+        let reason = SuggestionPipeline.DiscardReason(
+            kind: .error,
+            message: "SECRET provider error text"
+        )
+
+        let summary = SuggestionPipelineLog.discardReasonDescription(reason)
+
+        XCTAssertTrue(summary.contains("kind=error"))
+        XCTAssertTrue(summary.contains("message=chars:"))
+        XCTAssertFalse(summary.contains("SECRET"))
+        XCTAssertFalse(summary.contains("provider error"))
+    }
+
     func testDebugOptionsStoreDefaultsToOffAndRoundTrips() throws {
         let suiteName = "AutoCompDebugOptions-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))

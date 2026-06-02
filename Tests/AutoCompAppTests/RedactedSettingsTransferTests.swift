@@ -3,13 +3,18 @@ import AutoCompCore
 import XCTest
 
 final class RedactedSettingsTransferTests: XCTestCase {
-    func testExportOmitsSecretsContentAndLocalModelPath() throws {
+    func testExportIncludesPortablePreferencesAndOmitsSecretsAndLocalModelPath() throws {
         let privacy = PrivacySettings(
             collectionEnabled: true,
             clipboardContextEnabled: true,
             screenContextEnabled: true,
             productivityMetricsEnabled: false,
-            writingPreferences: WritingPreferences(enabled: true, rules: ["SECRET writing rule"]),
+            localPersonalizationEnabled: true,
+            writingPreferences: WritingPreferences(
+                enabled: true,
+                rules: ["Write concisely"],
+                languageHints: ["Portuguese (Brazil)", "English"]
+            ),
             perAppRules: ["com.example.Secret": false],
             perDomainRules: ["docs.example.com": false]
         )
@@ -38,12 +43,13 @@ final class RedactedSettingsTransferTests: XCTestCase {
         XCTAssertEqual(package.backend.remoteBaseURL, "https://example.com/v1")
         XCTAssertTrue(body.contains("secret-model.gguf"))
         XCTAssertTrue(body.contains("docs.example.com"))
+        XCTAssertTrue(body.contains("Write concisely"))
+        XCTAssertTrue(body.contains("Portuguese (Brazil)"))
         XCTAssertFalse(body.contains("SECRET_API_KEY"))
         XCTAssertFalse(body.contains("SECRET_PASSWORD"))
         XCTAssertFalse(body.contains("SECRET_QUERY"))
         XCTAssertFalse(body.contains("fragment"))
         XCTAssertFalse(body.contains("/Users/thales/private"))
-        XCTAssertFalse(body.contains("SECRET writing rule"))
         XCTAssertFalse(body.contains("com.example.Secret"))
         XCTAssertFalse(body.contains("telemetry"))
         XCTAssertFalse(body.contains("DebugArtifacts"))
@@ -79,6 +85,7 @@ final class RedactedSettingsTransferTests: XCTestCase {
             clipboardContextEnabled: false,
             screenContextEnabled: false,
             telemetryEnabled: true,
+            localPersonalizationEnabled: false,
             personalizationStrength: 0.8,
             writingPreferences: WritingPreferences(enabled: true, rules: ["keep local writing rule"]),
             perAppRules: ["com.apple.TextEdit": true],
@@ -89,6 +96,12 @@ final class RedactedSettingsTransferTests: XCTestCase {
             clipboardContextEnabled: true,
             screenContextEnabled: true,
             productivityMetricsEnabled: false,
+            localPersonalizationEnabled: true,
+            writingPreferences: WritingPreferences(
+                enabled: true,
+                rules: ["imported writing rule"],
+                languageHints: ["English"]
+            ),
             domainRules: ["new.example.com": false]
         )
 
@@ -101,10 +114,12 @@ final class RedactedSettingsTransferTests: XCTestCase {
         XCTAssertEqual(updatedPrivacy.clipboardContextEnabled, true)
         XCTAssertEqual(updatedPrivacy.screenContextEnabled, true)
         XCTAssertEqual(updatedPrivacy.productivityMetricsEnabled, false)
+        XCTAssertEqual(updatedPrivacy.localPersonalizationEnabled, true)
         XCTAssertEqual(updatedPrivacy.perDomainRules, ["new.example.com": false])
         XCTAssertEqual(updatedPrivacy.perAppRules, ["com.apple.TextEdit": true])
         XCTAssertEqual(updatedPrivacy.personalizationStrength, 0.8)
-        XCTAssertEqual(updatedPrivacy.writingPreferences.rules, ["keep local writing rule"])
+        XCTAssertEqual(updatedPrivacy.writingPreferences.rules, ["imported writing rule"])
+        XCTAssertEqual(updatedPrivacy.writingPreferences.languageHints, ["English"])
         XCTAssertFalse(updatedPrivacy.telemetryEnabled)
 
         let currentBackend = CompletionBackendSettings(
@@ -162,6 +177,7 @@ final class RedactedSettingsTransferTests: XCTestCase {
 
         XCTAssertTrue(body.contains("Remote API key is not included"))
         XCTAssertTrue(body.contains("Local model path is not included"))
+        XCTAssertTrue(body.contains("Writing preference rules and language hints are included"))
         XCTAssertFalse(body.contains("SECRET_API_KEY"))
         XCTAssertFalse(body.contains("/Users/thales/private"))
     }
@@ -178,6 +194,11 @@ final class RedactedSettingsTransferTests: XCTestCase {
                 clipboardContextEnabled: true,
                 screenContextEnabled: false,
                 productivityMetricsEnabled: false,
+                writingPreferences: WritingPreferences(
+                    enabled: true,
+                    rules: ["Write concisely"],
+                    languageHints: ["English"]
+                ),
                 domainRules: ["docs.example.com": false]
             ),
             shortcuts: .defaults,

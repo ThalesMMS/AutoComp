@@ -25,12 +25,10 @@ final class BackendModeTextTests: XCTestCase {
     }
 
     func testSettingsTextExplainsConditionalLocalAndFallbackBehavior() throws {
-        let settingsSource = try String(
-            contentsOf: packageRoot().appendingPathComponent("Sources/AutoCompApp/Views/SettingsRootView.swift"),
-            encoding: .utf8
-        )
+        let root = try packageRoot()
+        let settingsSource = try settingsSourceContents(packageRoot: root)
         let consentSource = try String(
-            contentsOf: packageRoot().appendingPathComponent("Sources/AutoCompApp/Services/RemoteCompletionConsentStore.swift"),
+            contentsOf: root.appendingPathComponent("Sources/AutoCompApp/Services/RemoteCompletionConsentStore.swift"),
             encoding: .utf8
         )
         let combinedSource = settingsSource + consentSource
@@ -44,9 +42,12 @@ final class BackendModeTextTests: XCTestCase {
         XCTAssertTrue(settingsSource.contains("Remote fallback is enabled: if local completion fails"))
         XCTAssertTrue(settingsSource.contains("remote fallback is enabled after a local or Apple failure"))
         XCTAssertTrue(settingsSource.contains("Section(\"Remote completion consent\")"))
-        XCTAssertTrue(settingsSource.contains("Section(\"Model compatibility evidence\")"))
+        XCTAssertTrue(settingsSource.contains("Section(\"Compatibility recommendation\")"))
+        XCTAssertTrue(settingsSource.contains("Matrix guidance for request mode"))
         XCTAssertTrue(settingsSource.contains("FIM behavior"))
         XCTAssertTrue(settingsSource.contains("Endpoint type"))
+        XCTAssertTrue(settingsSource.contains("Import GGUF"))
+        XCTAssertTrue(settingsSource.contains("Clean Partial Downloads"))
         XCTAssertTrue(combinedSource.contains("Text from the active field may be sent"))
         XCTAssertTrue(settingsSource.contains("Reset Remote Completion Consent"))
     }
@@ -62,29 +63,23 @@ final class BackendModeTextTests: XCTestCase {
         XCTAssertTrue(environmentSource.contains("remoteConsentChecker: usesInlinePreviewTestProvider"))
     }
 
-    func testModelSettingsSeparatesBackendSelectionFromRemoteSettings() throws {
-        let settingsSource = try String(
-            contentsOf: packageRoot().appendingPathComponent("Sources/AutoCompApp/Views/SettingsRootView.swift"),
-            encoding: .utf8
-        )
-        let selectionRange = try XCTUnwrap(settingsSource.range(of: "Section(\"Backend selection\")"))
-        let remoteSettingsRange = try XCTUnwrap(settingsSource.range(of: "Section(\"Remote backend settings\")"))
-        let selectionBlock = String(settingsSource[selectionRange.lowerBound..<remoteSettingsRange.lowerBound])
+    func testModelSettingsSeparatesProviderSelectionFromConditionalRemoteFields() throws {
+        let settingsSource = try settingsSourceContents(packageRoot: packageRoot())
+        let providerRange = try XCTUnwrap(settingsSource.range(of: "Section(\"Provider\")"))
+        let consentRange = try XCTUnwrap(settingsSource.range(of: "Section(\"Remote completion consent\")"))
+        let providerBlock = String(settingsSource[providerRange.lowerBound..<consentRange.lowerBound])
 
-        XCTAssertTrue(selectionBlock.contains("Picker(\"Selected backend\""))
-        XCTAssertFalse(selectionBlock.contains("Endpoint preset"))
-        XCTAssertFalse(selectionBlock.contains("Base URL"))
-        XCTAssertFalse(selectionBlock.contains("API key"))
-        XCTAssertTrue(settingsSource.contains("These settings are used when Remote OpenAI-compatible is selected"))
+        XCTAssertTrue(providerBlock.contains("Picker(\"Selected backend\""))
+        XCTAssertTrue(settingsSource.contains("switch draft.engineKind"))
+        XCTAssertTrue(settingsSource.contains("private var remoteProviderFields"))
+        XCTAssertTrue(settingsSource.contains("DisclosureGroup(\"Remote fallback provider\")"))
+        XCTAssertFalse(settingsSource.contains("Section(\"Remote backend settings\")"))
         XCTAssertTrue(settingsSource.contains("Apple Intelligence fallback uses the remote backend settings above."))
         XCTAssertTrue(settingsSource.contains("Saved Apple Intelligence as the selected backend."))
     }
 
     func testPrivacySettingsTextReflectsActiveBackendDestination() throws {
-        let settingsSource = try String(
-            contentsOf: packageRoot().appendingPathComponent("Sources/AutoCompApp/Views/SettingsRootView.swift"),
-            encoding: .utf8
-        )
+        let settingsSource = try settingsSourceContents(packageRoot: packageRoot())
 
         XCTAssertTrue(settingsSource.contains("Section(\"Completion backend\")"))
         XCTAssertTrue(settingsSource.contains("Active engine"))

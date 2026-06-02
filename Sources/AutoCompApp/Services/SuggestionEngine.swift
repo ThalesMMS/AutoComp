@@ -21,7 +21,7 @@ enum CompletionProviderSwitchReason: String, Equatable, Sendable {
     case runtimeModelSwitch = "runtime-model-switch"
 }
 
-private enum AcceptanceCommandAction {
+private enum AcceptanceCommandAction: Sendable {
     case nextWord
     case fullSuggestion
 
@@ -73,6 +73,12 @@ private enum SuggestionRefreshSource: Equatable, Sendable {
     /// Refresh triggered when an acceptance attempt was blocked and we should immediately regenerate.
     case acceptanceGuardrail
 
+    /// Refresh after accepted text should have been published by the host app.
+    case postAcceptance(AcceptanceCommandAction)
+
+    /// Refresh after repairing a leaked shortcut suffix in the host app.
+    case shortcutLeakRepair
+
     /// Safety-net refresh used only for adaptive fallback mechanisms (not continuous).
     case fallbackTimer
 
@@ -89,6 +95,10 @@ private enum SuggestionRefreshSource: Equatable, Sendable {
             return "active-app-changed"
         case .acceptanceGuardrail:
             return "acceptance-guardrail"
+        case .postAcceptance(let action):
+            return "post-acceptance-\(action.debugName)"
+        case .shortcutLeakRepair:
+            return "shortcut-leak-repair"
         case .fallbackTimer:
             return "fallback-timer"
         case .startup:
@@ -144,6 +154,7 @@ final class SuggestionEngine: ObservableObject {
     private let compatibilityCatalog: CompatibilityCatalog
     private let compatibilitySettings: CompatibilitySettingsStore
     private let privacyStore: PrivacySettingsStore
+    private let personalizationRecorder: PersonalizationSampleRecorder?
     private let productivityMetrics: ProductivityMetricsRecording?
     private let eligibilityEvaluator: SuggestionEligibilityEvaluator
 
@@ -159,6 +170,7 @@ final class SuggestionEngine: ObservableObject {
     private let emojiService = EmojiSuggestionService()
     private let lifecycleController = SuggestionLifecycleController()
     private let predictionController = SuggestionPredictionController()
+    private let hostPublishAwaiter: HostPublishAwaiter
     private let diagnosticsController = SuggestionDiagnosticsController()
     private let contextGenerationTracker = ContextGenerationTracker()
     private let suggestionDebugLogger: SuggestionDebugLogger?
@@ -167,6 +179,7 @@ final class SuggestionEngine: ObservableObject {
     private var providerLifecycleGeneration = 0
     private var dismissedContext: TextContext?
     private var postAcceptanceRefreshTask: Task<Void, Never>?
+    private var visualContextRefreshTask: Task<Void, Never>?
 
     // Refresh single-flight state: prevents overlapping refreshes and coalesces bursts.
     private var refreshTask: Task<Void, Never>?
@@ -174,7 +187,13 @@ final class SuggestionEngine: ObservableObject {
 
     private var transientFocusFailureStartedAt: Date?
     private let transientFocusFailureGraceInterval: TimeInterval = 1.5
-    private let postAcceptanceRefreshDelayNanoseconds: UInt64 = 150_000_000
+    private let navigationClearSuppressionInterval: TimeInterval = 1.5
+    private var navigationClearSuppressedUntil: Date = .distantPast
+    private var interactionPipelineSuspensionReason: String?
+
+    var isInteractionPipelineSuspended: Bool {
+        interactionPipelineSuspensionReason != nil
+    }
 
     init(
         contextProvider: TextContextProvider,
@@ -186,6 +205,7 @@ final class SuggestionEngine: ObservableObject {
         compatibilityCatalog: CompatibilityCatalog = CompatibilityCatalog(),
         compatibilitySettings: CompatibilitySettingsStore = CompatibilitySettingsStore(),
         privacyStore: PrivacySettingsStore = PrivacySettingsStore(),
+        personalizationRecorder: PersonalizationSampleRecorder? = nil,
         productivityMetrics: ProductivityMetricsRecording? = nil,
         multiSuggestionEnabled: Bool = CompletionBackendSettings.defaultMultiSuggestionEnabled,
         eligibilityEvaluator: SuggestionEligibilityEvaluator = SuggestionEligibilityEvaluator(),
@@ -195,6 +215,7 @@ final class SuggestionEngine: ObservableObject {
         acceptanceSessionController: AcceptanceSessionController = AcceptanceSessionController(),
         inputController: SuggestionInputStateTracking = SuggestionInputController(),
         shortcutLeakRepairInserter: ShortcutLeakRepairing? = nil,
+        hostPublishAwaiter: HostPublishAwaiter = HostPublishAwaiter(),
         suggestionDebugLogger: SuggestionDebugLogger? = nil,
         debugOptionsProvider: @escaping @MainActor () -> AutoCompDebugOptions = { .normal }
     ) {
@@ -222,6 +243,7 @@ final class SuggestionEngine: ObservableObject {
         self.compatibilityCatalog = compatibilityCatalog
         self.compatibilitySettings = compatibilitySettings
         self.privacyStore = privacyStore
+        self.personalizationRecorder = personalizationRecorder
 
         self.diagnosticsServices = DiagnosticsServices(
             productivityMetrics: productivityMetrics,
@@ -241,6 +263,7 @@ final class SuggestionEngine: ObservableObject {
         self.acceptanceSessionController = acceptanceSessionController
         self.acceptanceController = SuggestionAcceptanceController(sessionController: acceptanceSessionController)
         self.shortcutLeakRepairInserter = shortcutLeakRepairInserter
+        self.hostPublishAwaiter = hostPublishAwaiter
     }
 
     func start() {
@@ -267,6 +290,7 @@ final class SuggestionEngine: ObservableObject {
             self?.requestRefresh(source: .fallbackTimer)
         }
         lifecycleController.start()
+        startVisualContextRefreshTimer()
         requestRefresh(source: .startup)
         lifecycleController.beginAdaptiveFallbackBurst()
     }
@@ -274,7 +298,12 @@ final class SuggestionEngine: ObservableObject {
     func stop() {
         GeometryDebug.log("engine-stop current=\(debugSuggestionState())")
         lifecycleController.stop()
+        visualContextRefreshTask?.cancel()
+        visualContextRefreshTask = nil
+        (visualContextProvider as? VisualContextSessionControlling)?.stopAndClear()
         predictionController.cancelAll()
+        hostPublishAwaiter.cancelAll(reason: "engine-stop")
+        navigationClearSuppressedUntil = .distantPast
 
         refreshTask?.cancel()
         refreshTask = nil
@@ -287,6 +316,63 @@ final class SuggestionEngine: ObservableObject {
         presenter.hide()
     }
 
+    private func startVisualContextRefreshTimer() {
+        guard visualContextProvider is VisualContextSessionControlling else {
+            return
+        }
+
+        visualContextRefreshTask?.cancel()
+        visualContextRefreshTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 4_000_000_000)
+                guard !Task.isCancelled else {
+                    return
+                }
+                (self?.visualContextProvider as? VisualContextSessionControlling)?.refreshTick()
+            }
+        }
+    }
+
+    func setInteractionPipelineSuspended(_ suspended: Bool, reason: String) {
+        if suspended {
+            guard interactionPipelineSuspensionReason == nil else {
+                interactionPipelineSuspensionReason = reason
+                return
+            }
+
+            interactionPipelineSuspensionReason = reason
+            providerLifecycleGeneration += 1
+            predictionController.cancelAll()
+            hostPublishAwaiter.cancelAll(reason: "pipeline-suspended-\(reason)")
+            diagnostics.recordStaleDiscard(reason: "pipeline-suspended-\(reason)")
+
+            refreshTask?.cancel()
+            refreshTask = nil
+            refreshQueuedSource = nil
+            postAcceptanceRefreshTask?.cancel()
+            postAcceptanceRefreshTask = nil
+            dismissedContext = nil
+            transientFocusFailureStartedAt = nil
+            acceptanceSessionController.clearAll()
+            inputController.reset()
+            currentSuggestion = nil
+            statusMessage = "AutoComp paused"
+            clearVisualContextSession()
+            presenter.hide()
+            GeometryDebug.log("engine-pipeline-suspension suspended=true reason=\(reason)")
+        } else {
+            guard interactionPipelineSuspensionReason != nil else {
+                return
+            }
+
+            interactionPipelineSuspensionReason = nil
+            if isAutocompleteEnabled {
+                statusMessage = "AutoComp resumed"
+            }
+            GeometryDebug.log("engine-pipeline-suspension suspended=false reason=\(reason)")
+        }
+    }
+
     func setAutocompleteEnabled(_ enabled: Bool) {
         guard isAutocompleteEnabled != enabled else {
             return
@@ -295,6 +381,7 @@ final class SuggestionEngine: ObservableObject {
         isAutocompleteEnabled = enabled
         dismissedContext = nil
         predictionController.cancelAll()
+        hostPublishAwaiter.cancelAll(reason: "autocomplete-toggle")
         acceptanceSessionController.clearAll()
         inputController.reset()
         currentSuggestion = nil
@@ -323,6 +410,97 @@ final class SuggestionEngine: ObservableObject {
         isMultiSuggestionEnabled && (currentSuggestion?.hasMultipleAlternatives == true)
     }
 
+    func shortcutOwnershipDecision(
+        for command: KeyboardShortcutCommand,
+        isSuggestionVisible: Bool
+    ) -> ShortcutOwnershipDecision {
+        if isInteractionPipelineSuspended {
+            return .passThrough(reason: "pipeline-suspended")
+        }
+
+        switch command {
+        case .manualTrigger, .toggleAutocomplete:
+            return .consume(reason: "global-command")
+        case .selectPreviousSuggestion, .selectNextSuggestion:
+            guard isSuggestionVisible else {
+                return .passThrough(reason: "no-visible-suggestion")
+            }
+            return isMultiSuggestionPopupVisible
+                ? .consume(reason: "multi-suggestion-visible")
+                : .passThrough(reason: "multi-suggestion-hidden")
+        case .dismissSuggestion:
+            guard isSuggestionVisible, currentSuggestion != nil else {
+                return .passThrough(reason: "no-visible-suggestion")
+            }
+            return .consume(reason: "dismiss-visible-suggestion")
+        case .acceptNextWord:
+            return acceptanceShortcutOwnershipDecision(
+                command: command,
+                action: .nextWord,
+                isSuggestionVisible: isSuggestionVisible
+            )
+        case .acceptFullSuggestion:
+            return acceptanceShortcutOwnershipDecision(
+                command: command,
+                action: .fullSuggestion,
+                isSuggestionVisible: isSuggestionVisible
+            )
+        }
+    }
+
+    private func acceptanceShortcutOwnershipDecision(
+        command: KeyboardShortcutCommand,
+        action: AcceptanceCommandAction,
+        isSuggestionVisible: Bool
+    ) -> ShortcutOwnershipDecision {
+        guard isSuggestionVisible else {
+            return .passThrough(reason: "no-visible-suggestion")
+        }
+
+        guard let suggestion = currentSuggestion else {
+            hideSuggestion(reason: "shortcut-ownership-no-suggestion", context: currentContext)
+            return .passThrough(reason: "no-current-suggestion")
+        }
+
+        guard !suggestion.isExhausted else {
+            hideSuggestion(reason: "shortcut-ownership-suggestion-exhausted", context: currentContext)
+            return .passThrough(reason: "suggestion-exhausted")
+        }
+
+        guard let context = currentContext else {
+            hideSuggestion(reason: "shortcut-ownership-no-current-context", context: nil)
+            return .passThrough(reason: "no-current-context")
+        }
+
+        switch validateGuardrailedAcceptance(context: context, action: action) {
+        case .valid:
+            if let block = riskyHostAcceptanceBlock(action: action, context: context) {
+                currentContext = context
+                statusMessage = block.statusMessage
+                diagnostics.recordRiskyHostAppBlock(action: block.diagnosticAction)
+                GeometryDebug.log("shortcut-ownership acceptance-blocked command=\(command.rawValue) reason=\(block.reason) context=\(debugContext(context)) current=\(debugSuggestionState())")
+                guardrailLogger.info("guardrail event=shortcut-ownership action=hide reason=\(block.reason) actionKind=\(action.debugName)")
+                hideSuggestion(reason: "shortcut-ownership-\(block.reason)", context: context)
+                return .passThrough(reason: block.reason)
+            }
+
+            return .consume(reason: "valid-suggestion")
+        case .passedThrough(let reason):
+            currentContext = context
+            statusMessage = "Suggestion unavailable"
+            GeometryDebug.log("shortcut-ownership acceptance-blocked command=\(command.rawValue) reason=\(reason.rawValue) context=\(debugContext(context)) current=\(debugSuggestionState())")
+            hideSuggestion(reason: "shortcut-ownership-\(reason.rawValue)", context: context)
+            if action == .fullSuggestion,
+               reason != .noSuggestion,
+               reason != .unexpectedSelection {
+                predictionController.cancelAll()
+                requestCompletion(for: context, invocation: .manual)
+                statusMessage = "Refreshing suggestion"
+            }
+            return .passThrough(reason: "stale-\(reason.rawValue)")
+        }
+    }
+
     func selectNextAlternative() {
         selectAlternative(offset: 1)
     }
@@ -340,6 +518,11 @@ final class SuggestionEngine: ObservableObject {
             return
         }
 
+        guard !isInteractionPipelineSuspended else {
+            GeometryDebug.log("input-event ignored reason=pipeline-suspended eventKind=\(event.eventKind.rawValue) kind=\(event.debugName)")
+            return
+        }
+
         let inputMethodState = inputMethodStateProvider()
         keystrokeBufferFallback?.record(
             event: event,
@@ -347,18 +530,36 @@ final class SuggestionEngine: ObservableObject {
             inputMethodState: inputMethodState
         )
         let action = inputController.action(for: event)
+        let hostPublishBaseline = currentContext
+        updateNavigationClearSuppression(for: action)
+        let clearsSuggestion = shouldClearSuggestion(for: action)
         GeometryDebug.log("input-event \(action.logDescription)")
+        SuggestionPipelineLog.log("input-event", fields: [
+            "eventKind=\(event.eventKind.rawValue)",
+            "kind=\(event.debugName)",
+            "schedule=\(action.shouldSchedulePrediction)",
+            "clear=\(clearsSuggestion)",
+            "clearKind=\(clearsSuggestion ? event.eventKind.rawValue : "nil")",
+            "current=\(SuggestionPipelineLog.suggestionDescription(currentSuggestion))"
+        ])
 
-        if action.shouldClearSuggestion {
+        if clearsSuggestion {
             clearSuggestion(for: action)
         }
 
-        guard action.shouldSchedulePrediction else {
+        guard shouldAwaitHostPublish(for: action) else {
+            if shouldCancelHostPublish(for: action) {
+                hostPublishAwaiter.cancelAll(reason: "input-\(event.eventKind.rawValue)-\(event.debugName)")
+            }
             return
         }
 
         Task { @MainActor [weak self] in
-            self?.requestRefresh(source: .inputEvent(event))
+            await self?.awaitHostPublishThenRefresh(
+                source: .inputEvent(event),
+                baseline: hostPublishBaseline,
+                refreshOnTimeout: action.shouldSchedulePrediction
+            )
         }
     }
 
@@ -366,12 +567,19 @@ final class SuggestionEngine: ObservableObject {
         dismissedContext = currentContext
         statusMessage = "Suggestion dismissed"
         predictionController.cancelAll()
+        hostPublishAwaiter.cancelAll(reason: "manual-dismiss")
         hideSuggestion(reason: "manual-dismiss", context: currentContext)
     }
 
     func triggerManualSuggestion() async {
         guard isAutocompleteEnabled else {
             statusMessage = "AutoComp disabled"
+            return
+        }
+
+        guard !isInteractionPipelineSuspended else {
+            statusMessage = "AutoComp paused"
+            GeometryDebug.log("manual-trigger skipped reason=pipeline-suspended")
             return
         }
 
@@ -387,6 +595,9 @@ final class SuggestionEngine: ObservableObject {
             )
             transientFocusFailureStartedAt = nil
             recordTrustedContext(context)
+            SuggestionPipelineLog.log("manual-context-captured", fields: [
+                "context=\(SuggestionPipelineLog.contextDescription(context))"
+            ])
             runManualSuggestion(
                 for: context,
                 inputMethodState: inputMethodState,
@@ -402,6 +613,9 @@ final class SuggestionEngine: ObservableObject {
             currentSuggestion = nil
             statusMessage = (error as? LocalizedError)?.errorDescription ?? "No compatible text field"
             GeometryDebug.log("manual-trigger-error status=\(statusMessage)")
+            SuggestionPipelineLog.log("manual-context-failed", fields: [
+                "error=\(SuggestionPipelineLog.privacySafeErrorSummary(error))"
+            ])
             presenter.hide()
         }
     }
@@ -437,6 +651,10 @@ final class SuggestionEngine: ObservableObject {
         diagnostics.recordEligibility(decision)
         logEligibilityDecision(decision)
         GeometryDebug.log("manual-trigger decision=\(debugEligibilityDecision(decision)) context=\(debugContext(context))")
+        SuggestionPipelineLog.log("manual-eligibility", fields: [
+            "decision=\(debugEligibilityDecision(decision))",
+            "context=\(SuggestionPipelineLog.contextDescription(context))"
+        ])
         guard decision.isEligible else {
             applyIneligibleDecision(decision, context: context)
             return
@@ -445,6 +663,7 @@ final class SuggestionEngine: ObservableObject {
         dismissedContext = nil
         currentContext = context
         predictionController.cancelAll()
+        hostPublishAwaiter.cancelAll(reason: "manual-trigger")
         acceptanceSessionController.clearAll()
         currentSuggestion = nil
         presenter.hide()
@@ -458,6 +677,10 @@ final class SuggestionEngine: ObservableObject {
     ) {
         let oldProvider = generationProvider
         GeometryDebug.log("engine-provider-update reason=\(reason.rawValue) status=\(status) current=\(debugSuggestionState())")
+        SuggestionPipelineLog.log("provider-update", fields: [
+            "reason=\(reason.rawValue)",
+            "current=\(SuggestionPipelineLog.suggestionDescription(currentSuggestion))"
+        ])
         switch reason {
         case .backendSwitch:
             prepareForBackendSwitch(reason: reason)
@@ -474,6 +697,7 @@ final class SuggestionEngine: ObservableObject {
         let previousContext = currentContext
         providerLifecycleGeneration += 1
         predictionController.cancelAll()
+        hostPublishAwaiter.cancelAll(reason: reason.rawValue)
         diagnostics.recordStaleDiscard(reason: reason.rawValue)
         hideSuggestion(reason: reason.rawValue, context: previousContext)
         resetCachedGenerationContext()
@@ -492,6 +716,7 @@ final class SuggestionEngine: ObservableObject {
         lastLatencyMs = nil
         postAcceptanceRefreshTask?.cancel()
         postAcceptanceRefreshTask = nil
+        hostPublishAwaiter.cancelAll(reason: "reset-cached-generation-context")
         inputController.reset()
     }
 
@@ -530,6 +755,12 @@ final class SuggestionEngine: ObservableObject {
 
     @discardableResult
     func acceptNextWord(using inserter: TextInserter) async -> SuggestionAcceptanceCommandOutcome {
+        guard !isInteractionPipelineSuspended else {
+            statusMessage = "AutoComp paused"
+            GeometryDebug.log("acceptance passed-through action=next-word reason=pipeline-suspended context=\(debugContext(currentContext)) current=\(debugSuggestionState())")
+            return .passedThrough
+        }
+
         let action = AcceptanceCommandAction.nextWord
         guard let liveContext = await revalidatedAcceptanceContext(for: action) else {
             return .passedThrough
@@ -547,6 +778,13 @@ final class SuggestionEngine: ObservableObject {
             }
             let insertionMs = elapsedMs(since: insertionStartedAt)
             GeometryDebug.log("acceptance accepted action=\(action.debugName) acceptedLength=\((result.acceptedText as NSString).length) context=\(debugContext(liveContext)) current=\(debugSuggestionState(result.currentSuggestion))")
+            SuggestionPipelineLog.log("acceptance-accepted", fields: [
+                "action=\(action.debugName)",
+                "acceptedLen=\((result.acceptedText as NSString).length)",
+                "insertionMs=\(insertionMs)",
+                "context=\(SuggestionPipelineLog.contextDescription(liveContext))",
+                "current=\(SuggestionPipelineLog.suggestionDescription(result.currentSuggestion))"
+            ])
             productivityMetrics?.recordAcceptedText(result.acceptedText)
             recordInsertionLatency(insertionMs)
             if result.shouldHidePresenter {
@@ -564,17 +802,29 @@ final class SuggestionEngine: ObservableObject {
             } else {
                 presenter.hide()
             }
-            schedulePostAcceptanceRefresh(for: action)
+            schedulePostAcceptanceRefresh(for: action, baseline: liveContext)
             return .accepted
         } catch {
             statusMessage = "Insertion failed"
             GeometryDebug.log("acceptance insert-failed action=\(action.debugName) error=\((error as? LocalizedError)?.errorDescription ?? error.localizedDescription) context=\(debugContext(liveContext)) current=\(debugSuggestionState())")
+            SuggestionPipelineLog.log("acceptance-insert-failed", fields: [
+                "action=\(action.debugName)",
+                "error=\(SuggestionPipelineLog.privacySafeErrorSummary(error))",
+                "context=\(SuggestionPipelineLog.contextDescription(liveContext))",
+                "current=\(SuggestionPipelineLog.suggestionDescription(currentSuggestion))"
+            ])
             return .failed
         }
     }
 
     @discardableResult
     func acceptAll(using inserter: TextInserter) async -> SuggestionAcceptanceCommandOutcome {
+        guard !isInteractionPipelineSuspended else {
+            statusMessage = "AutoComp paused"
+            GeometryDebug.log("acceptance passed-through action=full-suggestion reason=pipeline-suspended context=\(debugContext(currentContext)) current=\(debugSuggestionState())")
+            return .passedThrough
+        }
+
         let action = AcceptanceCommandAction.fullSuggestion
         guard let liveContext = await revalidatedAcceptanceContext(for: action) else {
             return .passedThrough
@@ -592,16 +842,29 @@ final class SuggestionEngine: ObservableObject {
             }
             let insertionMs = elapsedMs(since: insertionStartedAt)
             GeometryDebug.log("acceptance accepted action=\(action.debugName) acceptedLength=\((result.acceptedText as NSString).length) context=\(debugContext(liveContext)) current=\(debugSuggestionState(result.currentSuggestion))")
+            SuggestionPipelineLog.log("acceptance-accepted", fields: [
+                "action=\(action.debugName)",
+                "acceptedLen=\((result.acceptedText as NSString).length)",
+                "insertionMs=\(insertionMs)",
+                "context=\(SuggestionPipelineLog.contextDescription(liveContext))",
+                "current=\(SuggestionPipelineLog.suggestionDescription(result.currentSuggestion))"
+            ])
             productivityMetrics?.recordAcceptedText(result.acceptedText)
             recordInsertionLatency(insertionMs)
             GeometryDebug.log("completed-accept-all state=\(result.completedAcceptAllStateArmed ? "armed" : "nil") acceptedLength=\((result.acceptedText as NSString).length)")
             currentSuggestion = nil
             presenter.hide()
-            schedulePostAcceptanceRefresh(for: action)
+            schedulePostAcceptanceRefresh(for: action, baseline: liveContext)
             return .accepted
         } catch {
             statusMessage = "Insertion failed"
             GeometryDebug.log("acceptance insert-failed action=\(action.debugName) error=\((error as? LocalizedError)?.errorDescription ?? error.localizedDescription) context=\(debugContext(liveContext)) current=\(debugSuggestionState())")
+            SuggestionPipelineLog.log("acceptance-insert-failed", fields: [
+                "action=\(action.debugName)",
+                "error=\(SuggestionPipelineLog.privacySafeErrorSummary(error))",
+                "context=\(SuggestionPipelineLog.contextDescription(liveContext))",
+                "current=\(SuggestionPipelineLog.suggestionDescription(currentSuggestion))"
+            ])
             return .failed
         }
     }
@@ -610,6 +873,12 @@ final class SuggestionEngine: ObservableObject {
         guard currentSuggestion != nil else {
             statusMessage = "Suggestion unavailable"
             GeometryDebug.log("acceptance passed-through action=\(action.debugName) reason=\(AcceptanceSessionPassThroughReason.noSuggestion.rawValue) context=\(debugContext(currentContext)) current=\(debugSuggestionState())")
+            SuggestionPipelineLog.log("acceptance-passed-through", fields: [
+                "action=\(action.debugName)",
+                "reason=\(AcceptanceSessionPassThroughReason.noSuggestion.rawValue)",
+                "context=\(SuggestionPipelineLog.contextDescription(currentContext))",
+                "current=\(SuggestionPipelineLog.suggestionDescription(currentSuggestion))"
+            ])
             hideSuggestion(reason: "acceptance-\(AcceptanceSessionPassThroughReason.noSuggestion.rawValue)", context: currentContext)
             return nil
         }
@@ -624,6 +893,13 @@ final class SuggestionEngine: ObservableObject {
             diagnostics.recordFocusFailure(error)
             statusMessage = "Suggestion unavailable"
             GeometryDebug.log("acceptance passed-through action=\(action.debugName) reason=\(AcceptanceSessionPassThroughReason.staleContext.rawValue) error=\((error as? LocalizedError)?.errorDescription ?? error.localizedDescription) context=\(debugContext(currentContext)) current=\(debugSuggestionState())")
+            SuggestionPipelineLog.log("acceptance-passed-through", fields: [
+                "action=\(action.debugName)",
+                "reason=\(AcceptanceSessionPassThroughReason.staleContext.rawValue)",
+                "error=\(SuggestionPipelineLog.privacySafeErrorSummary(error))",
+                "context=\(SuggestionPipelineLog.contextDescription(currentContext))",
+                "current=\(SuggestionPipelineLog.suggestionDescription(currentSuggestion))"
+            ])
             hideSuggestion(reason: "acceptance-\(AcceptanceSessionPassThroughReason.staleContext.rawValue)", context: currentContext)
             return nil
         }
@@ -638,6 +914,12 @@ final class SuggestionEngine: ObservableObject {
                 statusMessage = block.statusMessage
                 diagnostics.recordRiskyHostAppBlock(action: block.diagnosticAction)
                 GeometryDebug.log("acceptance passed-through action=\(action.debugName) reason=\(block.reason) context=\(debugContext(liveContext)) current=\(debugSuggestionState())")
+                SuggestionPipelineLog.log("acceptance-passed-through", fields: [
+                    "action=\(action.debugName)",
+                    "reason=\(block.reason)",
+                    "context=\(SuggestionPipelineLog.contextDescription(liveContext))",
+                    "current=\(SuggestionPipelineLog.suggestionDescription(currentSuggestion))"
+                ])
                 guardrailLogger.info("guardrail event=accept-block action=hide reason=\(block.reason) actionKind=\(action.debugName)")
                 hideSuggestion(reason: "acceptance-\(block.reason)", context: liveContext)
                 return nil
@@ -648,6 +930,12 @@ final class SuggestionEngine: ObservableObject {
             currentContext = liveContext
             statusMessage = "Suggestion unavailable"
             GeometryDebug.log("acceptance passed-through action=\(action.debugName) reason=\(reason.rawValue) context=\(debugContext(liveContext)) current=\(debugSuggestionState())")
+            SuggestionPipelineLog.log("acceptance-passed-through", fields: [
+                "action=\(action.debugName)",
+                "reason=\(reason.rawValue)",
+                "context=\(SuggestionPipelineLog.contextDescription(liveContext))",
+                "current=\(SuggestionPipelineLog.suggestionDescription(currentSuggestion))"
+            ])
             hideSuggestion(reason: "acceptance-\(reason.rawValue)", context: liveContext)
             if action == .fullSuggestion,
                reason != .noSuggestion,
@@ -688,12 +976,26 @@ final class SuggestionEngine: ObservableObject {
             return .valid
         case .blockAndHide(let reason):
             GeometryDebug.log("acceptance guardrail=block-hide action=\(action.debugName) reason=\(reason.rawValue) context=\(debugContext(context)) current=\(debugSuggestionState())")
+            SuggestionPipelineLog.log("acceptance-guardrail", fields: [
+                "action=\(action.debugName)",
+                "decision=block-hide",
+                "reason=\(reason.rawValue)",
+                "context=\(SuggestionPipelineLog.contextDescription(context))",
+                "current=\(SuggestionPipelineLog.suggestionDescription(currentSuggestion))"
+            ])
             guardrailLogger.info("guardrail event=accept-block action=hide reason=\(reason.rawValue) actionKind=\(action.debugName)")
             hideSuggestion(reason: "acceptance-guardrail-\(reason.rawValue)", context: context)
             statusMessage = "Suggestion unavailable"
             return .passedThrough(.staleSuggestion)
         case .blockAndRegenerate(let reason):
             GeometryDebug.log("acceptance guardrail=block-regenerate action=\(action.debugName) reason=\(reason.rawValue) context=\(debugContext(context)) current=\(debugSuggestionState())")
+            SuggestionPipelineLog.log("acceptance-guardrail", fields: [
+                "action=\(action.debugName)",
+                "decision=block-regenerate",
+                "reason=\(reason.rawValue)",
+                "context=\(SuggestionPipelineLog.contextDescription(context))",
+                "current=\(SuggestionPipelineLog.suggestionDescription(currentSuggestion))"
+            ])
             guardrailLogger.info("guardrail event=accept-block action=regenerate reason=\(reason.rawValue) actionKind=\(action.debugName)")
             hideSuggestion(reason: "acceptance-guardrail-\(reason.rawValue)", context: context)
 
@@ -706,6 +1008,13 @@ final class SuggestionEngine: ObservableObject {
             return .passedThrough(.staleSuggestion)
         case .blockAndNoop(let reason):
             GeometryDebug.log("acceptance guardrail=block-noop action=\(action.debugName) reason=\(reason.rawValue) context=\(debugContext(context)) current=\(debugSuggestionState())")
+            SuggestionPipelineLog.log("acceptance-guardrail", fields: [
+                "action=\(action.debugName)",
+                "decision=block-noop",
+                "reason=\(reason.rawValue)",
+                "context=\(SuggestionPipelineLog.contextDescription(context))",
+                "current=\(SuggestionPipelineLog.suggestionDescription(currentSuggestion))"
+            ])
             guardrailLogger.info("guardrail event=accept-block action=noop reason=\(reason.rawValue) actionKind=\(action.debugName)")
             statusMessage = "Suggestion unavailable"
             return .passedThrough(.staleSuggestion)
@@ -760,30 +1069,133 @@ final class SuggestionEngine: ObservableObject {
         }
     }
 
-    private func schedulePostAcceptanceRefresh(for action: AcceptanceCommandAction) {
+    private func schedulePostAcceptanceRefresh(
+        for action: AcceptanceCommandAction,
+        baseline: TextContext
+    ) {
         postAcceptanceRefreshTask?.cancel()
         lifecycleController.beginAdaptiveFallbackBurst()
-        let delayNanoseconds = postAcceptanceRefreshDelayNanoseconds
-        postAcceptanceRefreshTask = Task { [weak self] in
-            do {
-                try await Task.sleep(nanoseconds: delayNanoseconds)
-            } catch {
-                return
-            }
-            self?.requestRefresh(source: .fallbackTimer)
+        postAcceptanceRefreshTask = Task { @MainActor [weak self] in
+            await self?.awaitHostPublishThenRefresh(
+                source: .postAcceptance(action),
+                baseline: baseline,
+                refreshOnTimeout: true
+            )
         }
-        GeometryDebug.log("acceptance-refresh scheduled action=\(action.debugName) delayMs=150")
+        GeometryDebug.log("acceptance-refresh scheduled action=\(action.debugName) hostPublishMaxMs=400")
+    }
+
+    private func shouldAwaitHostPublish(for action: SuggestionInputAction) -> Bool {
+        switch action.event.eventKind {
+        case .textMutation:
+            return action.shouldSchedulePrediction
+        case .shortcutMutation:
+            return action.event.mayPublishHostText
+        case .acceptance, .fullAcceptance, .manualTrigger, .dismissal, .navigation, .other:
+            return action.shouldSchedulePrediction
+        }
+    }
+
+    private func shouldCancelHostPublish(for action: SuggestionInputAction) -> Bool {
+        switch action.event.eventKind {
+        case .textMutation:
+            return action.shouldClearSuggestion
+        case .dismissal:
+            return true
+        case .navigation:
+            return false
+        case .shortcutMutation:
+            return action.event.mayPublishHostText
+        case .acceptance, .fullAcceptance, .manualTrigger, .other:
+            return false
+        }
+    }
+
+    private func shouldClearSuggestion(for action: SuggestionInputAction) -> Bool {
+        switch action.event.eventKind {
+        case .navigation where isNavigationClearSuppressed:
+            GeometryDebug.log("input-navigation-clear suppressed reason=recent-text-mutation kind=\(action.event.debugName)")
+            return false
+        case .shortcutMutation:
+            return action.event.mayPublishHostText
+        case .textMutation, .navigation, .dismissal, .acceptance, .fullAcceptance, .manualTrigger, .other:
+            return action.shouldClearSuggestion
+        }
+    }
+
+    private var isNavigationClearSuppressed: Bool {
+        Date() <= navigationClearSuppressedUntil
+    }
+
+    private func updateNavigationClearSuppression(for action: SuggestionInputAction) {
+        switch action.event.eventKind {
+        case .textMutation:
+            if action.event.mayPublishHostText {
+                navigationClearSuppressedUntil = Date().addingTimeInterval(navigationClearSuppressionInterval)
+            }
+        case .shortcutMutation:
+            if action.event.mayPublishHostText {
+                navigationClearSuppressedUntil = Date().addingTimeInterval(navigationClearSuppressionInterval)
+            }
+        case .acceptance, .fullAcceptance, .manualTrigger, .dismissal, .navigation, .other:
+            break
+        }
+    }
+
+    private func awaitHostPublishThenRefresh(
+        source: SuggestionRefreshSource,
+        baseline: TextContext?,
+        refreshOnTimeout: Bool
+    ) async {
+        guard isAutocompleteEnabled, !isInteractionPipelineSuspended else {
+            if isInteractionPipelineSuspended {
+                GeometryDebug.log("host-publish skipped reason=pipeline-suspended source=\(source.debugName)")
+            }
+            return
+        }
+
+        let result = await hostPublishAwaiter.awaitPublication(
+            after: baseline,
+            provider: focusProvider,
+            reason: source.debugName
+        )
+
+        switch result.outcome {
+        case .ready:
+            GeometryDebug.log("host-publish ready source=\(source.debugName) elapsedMs=\(result.elapsedMs)")
+            requestRefresh(source: source)
+        case .timeout:
+            GeometryDebug.log("host-publish timeout source=\(source.debugName) elapsedMs=\(result.elapsedMs) refresh=\(refreshOnTimeout)")
+            if refreshOnTimeout {
+                requestRefresh(source: source)
+            }
+        case .cancelled:
+            GeometryDebug.log("host-publish cancelled source=\(source.debugName) elapsedMs=\(result.elapsedMs)")
+        }
     }
 
     private func requestRefresh(source: SuggestionRefreshSource) {
+        guard !isInteractionPipelineSuspended else {
+            RefreshDiagnostics.log("refresh-request skipped reason=pipeline-suspended source=\(source.debugName)")
+            return
+        }
+
         let queuedDebugName = refreshQueuedSource?.debugName ?? "nil"
         RefreshDiagnostics.log("refresh-request source=\(source.debugName) inFlight=\(refreshTask != nil) queued=\(queuedDebugName)")
+        SuggestionPipelineLog.log("refresh-request", fields: [
+            "source=\(source.debugName)",
+            "inFlight=\(refreshTask != nil)",
+            "queued=\(queuedDebugName)"
+        ])
 
         // Single-flight: if a refresh is already running, remember we need another pass.
         if refreshTask != nil {
             // Coalesce: keep the most recent trigger as the queued source for diagnostics.
             refreshQueuedSource = source
             RefreshDiagnostics.log("refresh-queue source=\(source.debugName) running=true")
+            SuggestionPipelineLog.log("refresh-queued", fields: [
+                "source=\(source.debugName)"
+            ])
             return
         }
 
@@ -800,12 +1212,22 @@ final class SuggestionEngine: ObservableObject {
         var sourceToRun = initialSource
 
         while true {
+            guard !isInteractionPipelineSuspended else {
+                refreshTask = nil
+                refreshQueuedSource = nil
+                RefreshDiagnostics.log("refresh-single-flight stopped reason=pipeline-suspended source=\(sourceToRun.debugName)")
+                return
+            }
+
             await refresh(source: sourceToRun)
 
             if let queued = refreshQueuedSource {
                 refreshQueuedSource = nil
                 sourceToRun = queued
                 RefreshDiagnostics.log("refresh-dequeue source=\(queued.debugName) followup=true")
+                SuggestionPipelineLog.log("refresh-dequeued", fields: [
+                    "source=\(queued.debugName)"
+                ])
                 continue
             }
 
@@ -815,7 +1237,10 @@ final class SuggestionEngine: ObservableObject {
     }
 
     private func refresh(source: SuggestionRefreshSource) async {
-        guard isAutocompleteEnabled else {
+        guard isAutocompleteEnabled, !isInteractionPipelineSuspended else {
+            if isInteractionPipelineSuspended {
+                RefreshDiagnostics.log("refresh-skipped reason=pipeline-suspended source=\(source.debugName)")
+            }
             return
         }
 
@@ -823,6 +1248,11 @@ final class SuggestionEngine: ObservableObject {
         defer {
             let elapsed = elapsedMs(since: refreshStartedAt)
             RefreshDiagnostics.log("refresh-end source=\(source.debugName) elapsedMs=\(elapsed) status=\(statusMessage)")
+            SuggestionPipelineLog.log("refresh-end", fields: [
+                "source=\(source.debugName)",
+                "elapsedMs=\(elapsed)",
+                "status=\(SuggestionPipelineLog.privacySafeTextSummary(statusMessage))"
+            ])
         }
 
         backendStatusSummary = backendHealthMonitor.refresh()
@@ -841,9 +1271,21 @@ final class SuggestionEngine: ObservableObject {
             recordFocusDiagnostics(context)
             GeometryDebug.log("refresh source=\(source.debugName) context=\(debugContext(context)) previous=\(debugContext(currentContext)) current=\(debugSuggestionState())")
             RefreshDiagnostics.log("refresh-start source=\(source.debugName) app=\(context.app.bundleID)")
+            prepareVisualContextIfNeeded(for: context, source: source)
+            SuggestionPipelineLog.log("refresh-context", fields: [
+                "source=\(source.debugName)",
+                "context=\(SuggestionPipelineLog.contextDescription(context))",
+                "previous=\(SuggestionPipelineLog.contextDescription(currentContext))",
+                "current=\(SuggestionPipelineLog.suggestionDescription(currentSuggestion))"
+            ])
 
             if handleAppSwitchIfNeeded(context: context, source: source) {
                 GeometryDebug.log("refresh-branch action=app-switch source=\(source.debugName) context=\(debugContext(context))")
+                SuggestionPipelineLog.log("refresh-branch", fields: [
+                    "action=app-switch",
+                    "source=\(source.debugName)",
+                    "context=\(SuggestionPipelineLog.contextDescription(context))"
+                ])
                 return
             }
 
@@ -854,6 +1296,10 @@ final class SuggestionEngine: ObservableObject {
                 statusMessage = "Suggestion dismissed"
                 presenter.hide()
                 GeometryDebug.log("refresh-branch action=dismissed-until-mutation context=\(debugContext(context))")
+                SuggestionPipelineLog.log("refresh-branch", fields: [
+                    "action=dismissed-until-mutation",
+                    "context=\(SuggestionPipelineLog.contextDescription(context))"
+                ])
                 return
             }
 
@@ -866,17 +1312,31 @@ final class SuggestionEngine: ObservableObject {
                 diagnostics.recordEligibility(decision)
                 logEligibilityDecision(decision)
                 GeometryDebug.log("refresh-branch action=empty-context decision=\(debugEligibilityDecision(decision))")
+                SuggestionPipelineLog.log("refresh-branch", fields: [
+                    "action=empty-context",
+                    "decision=\(debugEligibilityDecision(decision))",
+                    "context=\(SuggestionPipelineLog.contextDescription(context))"
+                ])
                 applyIneligibleDecision(decision, context: context)
                 return
             }
 
             if await repairLeakedShortcutIfNeeded(context) {
                 GeometryDebug.log("refresh-branch action=shortcut-repair")
+                SuggestionPipelineLog.log("refresh-branch", fields: [
+                    "action=shortcut-repair",
+                    "context=\(SuggestionPipelineLog.contextDescription(context))",
+                    "current=\(SuggestionPipelineLog.suggestionDescription(currentSuggestion))"
+                ])
                 return
             }
 
             if repairCompletedAcceptAllLeakIfNeeded(context) {
                 GeometryDebug.log("refresh-branch action=completed-accept-all-repair")
+                SuggestionPipelineLog.log("refresh-branch", fields: [
+                    "action=completed-accept-all-repair",
+                    "context=\(SuggestionPipelineLog.contextDescription(context))"
+                ])
                 return
             }
 
@@ -888,12 +1348,23 @@ final class SuggestionEngine: ObservableObject {
                 currentContext = presentationContext
                 predictionController.cancelAll()
                 GeometryDebug.log("suggestion-keep reason=web-whitespace-normalization context=\(debugContext(context)) previous=\(debugContext(previousContext)) current=\(debugSuggestionState(suggestion))")
+                SuggestionPipelineLog.log("suggestion-keep", fields: [
+                    "reason=web-whitespace-normalization",
+                    "context=\(SuggestionPipelineLog.contextDescription(context))",
+                    "previous=\(SuggestionPipelineLog.contextDescription(previousContext))",
+                    "current=\(SuggestionPipelineLog.suggestionDescription(suggestion))"
+                ])
                 presenter.update(suggestion, for: presentationContext, mode: displayMode(for: presentationContext))
                 return
             }
 
             if handleAcceptedSuggestionSession(context) {
                 GeometryDebug.log("refresh-branch action=accepted-session")
+                SuggestionPipelineLog.log("refresh-branch", fields: [
+                    "action=accepted-session",
+                    "context=\(SuggestionPipelineLog.contextDescription(context))",
+                    "current=\(SuggestionPipelineLog.suggestionDescription(currentSuggestion))"
+                ])
                 return
             }
 
@@ -903,6 +1374,11 @@ final class SuggestionEngine: ObservableObject {
                isSameFocusedText(context, as: previousContext) {
                 currentContext = context
                 GeometryDebug.log("suggestion-keep reason=same-focused-text context=\(debugContext(context)) current=\(debugSuggestionState(suggestion))")
+                SuggestionPipelineLog.log("suggestion-keep", fields: [
+                    "reason=same-focused-text",
+                    "context=\(SuggestionPipelineLog.contextDescription(context))",
+                    "current=\(SuggestionPipelineLog.suggestionDescription(suggestion))"
+                ])
                 presenter.update(suggestion, for: context, mode: displayMode(for: context))
                 return
             }
@@ -915,6 +1391,12 @@ final class SuggestionEngine: ObservableObject {
                isTextConsistentWithAcceptedSuggestion(context: context, previousContext: prevContext, suggestion: suggestion) {
                 currentContext = context
                 GeometryDebug.log("suggestion-keep reason=accepted-prefix-consistent context=\(debugContext(context)) previous=\(debugContext(prevContext)) current=\(debugSuggestionState(suggestion))")
+                SuggestionPipelineLog.log("suggestion-keep", fields: [
+                    "reason=accepted-prefix-consistent",
+                    "context=\(SuggestionPipelineLog.contextDescription(context))",
+                    "previous=\(SuggestionPipelineLog.contextDescription(prevContext))",
+                    "current=\(SuggestionPipelineLog.suggestionDescription(suggestion))"
+                ])
                 presenter.update(suggestion, for: context, mode: displayMode(for: context))
                 return
             }
@@ -932,6 +1414,13 @@ final class SuggestionEngine: ObservableObject {
                 logEligibilityDecision(eligibilityDecision)
             }
             GeometryDebug.log("refresh-branch action=eligibility source=\(source.debugName) decision=\(debugEligibilityDecision(eligibilityDecision)) context=\(debugContext(context)) previous=\(debugContext(previousObservedContext)) current=\(debugSuggestionState())")
+            SuggestionPipelineLog.log("refresh-eligibility", fields: [
+                "source=\(source.debugName)",
+                "decision=\(debugEligibilityDecision(eligibilityDecision))",
+                "context=\(SuggestionPipelineLog.contextDescription(context))",
+                "previous=\(SuggestionPipelineLog.contextDescription(previousObservedContext))",
+                "current=\(SuggestionPipelineLog.suggestionDescription(currentSuggestion))"
+            ])
             guard eligibilityDecision.isEligible else {
                 applyIneligibleDecision(eligibilityDecision, context: context)
                 return
@@ -965,9 +1454,20 @@ final class SuggestionEngine: ObservableObject {
                 await MainActor.run {
                     guard engine.predictionController.isCurrent(workID) else {
                         GeometryDebug.log("completion-debounce skipped reason=stale-work workID=\(workID) generation=\(workID) source=\(source.debugName) context=\(engine.debugContext(context))")
+                        SuggestionPipelineLog.log("completion-debounce-skipped", fields: [
+                            "reason=stale-work",
+                            "workID=\(workID)",
+                            "source=\(source.debugName)",
+                            "context=\(SuggestionPipelineLog.contextDescription(context))"
+                        ])
                         return
                     }
                     GeometryDebug.log("completion-debounce fired workID=\(workID) generation=\(workID) source=\(source.debugName) context=\(engine.debugContext(context))")
+                    SuggestionPipelineLog.log("completion-debounce-fired", fields: [
+                        "workID=\(workID)",
+                        "source=\(source.debugName)",
+                        "context=\(SuggestionPipelineLog.contextDescription(context))"
+                    ])
                     var firedLatencySeed = latencySeed
                     firedLatencySeed.debounceMs = debounceStartedAt.duration(to: .now).appMilliseconds
                     engine.requestCompletion(
@@ -978,6 +1478,12 @@ final class SuggestionEngine: ObservableObject {
                 }
             }
             GeometryDebug.log("completion-debounce scheduled workID=\(debounceWorkID) generation=\(debounceWorkID) source=\(source.debugName) interval=\(debounceInterval) context=\(debugContext(context))")
+            SuggestionPipelineLog.log("completion-debounce-scheduled", fields: [
+                "workID=\(debounceWorkID)",
+                "source=\(source.debugName)",
+                "intervalMs=\(Int(debounceInterval * 1000))",
+                "context=\(SuggestionPipelineLog.contextDescription(context))"
+            ])
         } catch {
             keystrokeBufferFallback?.observeFocusFailure(error)
             diagnostics.recordFocusFailure(error)
@@ -987,8 +1493,13 @@ final class SuggestionEngine: ObservableObject {
 
             currentContext = nil
             currentSuggestion = nil
+            clearVisualContextOnFocusFailure(error)
             statusMessage = (error as? LocalizedError)?.errorDescription ?? "No compatible text field"
             GeometryDebug.log("refresh-error status=\(statusMessage)")
+            SuggestionPipelineLog.log("refresh-context-failed", fields: [
+                "source=\(source.debugName)",
+                "error=\(SuggestionPipelineLog.privacySafeErrorSummary(error))"
+            ])
             presenter.hide()
         }
     }
@@ -1001,7 +1512,9 @@ final class SuggestionEngine: ObservableObject {
             dismissedContext = nil
             predictionController.cancelAll()
             hideSuggestion(reason: "input-\(action.event.eventKind.rawValue)", context: currentContext)
-        case .navigation, .shortcutMutation:
+        case .navigation:
+            hideSuggestion(reason: "input-\(action.event.eventKind.rawValue)", context: currentContext)
+        case .shortcutMutation:
             predictionController.cancelAll()
             hideSuggestion(reason: "input-\(action.event.eventKind.rawValue)", context: currentContext)
         case .acceptance, .fullAcceptance, .manualTrigger, .other:
@@ -1035,6 +1548,60 @@ final class SuggestionEngine: ObservableObject {
             context: context,
             domainResolution: domainResolution(for: context)
         )
+    }
+
+    private func prepareVisualContextIfNeeded(for context: TextContext, source: SuggestionRefreshSource) {
+        guard let sessionController = visualContextProvider as? VisualContextSessionControlling else {
+            return
+        }
+
+        guard shouldPrepareVisualContext(for: context) else {
+            sessionController.stopAndClear()
+            return
+        }
+
+        switch source {
+        case .focusChanged, .activeAppChanged:
+            sessionController.refreshOnFocusOrWindowChange(context)
+        case .startup:
+            sessionController.startIfEligible(for: context)
+        case .inputEvent, .acceptanceGuardrail, .postAcceptance, .shortcutLeakRepair, .fallbackTimer:
+            break
+        }
+    }
+
+    private func shouldPrepareVisualContext(for context: TextContext) -> Bool {
+        guard isAutocompleteEnabled,
+              !isInteractionPipelineSuspended,
+              !isLowTrustContext(context),
+              privacyStore.load().screenContextEnabled else {
+            return false
+        }
+
+        let compatibilityDecision = compatibilityCatalog.decision(
+            bundleID: context.app.bundleID,
+            domain: context.domain,
+            userModeOverrides: compatibilitySettings.loadModeOverrides()
+        )
+        guard compatibilityDecision.enabled,
+              compatibilityDecision.mode != .disabled else {
+            return false
+        }
+
+        return domainRuleEligibilitySkipReason(for: context, invocation: .automatic) != .domainDenied
+    }
+
+    private func clearVisualContextOnFocusFailure(_ error: Error) {
+        guard let contextError = error as? AXTextContextError else {
+            return
+        }
+
+        switch contextError {
+        case .secureOrUnsupportedField, .accessibilityNotTrusted, .noFrontmostApplication, .interactionPipelineSuspended:
+            (visualContextProvider as? VisualContextSessionControlling)?.stopAndClear()
+        case .noReadableText, .noFocusedElement:
+            break
+        }
     }
 
     private func domainResolution(for context: TextContext) -> BrowserDomainResolution {
@@ -1073,7 +1640,7 @@ final class SuggestionEngine: ObservableObject {
         if invocation != .manual,
            domainRuleEligibilitySkipReason(for: context, invocation: invocation) == nil,
            domainRuleRequiresVisualContext(for: context),
-           !visualContextEligibilitySatisfied() {
+           !visualContextEligibilitySatisfied(for: context) {
             diagnostics.recordDomainRuleDecision(.domainNeedsVisualContext, domainResolution: domainResolution(for: context))
             return SuggestionEligibilityDecision(
                 outcome: .ineligible(.domainNeedsVisualContext),
@@ -1107,14 +1674,15 @@ final class SuggestionEngine: ObservableObject {
             || canonical == "slides.google.com"
     }
 
-    private func visualContextEligibilitySatisfied() -> Bool {
+    private func visualContextEligibilitySatisfied(for context: TextContext) -> Bool {
         // Visual context is satisfied when:
         // - a visual context provider exists, AND
         // - privacy settings enable screen context, AND
-        // - screen recording permission is available.
+        // - screen recording permission is available, AND
+        // - a cache entry is already ready for the focused target.
         //
-        // We rely on VisualContextCoordinator to enforce the same checks during capture;
-        // this gate prevents *activation* when a domain explicitly requires visual context.
+        // Capture runs out-of-band; this gate prevents required-visual domains from
+        // falling back to a prompt without the cache.
         guard let coordinator = visualContextProvider as? VisualContextCoordinator else {
             return false
         }
@@ -1124,7 +1692,21 @@ final class SuggestionEngine: ObservableObject {
             return false
         }
 
-        return coordinator.canAttemptCapture
+        guard coordinator.canAttemptCapture,
+              let session = coordinator.currentSession(),
+              session.state == .ready,
+              let snapshot = session.snapshot,
+              !snapshot.isEmpty else {
+            return false
+        }
+
+        guard let visualIdentity = snapshot.stableFieldIdentity else {
+            return true
+        }
+        guard let contextIdentity = context.stableFieldIdentity else {
+            return false
+        }
+        return visualIdentity.matchesStableTarget(contextIdentity)
     }
 
     private func domainRuleEligibilitySkipReason(
@@ -1163,6 +1745,12 @@ final class SuggestionEngine: ObservableObject {
         context: TextContext
     ) {
         GeometryDebug.log("ineligible-apply decision=\(debugEligibilityDecision(decision)) context=\(debugContext(context)) current=\(debugSuggestionState())")
+        SuggestionPipelineLog.log("ineligible-apply", fields: [
+            "decision=\(debugEligibilityDecision(decision))",
+            "statusSet=\(decision.statusMessage != nil)",
+            "context=\(SuggestionPipelineLog.contextDescription(context))",
+            "current=\(SuggestionPipelineLog.suggestionDescription(currentSuggestion))"
+        ])
         if let statusMessage = decision.statusMessage {
             self.statusMessage = statusMessage
         }
@@ -1205,6 +1793,22 @@ final class SuggestionEngine: ObservableObject {
         keystrokeBufferFallback?.observeTrustedContext(context)
     }
 
+    private func personalizationPromptSamples(
+        for context: TextContext,
+        privacySettings: PrivacySettings
+    ) -> [PersonalizationSample] {
+        guard let personalizationRecorder else {
+            return []
+        }
+
+        let samples = personalizationRecorder.promptSamples(
+            for: context,
+            privacySettings: privacySettings
+        )
+        personalizationRecorder.recordSample(from: context, privacySettings: privacySettings)
+        return samples
+    }
+
     private func makeCompletionLatencySeed(
         startedAt: ContinuousClock.Instant,
         fallbackAXCaptureMs: Int
@@ -1242,6 +1846,18 @@ final class SuggestionEngine: ObservableObject {
         productivityMetrics?.recordCompletionLatency(report)
     }
 
+    private func recordGeneratedSuggestion() {
+        (productivityMetrics as? CompletionTelemetryMetricsRecording)?.recordGeneratedSuggestion()
+    }
+
+    private func recordShownSuggestion() {
+        (productivityMetrics as? CompletionTelemetryMetricsRecording)?.recordShownSuggestion()
+    }
+
+    private func recordSuppressedSuggestion(reason: String) {
+        (productivityMetrics as? CompletionTelemetryMetricsRecording)?.recordSuppressedSuggestion(reason: reason)
+    }
+
     private func recordInsertionLatency(_ latencyMs: Int) {
         guard privacyStore.load().productivityMetricsEnabled else {
             diagnostics.recordLatency(nil)
@@ -1256,7 +1872,20 @@ final class SuggestionEngine: ObservableObject {
         invocation: CompletionInvocation = .automatic,
         latencySeed: CompletionLatencySeed? = nil
     ) {
+        guard !isInteractionPipelineSuspended else {
+            GeometryDebug.log("completion-suppressed reason=pipeline-suspended context=\(debugContext(context))")
+            statusMessage = "AutoComp paused"
+            recordSuppressedSuggestion(reason: "pipeline-suspended")
+            hideSuggestion(reason: "pipeline-suspended", context: context)
+            return
+        }
+
         backendStatusSummary = backendHealthMonitor.refresh()
+        SuggestionPipelineLog.log("completion-request", fields: [
+            "invocation=\(invocation.debugName)",
+            "routing=\(SuggestionPipelineLog.routingDescription(routingPolicy()))",
+            "context=\(SuggestionPipelineLog.contextDescription(context))"
+        ])
         if invocation == .automatic,
            let suppression = backendHealthMonitor.suppressionSummary() {
             inputController.clearSuggestionTrigger()
@@ -1267,6 +1896,13 @@ final class SuggestionEngine: ObservableObject {
             diagnostics.recordBackendPaused(suppression)
             let remainingSeconds = suppression.remainingSuppressionSeconds() ?? 0
             GeometryDebug.log("completion-suppressed reason=backend-paused issue=\(suppression.issue?.logValue ?? "unknown") remainingSeconds=\(remainingSeconds) context=\(debugContext(context))")
+            recordSuppressedSuggestion(reason: "backend-paused")
+            SuggestionPipelineLog.log("completion-suppressed", fields: [
+                "reason=backend-paused",
+                "issue=\(suppression.issue?.logValue ?? "unknown")",
+                "remainingSeconds=\(remainingSeconds)",
+                "context=\(SuggestionPipelineLog.contextDescription(context))"
+            ])
             recordAutocompleteDebug(
                 context: context,
                 privacySettings: privacyStore.load(),
@@ -1287,9 +1923,19 @@ final class SuggestionEngine: ObservableObject {
         let initialLatencyReport = completionLatencyReport(from: latencySeed)
         predictionController.replaceGenerationWork { [weak self] workID in
             GeometryDebug.log("completion-request workID=\(workID) generation=\(workID) app=\(context.app.displayName) bundle=\(context.app.bundleID) context=\(context.geometryDebugDescription)")
+            SuggestionPipelineLog.log("completion-start", fields: [
+                "workID=\(workID)",
+                "invocation=\(invocation.debugName)",
+                "context=\(SuggestionPipelineLog.contextDescription(context))"
+            ])
             guard let engine = self else { return }
             guard !Task.isCancelled else {
                 await MainActor.run {
+                    SuggestionPipelineLog.log("completion-cancelled", fields: [
+                        "workID=\(workID)",
+                        "reason=task-cancelled-before-start",
+                        "context=\(SuggestionPipelineLog.contextDescription(context))"
+                    ])
                     engine.recordAutocompleteDebug(
                         context: context,
                         privacySettings: engine.privacyStore.load(),
@@ -1302,9 +1948,14 @@ final class SuggestionEngine: ObservableObject {
                 }
                 return
             }
-            do {
-                var latencyReport = initialLatencyReport
+            var latencyReport = initialLatencyReport
                 let privacySettings = engine.privacyStore.load()
+                let personalizationSamples = await MainActor.run {
+                    engine.personalizationPromptSamples(
+                        for: context,
+                        privacySettings: privacySettings
+                    )
+                }
                 let isLowTrustRequest = engine.isLowTrustContext(context)
                 let visualContext: VisualContextSnapshot?
                 if isLowTrustRequest || engine.visualContextProvider == nil {
@@ -1316,6 +1967,12 @@ final class SuggestionEngine: ObservableObject {
                 }
                 guard !Task.isCancelled else {
                     await MainActor.run {
+                        SuggestionPipelineLog.log("completion-cancelled", fields: [
+                            "workID=\(workID)",
+                            "reason=task-cancelled-before-provider",
+                            "visualContext=\(visualContext == nil ? "none" : "included")",
+                            "context=\(SuggestionPipelineLog.contextDescription(context))"
+                        ])
                         engine.recordAutocompleteDebug(
                             context: context,
                             privacySettings: privacySettings,
@@ -1332,6 +1989,11 @@ final class SuggestionEngine: ObservableObject {
                     let isCurrent = engine.predictionController.isCurrent(workID)
                     if !isCurrent {
                         GeometryDebug.log("completion-discarded reason=backend-switch-before-provider requested=\(engine.debugContext(context))")
+                        SuggestionPipelineLog.log("completion-discarded", fields: [
+                            "workID=\(workID)",
+                            "reason=backend-switch-before-provider",
+                            "context=\(SuggestionPipelineLog.contextDescription(context))"
+                        ])
                         engine.recordAutocompleteDebug(
                             context: context,
                             privacySettings: privacySettings,
@@ -1357,6 +2019,11 @@ final class SuggestionEngine: ObservableObject {
                                 return
                             }
                             GeometryDebug.log("completion-discarded reason=missing-live-context-after-visual requested=\(engine.debugContext(context))")
+                            SuggestionPipelineLog.log("completion-discarded", fields: [
+                                "workID=\(workID)",
+                                "reason=missing-live-context-after-visual",
+                                "context=\(SuggestionPipelineLog.contextDescription(context))"
+                            ])
                             engine.diagnostics.recordStaleDiscard(reason: "missing-live-context-after-visual")
                             engine.recordAutocompleteDebug(
                                 context: context,
@@ -1383,6 +2050,12 @@ final class SuggestionEngine: ObservableObject {
                                 return
                             }
                             GeometryDebug.log("completion-discarded reason=stale-visual-context requested=\(engine.debugContext(context)) live=\(engine.debugContext(liveContextAfterVisual))")
+                            SuggestionPipelineLog.log("completion-discarded", fields: [
+                                "workID=\(workID)",
+                                "reason=stale-visual-context",
+                                "requested=\(SuggestionPipelineLog.contextDescription(context))",
+                                "live=\(SuggestionPipelineLog.contextDescription(liveContextAfterVisual))"
+                            ])
                             engine.diagnostics.recordStaleDiscard(reason: "stale-visual-context")
                             engine.recordAutocompleteDebug(
                                 context: context,
@@ -1418,6 +2091,12 @@ final class SuggestionEngine: ObservableObject {
                         visualContext: visualContext,
                         clipboardContext: clipboardContext
                     )
+                    SuggestionPipelineLog.log("completion-context-ready", fields: [
+                        "workID=\(workID)",
+                        "visualContext=\(ContextCaptureDiagnostics(context: context, visualContext: visualContext, clipboardContext: clipboardContext).visualContextLogValue)",
+                        "clipboardContext=\(ContextCaptureDiagnostics(context: context, visualContext: visualContext, clipboardContext: clipboardContext).clipboardContextLogValue)",
+                        "context=\(SuggestionPipelineLog.contextDescription(context))"
+                    ])
                 }
 
                 // Provider invocation is delegated to the pipeline runner, with cancellation/stale-work
@@ -1427,6 +2106,7 @@ final class SuggestionEngine: ObservableObject {
                 pipelineContext.userInfo["privacySettings"] = privacySettings
                 pipelineContext.userInfo["visualContext"] = visualContext
                 pipelineContext.userInfo["clipboardContext"] = clipboardContext
+                pipelineContext.userInfo["personalizationSamples"] = personalizationSamples
 
                 let (isCurrentAfterVisual, provider, completionOptions) = await MainActor.run {
                     (
@@ -1436,6 +2116,15 @@ final class SuggestionEngine: ObservableObject {
                             suggestionCount: engine.shouldRequestMultipleSuggestions(for: context, invocation: invocation) ? 3 : 1
                         )
                     )
+                }
+                await MainActor.run {
+                    SuggestionPipelineLog.log("provider-start", fields: [
+                        "workID=\(workID)",
+                        "current=\(isCurrentAfterVisual)",
+                        "routing=\(SuggestionPipelineLog.routingDescription(engine.routingPolicy()))",
+                        "suggestionCount=\(completionOptions.suggestionCount)",
+                        "context=\(SuggestionPipelineLog.contextDescription(context))"
+                    ])
                 }
                 let runner = SuggestionPipeline.Runner<Suggestion>(steps: [
                     SuggestionPipeline.StaleWorkStep<Suggestion>(isCurrent: { _ in
@@ -1454,6 +2143,7 @@ final class SuggestionEngine: ObservableObject {
                                 privacySettings: privacySettings,
                                 visualContext: ctx.userInfo["visualContext"] as? VisualContextSnapshot,
                                 clipboardContext: ctx.userInfo["clipboardContext"] as? ClipboardContextSnapshot,
+                                personalizationSamples: ctx.userInfo["personalizationSamples"] as? [PersonalizationSample] ?? [],
                                 options: completionOptions
                             )
                         }
@@ -1463,12 +2153,25 @@ final class SuggestionEngine: ObservableObject {
                 let backendStartedAt = ContinuousClock.now
                 let pipelineOutcome = await runner.run(context: &pipelineContext)
                 latencyReport.backendMs = backendStartedAt.duration(to: .now).appMilliseconds
+                await MainActor.run {
+                    SuggestionPipelineLog.log("provider-finished", fields: [
+                        "workID=\(workID)",
+                        "outcome=\(Self.pipelineOutcomeDescription(pipelineOutcome))",
+                        "backendMs=\(latencyReport.backendMs ?? -1)",
+                        "context=\(SuggestionPipelineLog.contextDescription(context))"
+                    ])
+                }
 
                 let promptCacheStats = await engine.promptCacheStatsIfAvailable()
 
                 switch pipelineOutcome {
                 case .publish(let suggestion):
                     let completionLatencyReport = latencyReport
+                    await MainActor.run {
+                        if engine.predictionController.isCurrent(workID) {
+                            engine.recordGeneratedSuggestion()
+                        }
+                    }
                     await MainActor.run {
                         guard engine.predictionController.isCurrent(workID) else {
                             return
@@ -1478,6 +2181,12 @@ final class SuggestionEngine: ObservableObject {
                         // Keep existing low-trust behavior: skip live revalidation.
                         if isLowTrustRequest {
                             GeometryDebug.log("completion-success revalidation=skipped-low-trust context=\(engine.debugContext(context)) suggestion=\(engine.debugSuggestionState(suggestion))")
+                            SuggestionPipelineLog.log("completion-revalidation", fields: [
+                                "workID=\(workID)",
+                                "result=skipped-low-trust",
+                                "context=\(SuggestionPipelineLog.contextDescription(context))",
+                                "suggestion=\(SuggestionPipelineLog.suggestionDescription(suggestion))"
+                            ])
                             let result = engine.publish(
                                 suggestion,
                                 context: context,
@@ -1512,6 +2221,12 @@ final class SuggestionEngine: ObservableObject {
                                 return
                             }
                             GeometryDebug.log("completion-discarded reason=missing-live-context requested=\(engine.debugContext(context))")
+                            SuggestionPipelineLog.log("completion-discarded", fields: [
+                                "workID=\(workID)",
+                                "reason=missing-live-context",
+                                "context=\(SuggestionPipelineLog.contextDescription(context))",
+                                "suggestion=\(SuggestionPipelineLog.suggestionDescription(suggestion))"
+                            ])
                             engine.diagnostics.recordStaleDiscard(reason: "missing-live-context")
                             engine.recordAutocompleteDebug(
                                 context: context,
@@ -1531,6 +2246,13 @@ final class SuggestionEngine: ObservableObject {
                     await MainActor.run {
                         guard engine.predictionController.isCurrent(workID) else {
                             GeometryDebug.log("completion-discarded reason=stale-work requested=\(engine.debugContext(context)) live=\(engine.debugContext(liveContext))")
+                            SuggestionPipelineLog.log("completion-discarded", fields: [
+                                "workID=\(workID)",
+                                "reason=stale-work",
+                                "requested=\(SuggestionPipelineLog.contextDescription(context))",
+                                "live=\(SuggestionPipelineLog.contextDescription(liveContext))",
+                                "suggestion=\(SuggestionPipelineLog.suggestionDescription(suggestion))"
+                            ])
                             if engine.providerLifecycleGeneration == providerGeneration {
                                 engine.diagnostics.recordStaleDiscard(reason: "stale-work")
                             }
@@ -1550,8 +2272,22 @@ final class SuggestionEngine: ObservableObject {
                         let liveContextMatchesRequest = engine.contextGenerationTracker.matches(liveContext, signature: requestedSignature)
                         engine.recordTrustedContext(liveContext)
                         GeometryDebug.log("completion-live-context match=\(liveContextMatchesRequest) requested=\(engine.debugContext(context)) live=\(engine.debugContext(liveContext))")
+                        SuggestionPipelineLog.log("completion-revalidation", fields: [
+                            "workID=\(workID)",
+                            "match=\(liveContextMatchesRequest)",
+                            "requested=\(SuggestionPipelineLog.contextDescription(context))",
+                            "live=\(SuggestionPipelineLog.contextDescription(liveContext))",
+                            "suggestion=\(SuggestionPipelineLog.suggestionDescription(suggestion))"
+                        ])
                         guard liveContextMatchesRequest else {
                             GeometryDebug.log("completion-discarded reason=stale-context requested=\(engine.debugContext(context)) live=\(engine.debugContext(liveContext))")
+                            SuggestionPipelineLog.log("completion-discarded", fields: [
+                                "workID=\(workID)",
+                                "reason=stale-context",
+                                "requested=\(SuggestionPipelineLog.contextDescription(context))",
+                                "live=\(SuggestionPipelineLog.contextDescription(liveContext))",
+                                "suggestion=\(SuggestionPipelineLog.suggestionDescription(suggestion))"
+                            ])
                             engine.diagnostics.recordStaleDiscard(reason: "stale-context")
                             engine.recordAutocompleteDebug(
                                 context: context,
@@ -1589,6 +2325,12 @@ final class SuggestionEngine: ObservableObject {
                     await MainActor.run {
                         guard engine.predictionController.isCurrent(workID) else { return }
                         GeometryDebug.log("completion-discarded reason=\(reason.message ?? reason.kind.rawValue) requested=\(engine.debugContext(context))")
+                        engine.recordSuppressedSuggestion(reason: reason.message ?? reason.kind.rawValue)
+                        SuggestionPipelineLog.log("completion-discarded", fields: [
+                            "workID=\(workID)",
+                            "reason=\(SuggestionPipelineLog.discardReasonDescription(reason))",
+                            "context=\(SuggestionPipelineLog.contextDescription(context))"
+                        ])
                         engine.recordAutocompleteDebug(
                             context: context,
                             privacySettings: privacySettings,
@@ -1607,6 +2349,14 @@ final class SuggestionEngine: ObservableObject {
                         let message = reason.backendIssue?.message ?? reason.message ?? "completion-failed"
                         let failureError = ProviderInvocationFailureError(message: message)
                         GeometryDebug.log("completion-failed context=\(engine.debugContext(context)) error=\(message)")
+                        engine.recordSuppressedSuggestion(reason: reason.backendIssue?.logValue ?? reason.kind.rawValue)
+                        SuggestionPipelineLog.log("completion-failed", fields: [
+                            "workID=\(workID)",
+                            "kind=\(reason.kind.rawValue)",
+                            "issue=\(reason.backendIssue?.logValue ?? "unknown")",
+                            "error=\(SuggestionPipelineLog.privacySafeTextSummary(message))",
+                            "context=\(SuggestionPipelineLog.contextDescription(context))"
+                        ])
                         engine.diagnostics.recordBackendFailure(message: message, kind: engine.routingPolicy()?.activeKind)
                         if let issue = reason.backendIssue {
                             let healthSummary = engine.backendHealthMonitor.recordFailure(issue: issue)
@@ -1616,6 +2366,12 @@ final class SuggestionEngine: ObservableObject {
                                 engine.statusMessage = healthSummary.statusMessage()
                                 engine.diagnostics.recordBackendPaused(healthSummary)
                                 GeometryDebug.log("completion-paused issue=\(healthSummary.issue?.logValue ?? "unknown") remainingSeconds=\(remainingSeconds) consecutiveFailures=\(engine.backendHealthMonitor.circuitBreaker.consecutiveFailures)")
+                                SuggestionPipelineLog.log("completion-paused", fields: [
+                                    "workID=\(workID)",
+                                    "issue=\(healthSummary.issue?.logValue ?? "unknown")",
+                                    "remainingSeconds=\(remainingSeconds)",
+                                    "consecutiveFailures=\(engine.backendHealthMonitor.circuitBreaker.consecutiveFailures)"
+                                ])
                             } else {
                                 engine.statusMessage = message
                             }
@@ -1637,37 +2393,6 @@ final class SuggestionEngine: ObservableObject {
                 case .continue:
                     break
                 }
-            } catch {
-                await MainActor.run {
-                    guard engine.predictionController.isCurrent(workID) else {
-                        return
-                    }
-                    GeometryDebug.log("completion-failed context=\(engine.debugContext(context)) error=\((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)")
-                    engine.diagnostics.recordBackendFailure(error, kind: engine.routingPolicy()?.activeKind)
-                    let healthSummary = engine.backendHealthMonitor.recordFailure(error)
-                    if let healthSummary {
-                        engine.backendStatusSummary = healthSummary
-                    }
-                    if let healthSummary, healthSummary.state == .paused {
-                        let remainingSeconds = healthSummary.remainingSuppressionSeconds() ?? 0
-                        engine.statusMessage = healthSummary.statusMessage()
-                        engine.diagnostics.recordBackendPaused(healthSummary)
-                        GeometryDebug.log("completion-paused issue=\(healthSummary.issue?.logValue ?? "unknown") remainingSeconds=\(remainingSeconds) consecutiveFailures=\(engine.backendHealthMonitor.circuitBreaker.consecutiveFailures)")
-                    } else {
-                        engine.statusMessage = SuggestionDiagnostics.message(for: error)
-                    }
-                    engine.recordAutocompleteDebug(
-                        context: context,
-                        privacySettings: engine.privacyStore.load(),
-                        visualContext: nil,
-                        clipboardContext: nil,
-                        invocation: invocation,
-                        outcome: "failed",
-                        error: error
-                    )
-                    engine.hideSuggestion(reason: "completion-failed", context: context)
-                }
-            }
         }
     }
 
@@ -1712,6 +2437,21 @@ final class SuggestionEngine: ObservableObject {
         return [
             try await generationProvider.complete(context: context)
         ]
+    }
+
+    nonisolated private static func pipelineOutcomeDescription(
+        _ outcome: SuggestionPipeline.Outcome<Suggestion>
+    ) -> String {
+        switch outcome {
+        case .continue:
+            return "continue"
+        case .discard(let reason):
+            return "discard:\(SuggestionPipelineLog.discardReasonDescription(reason))"
+        case .publish(let suggestion):
+            return "publish:\(SuggestionPipelineLog.suggestionDescription(suggestion))"
+        case .failure(let reason):
+            return "failure:\(SuggestionPipelineLog.discardReasonDescription(reason))"
+        }
     }
 
     private func promptCacheStatsIfAvailable() async -> LlamaPromptCacheStats? {
@@ -1788,6 +2528,9 @@ final class SuggestionEngine: ObservableObject {
         guard let visualContextProvider else {
             return nil
         }
+        if let contextProvider = visualContextProvider as? TextContextVisualContextProvider {
+            return await contextProvider.currentVisualContext(for: context)
+        }
         if let stableProvider = visualContextProvider as? StableFieldVisualContextProvider {
             return await stableProvider.currentVisualContext(for: context.stableFieldIdentity)
         }
@@ -1827,6 +2570,13 @@ final class SuggestionEngine: ObservableObject {
             currentContext = repairedContext
             predictionController.cancelAll()
             self.statusMessage = statusMessage
+            Task { @MainActor [weak self, context] in
+                await self?.awaitHostPublishThenRefresh(
+                    source: .shortcutLeakRepair,
+                    baseline: context,
+                    refreshOnTimeout: true
+                )
+            }
 
             if let currentSuggestion {
                 presenter.update(currentSuggestion, for: repairedContext, mode: displayMode(for: repairedContext))
@@ -1920,7 +2670,7 @@ final class SuggestionEngine: ObservableObject {
         switch contextError {
         case .noReadableText, .noFocusedElement:
             return true
-        case .accessibilityNotTrusted, .noFrontmostApplication, .secureOrUnsupportedField:
+        case .accessibilityNotTrusted, .noFrontmostApplication, .secureOrUnsupportedField, .interactionPipelineSuspended:
             return false
         }
     }
@@ -2027,6 +2777,12 @@ final class SuggestionEngine: ObservableObject {
         diagnostics.recordPrivacy(privacyDecision)
         let collectionAllowed = privacyDecision.allowed
         GeometryDebug.log("suggestion-publication attempt context=\(debugContext(context)) mode=\(mode.rawValue) raw=\(debugSuggestionState(suggestion))")
+        SuggestionPipelineLog.log("publication-attempt", fields: [
+            "mode=\(mode.rawValue)",
+            "collectionAllowed=\(collectionAllowed)",
+            "context=\(SuggestionPipelineLog.contextDescription(context))",
+            "suggestion=\(SuggestionPipelineLog.suggestionDescription(suggestion))"
+        ])
         let result = publicationController.publish(
             suggestion,
             context: context,
@@ -2034,6 +2790,12 @@ final class SuggestionEngine: ObservableObject {
             collectionAllowed: collectionAllowed
         )
         logPublicationResult(result)
+        SuggestionPipelineLog.log("publication-result", fields: [
+            "outcome=\(publicationOutcomeDescription(result.outcome))",
+            "normalizationMs=\(result.normalizationMs ?? -1)",
+            "overlayMs=\(result.overlayMs ?? -1)",
+            "context=\(SuggestionPipelineLog.contextDescription(context))"
+        ])
 
         var completedLatencyReport = latencyReport ?? CompletionLatencyReport()
         if completedLatencyReport.backendMs == nil {
@@ -2048,6 +2810,7 @@ final class SuggestionEngine: ObservableObject {
 
         switch result.outcome {
         case .published(let suggestion):
+            recordShownSuggestion()
             diagnostics.recordBackendSuccess(
                 rawText: suggestion.rawText,
                 normalizedText: suggestion.visibleText,
@@ -2060,17 +2823,36 @@ final class SuggestionEngine: ObservableObject {
             currentSuggestion = boundSuggestion
             acceptanceSessionController.recordPublication(context: context, suggestion: boundSuggestion)
             GeometryDebug.log("suggestion-state action=published context=\(debugContext(context)) current=\(debugSuggestionState(boundSuggestion))")
+            SuggestionPipelineLog.log("suggestion-state", fields: [
+                "action=published",
+                "context=\(SuggestionPipelineLog.contextDescription(context))",
+                "current=\(SuggestionPipelineLog.suggestionDescription(boundSuggestion))"
+            ])
             lastLatencyMs = result.lastLatencyMs
             if let statusMessage = result.statusMessage {
                 self.statusMessage = statusMessage
             }
-        case .rejected:
+        case .rejected(let reason):
+            recordSuppressedSuggestion(reason: "publication-\(reason.rawValue)")
             acceptanceSessionController.clearAll()
             currentSuggestion = nil
             GeometryDebug.log("suggestion-state action=rejected context=\(debugContext(context))")
+            SuggestionPipelineLog.log("suggestion-state", fields: [
+                "action=rejected",
+                "context=\(SuggestionPipelineLog.contextDescription(context))"
+            ])
         }
 
         return result
+    }
+
+    private func publicationOutcomeDescription(_ outcome: SuggestionPublicationOutcome) -> String {
+        switch outcome {
+        case .published(let suggestion):
+            return "published:\(SuggestionPipelineLog.suggestionDescription(suggestion))"
+        case .rejected(let reason):
+            return "rejected:\(reason.rawValue)"
+        }
     }
 
     private func recordAutocompleteDebug(
@@ -2206,6 +2988,11 @@ final class SuggestionEngine: ObservableObject {
 
     private func hideSuggestion(reason: String, context: TextContext?) {
         GeometryDebug.log("suggestion-hide reason=\(reason) context=\(debugContext(context)) current=\(debugSuggestionState())")
+        SuggestionPipelineLog.log("suggestion-hide", fields: [
+            "reason=\(reason)",
+            "context=\(SuggestionPipelineLog.contextDescription(context))",
+            "current=\(SuggestionPipelineLog.suggestionDescription(currentSuggestion))"
+        ])
         if reason.hasPrefix("acceptance-") || reason == "focus-changed" {
             guardrailLogger.info("guardrail event=suggestion-hide reason=\(reason)")
         }

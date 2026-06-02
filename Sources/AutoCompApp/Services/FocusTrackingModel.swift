@@ -35,7 +35,7 @@ protocol AXTextGeometryResolving {
 
 extension AXTextGeometryResolver: AXTextGeometryResolving {}
 
-protocol ScreenOCRGeometryFallbackResolving: AnyObject {
+protocol ScreenOCRGeometryFallbackResolving: AnyObject, Sendable {
     func resolve(searchRect: CGRect?, authoritativeText: String) async -> ScreenOCRGeometryFallback?
 }
 
@@ -59,7 +59,9 @@ final class FocusTrackingModel: ObservableObject, TextContextProvider, FocusCont
     private let textGeometryResolver: any AXTextGeometryResolving
     private let screenOCRGeometryFallbackResolver: any ScreenOCRGeometryFallbackResolving
     private let axCapabilitySnapshotRecorder: any AXCapabilitySnapshotRecording
+    private let interactionPipelineSuspensionController: InteractionPipelineSuspensionController?
     private let safeOverlayModeEnabled: Bool
+    private let screenOCRGeometryFallbackTimeout: TimeInterval
     private var lastStableFieldIdentity: StableFieldIdentity?
     private var lastTrackedFocusIdentity: TrackedFocusIdentity?
 
@@ -69,17 +71,28 @@ final class FocusTrackingModel: ObservableObject, TextContextProvider, FocusCont
         textGeometryResolver: (any AXTextGeometryResolving)? = nil,
         screenOCRGeometryFallbackResolver: any ScreenOCRGeometryFallbackResolving = ScreenOCRGeometryFallbackResolver(),
         axCapabilitySnapshotRecorder: any AXCapabilitySnapshotRecording = AXCapabilitySnapshotRecorder(),
-        safeOverlayModeEnabled: Bool = SafeOverlayMode.isEnabled
+        interactionPipelineSuspensionController: InteractionPipelineSuspensionController? = nil,
+        safeOverlayModeEnabled: Bool = SafeOverlayMode.isEnabled,
+        screenOCRGeometryFallbackTimeout: TimeInterval = 1.5
     ) {
         self.axHelper = axHelper
         self.focusSnapshotResolver = focusSnapshotResolver ?? FocusSnapshotResolver(axHelper: axHelper)
         self.textGeometryResolver = textGeometryResolver ?? AXTextGeometryResolver(axHelper: axHelper)
         self.screenOCRGeometryFallbackResolver = screenOCRGeometryFallbackResolver
         self.axCapabilitySnapshotRecorder = axCapabilitySnapshotRecorder
+        self.interactionPipelineSuspensionController = interactionPipelineSuspensionController
         self.safeOverlayModeEnabled = safeOverlayModeEnabled
+        self.screenOCRGeometryFallbackTimeout = max(0.05, screenOCRGeometryFallbackTimeout)
     }
 
     func currentContext() async throws -> TextContext {
+        if interactionPipelineSuspensionController?.isSuspended == true {
+            let error = AXTextContextError.interactionPipelineSuspended
+            await publishRejection(error)
+            GeometryDebug.log("ax rejected reason=pipeline-suspended")
+            throw error
+        }
+
         lastFocusContextLatencyReport = nil
         do {
             let axCaptureStartedAt = ContinuousClock.now
@@ -106,20 +119,39 @@ final class FocusTrackingModel: ObservableObject, TextContextProvider, FocusCont
 
             if !safeOverlayModeEnabled,
                shouldUseScreenOCRFallback,
-               let authoritativeText = textBeforeCursor,
-               let fallback = await screenOCRGeometryFallbackResolver.resolve(
-                searchRect: axHelper.ancestorContentRect(for: focusSnapshot.focusedElement),
-                authoritativeText: authoritativeText
-               ) {
-                geometry.focusedElementRect = fallback.focusedElementRect
-                geometry.caretRect = fallback.caretRect
-                geometry.previousGlyphRect = fallback.previousGlyphRect
-                geometry.nextGlyphRect = nil
-                geometry.lineReferenceRect = fallback.previousGlyphRect
-                geometry.caretGeometryQuality = .screenOCR
-                geometry.observedCharacterWidth = nil
-                captureSources.insert(.screenOCR)
-                GeometryDebug.log("ax-fallback source=screenOCR-geometry focusedElementRect=\(fallback.focusedElementRect) caretRect=\(fallback.caretRect)")
+               let authoritativeText = textBeforeCursor {
+                let searchRect = axHelper.ancestorContentRect(for: focusSnapshot.focusedElement)
+                let fallbackResult = await AsyncTimeout.run(
+                    seconds: screenOCRGeometryFallbackTimeout,
+                    onTimeout: {
+                        GeometryDebug.log("ax-fallback source=screenOCR-geometry status=resolver-timeout")
+                    },
+                    operation: { [screenOCRGeometryFallbackResolver] in
+                        await screenOCRGeometryFallbackResolver.resolve(
+                            searchRect: searchRect,
+                            authoritativeText: authoritativeText
+                        )
+                    }
+                )
+                let fallback: ScreenOCRGeometryFallback?
+                switch fallbackResult {
+                case .completed(let resolvedFallback):
+                    fallback = resolvedFallback
+                case .timedOut:
+                    fallback = nil
+                }
+
+                if let fallback {
+                    geometry.focusedElementRect = fallback.focusedElementRect
+                    geometry.caretRect = fallback.caretRect
+                    geometry.previousGlyphRect = fallback.previousGlyphRect
+                    geometry.nextGlyphRect = nil
+                    geometry.lineReferenceRect = fallback.previousGlyphRect
+                    geometry.caretGeometryQuality = .screenOCR
+                    geometry.observedCharacterWidth = nil
+                    captureSources.insert(.screenOCR)
+                    GeometryDebug.log("ax-fallback source=screenOCR-geometry focusedElementRect=\(fallback.focusedElementRect) caretRect=\(fallback.caretRect)")
+                }
             }
             let geometryMs = geometryStartedAt.duration(to: .now).appMilliseconds
             lastFocusContextLatencyReport = FocusContextLatencyReport(
@@ -135,6 +167,17 @@ final class FocusTrackingModel: ObservableObject, TextContextProvider, FocusCont
 
             guard let textBeforeCursor else {
                 GeometryDebug.log("ax rejected reason=no-readable-text role=\(axHelper.stringAttribute(kAXRoleAttribute, from: focusSnapshot.focusedElement) ?? "nil") subrole=\(axHelper.stringAttribute(kAXSubroleAttribute, from: focusSnapshot.focusedElement) ?? "nil") selectedRange=\(String(describing: selectedRange)) textLength=\(focusSnapshot.textLength)")
+                SuggestionPipelineLog.log("context-capture-rejected", fields: [
+                    "reason=no-readable-text",
+                    "appBundle=\(focusSnapshot.bundleID)",
+                    "domain=\(focusSnapshot.domain ?? "nil")",
+                    "domainResolution=\(focusSnapshot.domainResolution.diagnosticValue)",
+                    "role=\(focusSnapshot.role ?? "nil")",
+                    "subrole=\(focusSnapshot.subrole ?? "nil")",
+                    "selectedRange=\(selectedRange.map { "\($0.location):\($0.length)" } ?? "nil")",
+                    "textLength=\(focusSnapshot.textLength)",
+                    "googleDocsElement=\(focusSnapshot.isGoogleDocsElement)"
+                ])
                 throw AXTextContextError.noReadableText
             }
 
@@ -168,9 +211,22 @@ final class FocusTrackingModel: ObservableObject, TextContextProvider, FocusCont
                 languageHint: Locale.current.language.languageCode?.identifier,
                 captureSources: captureSources
             )
+            SuggestionPipelineLog.log("context-capture-success", fields: [
+                "appBundle=\(focusSnapshot.bundleID)",
+                "domain=\(focusSnapshot.domain ?? "nil")",
+                "domainResolution=\(focusSnapshot.domainResolution.diagnosticValue)",
+                "role=\(focusSnapshot.role ?? "nil")",
+                "subrole=\(focusSnapshot.subrole ?? "nil")",
+                "textLength=\(focusSnapshot.textLength)",
+                "googleDocsElement=\(focusSnapshot.isGoogleDocsElement)",
+                "context=\(SuggestionPipelineLog.contextDescription(context))"
+            ])
             return await publishContext(context)
         } catch {
             await publishRejection(error)
+            SuggestionPipelineLog.log("context-capture-failed", fields: [
+                "error=\(SuggestionPipelineLog.privacySafeErrorSummary(error))"
+            ])
             throw error
         }
     }
@@ -229,7 +285,7 @@ final class FocusTrackingModel: ObservableObject, TextContextProvider, FocusCont
             return .secureOrUnsupported
         case .noReadableText:
             return .unreadableText
-        case .accessibilityNotTrusted, .noFrontmostApplication, .noFocusedElement:
+        case .accessibilityNotTrusted, .noFrontmostApplication, .noFocusedElement, .interactionPipelineSuspended:
             return .unavailable
         }
     }

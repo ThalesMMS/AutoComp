@@ -4,93 +4,69 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-./script/build_and_run.sh --ui-test-settings >/tmp/autocomp_ui_launch.log
+AUTOCOMP_REMOTE_BASE_URL="http://100.98.1.45:8000" \
+AUTOCOMP_REMOTE_API_KEY="apikey" \
+AUTOCOMP_REMOTE_MODEL="default" \
+  ./script/build_and_run.sh --ui-test-settings >/tmp/autocomp_ui_launch.log
 
-MODEL_TEXT="$(osascript <<'OSA'
-on visibleText(e)
+osascript <<'OSA'
+on appendAttribute(e, attributeName, currentText)
   tell application "System Events"
-    set found to ""
     try
-      repeat with c in UI elements of e
-        try
-          set r to role of c as text
-          if r is "AXStaticText" or r is "AXTextField" then
-            try
-              set v to value of c
-              if v is not missing value then set found to found & (v as text) & linefeed
-            end try
-            try
-              set n to name of c
-              if n is not missing value then set found to found & (n as text) & linefeed
-            end try
-          end if
-        end try
-        set found to found & my visibleText(c)
-      end repeat
+      if attributeName is "name" then set attributeValue to name of e
+      if attributeName is "value" then set attributeValue to value of e
+      if attributeValue is not missing value then return currentText & (attributeValue as text) & linefeed
     end try
-    return found
+    return currentText
   end tell
-end visibleText
+end appendAttribute
 
-tell application "System Events"
-  repeat 20 times
-    if exists process "AutoComp" then
+on modelWindowText()
+  tell application "System Events"
+    try
       tell process "AutoComp"
-        if exists window "Model" then return my visibleText(window "Model")
+        if not (exists window "Model") then return ""
+        set found to ""
+        tell scroll area 1 of group 2 of splitter group 1 of group 1 of window "Model"
+          repeat with sectionGroup in groups
+            repeat with e in UI elements of sectionGroup
+              set found to my appendAttribute(e, "name", found)
+              set found to my appendAttribute(e, "value", found)
+            end repeat
+          end repeat
+        end tell
+        return found
       end tell
-    end if
-    delay 0.25
-  end repeat
-  error "AutoComp Model window did not appear"
-end tell
-OSA
-)"
-
-grep -q "Remote backend" <<<"$MODEL_TEXT"
-grep -q "http://100.98.1.45:8000" <<<"$MODEL_TEXT"
-grep -q "Qwen/Qwen3.6-35B-A3B" <<<"$MODEL_TEXT"
-
-PROBE_TEXT="$(osascript <<'OSA'
-on visibleText(e)
-  tell application "System Events"
-    set found to ""
-    try
-      repeat with c in UI elements of e
-        try
-          set r to role of c as text
-          if r is "AXStaticText" or r is "AXTextField" or r is "AXButton" then
-            try
-              set v to value of c
-              if v is not missing value then set found to found & (v as text) & linefeed
-            end try
-            try
-              set n to name of c
-              if n is not missing value then set found to found & (n as text) & linefeed
-            end try
-          end if
-        end try
-        set found to found & my visibleText(c)
-      end repeat
+    on error
+      return ""
     end try
-    return found
   end tell
-end visibleText
+end modelWindowText
 
-tell application "System Events"
-  tell process "AutoComp"
-    set providerGroup to first group of first scroll area of group 2 of splitter group 1 of group 1 of window "Model"
-    click first button of providerGroup
-    repeat 30 times
-      set textSnapshot to my visibleText(window "Model")
-      if textSnapshot contains "Connected" then return textSnapshot
+on hasAllRequiredText(foundText)
+  set requiredTexts to {"Remote OpenAI-compatible", "http://100.98.1.45:8000", "default", "Remote backend is reachable."}
+  repeat with targetText in requiredTexts
+    if foundText does not contain (targetText as text) then return false
+  end repeat
+  return true
+end hasAllRequiredText
+
+on waitForModelSmoke()
+  tell application "System Events"
+    repeat 60 times
+      if exists process "AutoComp" then
+        set foundText to my modelWindowText()
+        if my hasAllRequiredText(foundText) then return "Model smoke ready"
+      end if
       delay 0.5
     end repeat
-    return my visibleText(window "Model")
+    error "AutoComp Model window did not show the expected backend and connection state."
   end tell
+end waitForModelSmoke
+
+tell application "System Events"
+  my waitForModelSmoke()
 end tell
 OSA
-)"
-
-grep -q "Connected" <<<"$PROBE_TEXT"
 
 echo "AutoComp UI smoke test passed"

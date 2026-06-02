@@ -27,10 +27,7 @@ final class ShortcutRecordingDecisionTests: XCTestCase {
 
     func testSettingsUsesInternalRecorderAndPackageDoesNotAddMASShortcut() throws {
         let root = try packageRoot()
-        let settingsSource = try String(
-            contentsOf: root.appendingPathComponent("Sources/AutoCompApp/Views/SettingsRootView.swift"),
-            encoding: .utf8
-        )
+        let settingsSource = try settingsSourceContents(packageRoot: root)
         let package = try String(
             contentsOf: root.appendingPathComponent("Package.swift"),
             encoding: .utf8

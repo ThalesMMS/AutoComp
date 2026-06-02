@@ -59,7 +59,50 @@ struct RedactedPrivacySettings: Codable, Equatable {
     var clipboardContextEnabled: Bool
     var screenContextEnabled: Bool
     var productivityMetricsEnabled: Bool
+    var localPersonalizationEnabled: Bool
+    var writingPreferences: WritingPreferences
     var domainRules: [String: Bool]
+
+    init(
+        collectionEnabled: Bool,
+        clipboardContextEnabled: Bool,
+        screenContextEnabled: Bool,
+        productivityMetricsEnabled: Bool,
+        localPersonalizationEnabled: Bool = false,
+        writingPreferences: WritingPreferences = WritingPreferences(),
+        domainRules: [String: Bool]
+    ) {
+        self.collectionEnabled = collectionEnabled
+        self.clipboardContextEnabled = clipboardContextEnabled
+        self.screenContextEnabled = screenContextEnabled
+        self.productivityMetricsEnabled = productivityMetricsEnabled
+        self.localPersonalizationEnabled = localPersonalizationEnabled
+        self.writingPreferences = writingPreferences
+        self.domainRules = domainRules
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case collectionEnabled
+        case clipboardContextEnabled
+        case screenContextEnabled
+        case productivityMetricsEnabled
+        case localPersonalizationEnabled
+        case writingPreferences
+        case domainRules
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            collectionEnabled: try container.decode(Bool.self, forKey: .collectionEnabled),
+            clipboardContextEnabled: try container.decode(Bool.self, forKey: .clipboardContextEnabled),
+            screenContextEnabled: try container.decode(Bool.self, forKey: .screenContextEnabled),
+            productivityMetricsEnabled: try container.decode(Bool.self, forKey: .productivityMetricsEnabled),
+            localPersonalizationEnabled: try container.decodeIfPresent(Bool.self, forKey: .localPersonalizationEnabled) ?? false,
+            writingPreferences: try container.decodeIfPresent(WritingPreferences.self, forKey: .writingPreferences) ?? WritingPreferences(),
+            domainRules: try container.decode([String: Bool].self, forKey: .domainRules)
+        )
+    }
 }
 
 struct RedactedOverlaySettings: Codable, Equatable {
@@ -128,6 +171,8 @@ enum RedactedSettingsTransfer {
                 clipboardContextEnabled: privacySettings.clipboardContextEnabled,
                 screenContextEnabled: privacySettings.screenContextEnabled,
                 productivityMetricsEnabled: privacySettings.productivityMetricsEnabled,
+                localPersonalizationEnabled: privacySettings.localPersonalizationEnabled,
+                writingPreferences: privacySettings.writingPreferences,
                 domainRules: privacySettings.perDomainRules
             ),
             shortcuts: shortcutSettings,
@@ -205,6 +250,12 @@ enum RedactedSettingsTransfer {
                 importedValue: privacySourceSummary(package.privacy)
             ),
             RedactedSettingsPreviewRow(
+                id: "writing-preferences",
+                title: "Writing preferences",
+                currentValue: writingPreferencesSummary(currentPrivacySettings.writingPreferences),
+                importedValue: writingPreferencesSummary(package.privacy.writingPreferences)
+            ),
+            RedactedSettingsPreviewRow(
                 id: "shortcuts",
                 title: "Shortcut bindings",
                 currentValue: shortcutSummary(currentShortcutSettings),
@@ -233,10 +284,12 @@ enum RedactedSettingsTransfer {
         var warnings = [
             "Remote API key is not included and will be preserved locally.",
             "Local model path is not included and will be preserved locally.",
+            "Writing preference rules and language hints are included as user settings.",
             "Safe overlay mode is launch-time state; import records it for comparison but does not toggle it."
         ]
         if importedCompatibilityOverrides == currentCompatibilityOverrides,
            package.privacy.domainRules == currentPrivacySettings.perDomainRules,
+           package.privacy.writingPreferences == currentPrivacySettings.writingPreferences,
            package.shortcuts == currentShortcutSettings {
             warnings.append("Imported app/domain rules and shortcuts match current settings.")
         }
@@ -265,7 +318,9 @@ enum RedactedSettingsTransfer {
         updated.clipboardContextEnabled = imported.clipboardContextEnabled
         updated.screenContextEnabled = imported.screenContextEnabled
         updated.productivityMetricsEnabled = imported.productivityMetricsEnabled
+        updated.localPersonalizationEnabled = imported.localPersonalizationEnabled
         updated.perDomainRules = imported.domainRules
+        updated.writingPreferences = imported.writingPreferences
         updated.telemetryEnabled = false
         return updated
     }
@@ -328,6 +383,14 @@ enum RedactedSettingsTransfer {
             "clipboard \(settings.clipboardContextEnabled ? "on" : "off")",
             "screen \(settings.screenContextEnabled ? "on" : "off")",
             "metrics \(settings.productivityMetricsEnabled ? "on" : "off")"
+        ].joined(separator: ", ")
+    }
+
+    private static func writingPreferencesSummary(_ preferences: WritingPreferences) -> String {
+        [
+            preferences.enabled ? "on" : "off",
+            "rules \(preferences.rules.count)/\(WritingPreferences.maxRules)",
+            "languages \(preferences.languageHints.count)/\(WritingPreferences.maxLanguageHints)"
         ].joined(separator: ", ")
     }
 

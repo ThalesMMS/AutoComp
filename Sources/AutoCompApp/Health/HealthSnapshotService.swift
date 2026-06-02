@@ -65,9 +65,15 @@ final class HealthSnapshotService: ObservableObject, HealthSnapshotServicing {
         healthSnapshotLogger.info("refresh requested")
 
         let checks: [HealthCheck] = [
-            AccessibilityPermissionHealthCheck().evaluate(),
-            InputMonitoringPermissionHealthCheck().evaluate(),
-            ScreenRecordingPermissionHealthCheck().evaluate(),
+            AccessibilityPermissionHealthCheck(
+                trusted: permissionService.accessibilityTrusted
+            ).evaluate(),
+            InputMonitoringPermissionHealthCheck(
+                allowed: permissionService.inputMonitoringAllowed
+            ).evaluate(),
+            ScreenRecordingPermissionHealthCheck(
+                allowed: permissionService.screenRecordingAllowed
+            ).evaluate(),
             BackendConfigurationHealthCheck(settings: backendSettings).evaluate(),
             BackendReachabilityHealthCheck(
                 settings: backendSettings,

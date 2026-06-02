@@ -17,7 +17,8 @@ public struct CompletionRequestFactory: Sendable {
         configuration: RemoteCompletionConfiguration,
         privacySettings: PrivacySettings = PrivacySettings(),
         visualContext: VisualContextSnapshot? = nil,
-        clipboardContext: ClipboardContextSnapshot? = nil
+        clipboardContext: ClipboardContextSnapshot? = nil,
+        personalizationSamples: [PersonalizationSample] = []
     ) -> CompletionRequest {
         let privacyAllowedVisualContext = allowedVisualContext(
             visualContext,
@@ -33,7 +34,8 @@ public struct CompletionRequestFactory: Sendable {
             for: context,
             privacySettings: privacySettings,
             visualContext: allowedVisualContext,
-            clipboardContext: allowedClipboardContext
+            clipboardContext: allowedClipboardContext,
+            personalizationSamples: personalizationSamples
         )
         let requestMode = promptBuilder.mode(for: context)
         let truncatedTextBeforeCursor = promptBuilder.truncatedTextBeforeCursor(for: context)

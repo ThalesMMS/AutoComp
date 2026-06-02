@@ -16,6 +16,8 @@ APP_RESOURCES="$APP_CONTENTS/Resources"
 APP_FRAMEWORKS="$APP_CONTENTS/Frameworks"
 APP_BINARY="$APP_MACOS/$APP_NAME"
 INFO_PLIST="$APP_CONTENTS/Info.plist"
+APP_ICON_SOURCE="$ROOT_DIR/icon.png"
+APP_ICON_NAME="AutoComp.icns"
 SPARKLE_FEED_URL="${AUTOCOMP_SPARKLE_FEED_URL:-}"
 SPARKLE_PUBLIC_KEY="${AUTOCOMP_SPARKLE_PUBLIC_KEY:-}"
 SPARKLE_FRAMEWORK_PATH="${AUTOCOMP_SPARKLE_FRAMEWORK_PATH:-}"
@@ -44,6 +46,34 @@ mkdir -p "$APP_MACOS" "$APP_RESOURCES" "$APP_FRAMEWORKS"
 cp "$BUILD_BINARY" "$APP_BINARY"
 chmod +x "$APP_BINARY"
 
+stage_app_icon() {
+  local iconset_parent
+  if [[ ! -f "$APP_ICON_SOURCE" ]]; then
+    echo "App icon not found: $APP_ICON_SOURCE" >&2
+    exit 1
+  fi
+
+  cp "$APP_ICON_SOURCE" "$APP_RESOURCES/icon.png"
+
+  iconset_parent="$(mktemp -d "${TMPDIR:-/tmp}/autocomp-iconset.XXXXXX")"
+  (
+    trap 'rm -rf "$iconset_parent"' EXIT
+    local iconset="$iconset_parent/AutoComp.iconset"
+    mkdir -p "$iconset"
+    /usr/bin/sips -s format png -z 16 16 "$APP_ICON_SOURCE" --out "$iconset/icon_16x16.png" >/dev/null
+    /usr/bin/sips -s format png -z 32 32 "$APP_ICON_SOURCE" --out "$iconset/icon_16x16@2x.png" >/dev/null
+    /usr/bin/sips -s format png -z 32 32 "$APP_ICON_SOURCE" --out "$iconset/icon_32x32.png" >/dev/null
+    /usr/bin/sips -s format png -z 64 64 "$APP_ICON_SOURCE" --out "$iconset/icon_32x32@2x.png" >/dev/null
+    /usr/bin/sips -s format png -z 128 128 "$APP_ICON_SOURCE" --out "$iconset/icon_128x128.png" >/dev/null
+    /usr/bin/sips -s format png -z 256 256 "$APP_ICON_SOURCE" --out "$iconset/icon_128x128@2x.png" >/dev/null
+    /usr/bin/sips -s format png -z 256 256 "$APP_ICON_SOURCE" --out "$iconset/icon_256x256.png" >/dev/null
+    /usr/bin/sips -s format png -z 512 512 "$APP_ICON_SOURCE" --out "$iconset/icon_256x256@2x.png" >/dev/null
+    /usr/bin/sips -s format png -z 512 512 "$APP_ICON_SOURCE" --out "$iconset/icon_512x512.png" >/dev/null
+    /usr/bin/sips -s format png -z 1024 1024 "$APP_ICON_SOURCE" --out "$iconset/icon_512x512@2x.png" >/dev/null
+    /usr/bin/iconutil -c icns "$iconset" -o "$APP_RESOURCES/$APP_ICON_NAME"
+  )
+}
+
 copy_sparkle_framework() {
   local framework_path
   framework_path="$SPARKLE_FRAMEWORK_PATH"
@@ -69,6 +99,8 @@ if [[ -d "$ROOT_DIR/Resources" ]]; then
   rsync -a --delete "$ROOT_DIR/Resources/" "$APP_RESOURCES/Resources/"
 fi
 
+stage_app_icon
+
 if [[ -f "$ROOT_DIR/.env.local" ]]; then
   cp "$ROOT_DIR/.env.local" "$APP_RESOURCES/autocomp.env"
 fi
@@ -82,6 +114,8 @@ cat >"$INFO_PLIST" <<PLIST
   <string>$APP_NAME</string>
   <key>CFBundleIdentifier</key>
   <string>$BUNDLE_ID</string>
+  <key>CFBundleIconFile</key>
+  <string>$APP_ICON_NAME</string>
   <key>CFBundleName</key>
   <string>$APP_NAME</string>
   <key>CFBundlePackageType</key>
@@ -90,6 +124,8 @@ cat >"$INFO_PLIST" <<PLIST
   <string>$MIN_SYSTEM_VERSION</string>
   <key>NSAppleEventsUsageDescription</key>
   <string>AutoComp reads the active browser tab URL locally to apply per-domain compatibility and privacy rules.</string>
+  <key>NSAccessibilityUsageDescription</key>
+  <string>AutoComp uses Accessibility to read the active text field, caret position, and focused app so suggestions attach to the right place.</string>
   <key>NSLocalNetworkUsageDescription</key>
   <string>AutoComp connects to your configured autocomplete backend on the local network when you use a LAN endpoint.</string>
   <key>NSAppTransportSecurity</key>

@@ -6,19 +6,25 @@ public struct ActiveSuggestionTarget: Equatable, Sendable {
     public let focusedElementID: String
     public let selectedRange: NSRange?
     public let selectedText: String?
+    public let stableFieldIdentity: StableFieldIdentity?
+    public let textAfterCursor: String?
 
     public init(
         app: AppIdentity,
         domain: String?,
         focusedElementID: String,
         selectedRange: NSRange?,
-        selectedText: String? = nil
+        selectedText: String? = nil,
+        stableFieldIdentity: StableFieldIdentity? = nil,
+        textAfterCursor: String? = nil
     ) {
         self.app = app
         self.domain = domain
         self.focusedElementID = focusedElementID
         self.selectedRange = selectedRange
         self.selectedText = selectedText
+        self.stableFieldIdentity = stableFieldIdentity
+        self.textAfterCursor = textAfterCursor
     }
 
     public init(context: TextContext) {
@@ -27,7 +33,9 @@ public struct ActiveSuggestionTarget: Equatable, Sendable {
             domain: context.domain,
             focusedElementID: context.focusedElementID,
             selectedRange: context.selectedRange,
-            selectedText: context.selectedText
+            selectedText: context.selectedText,
+            stableFieldIdentity: context.stableFieldIdentity,
+            textAfterCursor: context.textAfterCursor
         )
     }
 }
@@ -78,6 +86,26 @@ public struct ActiveSuggestionSession: Equatable, Sendable {
         )
     }
 
+    public init(
+        anchor: SuggestionAnchor,
+        latencyMs: Int,
+        lastAcceptedAt: Date
+    ) {
+        self.init(
+            target: anchor.target,
+            baseTextBeforeCursor: anchor.baseTextBeforeCursor,
+            fullText: anchor.fullText,
+            acceptedText: anchor.acceptedText,
+            remainingText: anchor.remainingText,
+            latencyMs: latencyMs,
+            lastAcceptedAt: lastAcceptedAt
+        )
+    }
+
+    public var anchor: SuggestionAnchor {
+        SuggestionAnchor(session: self)
+    }
+
     public var consumedCharacterCount: Int {
         acceptedText.count
     }
@@ -105,5 +133,15 @@ public struct ActiveSuggestionSession: Equatable, Sendable {
             latencyMs: latencyMs,
             lastAcceptedAt: date
         )
+    }
+
+    public func typedText(toRemainingText reconciledRemainingText: String) -> String? {
+        guard remainingText.hasSuffix(reconciledRemainingText),
+              remainingText.count > reconciledRemainingText.count else {
+            return nil
+        }
+
+        let typedCount = remainingText.count - reconciledRemainingText.count
+        return String(remainingText.prefix(typedCount))
     }
 }

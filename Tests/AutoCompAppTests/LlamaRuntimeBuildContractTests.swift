@@ -13,6 +13,8 @@ final class LlamaRuntimeBuildContractTests: XCTestCase {
         XCTAssertTrue(package.contains("AUTOCOMP_LLAMA_CFLAGS"))
         XCTAssertTrue(package.contains("AUTOCOMP_LLAMA_LIBS"))
         XCTAssertTrue(package.contains("AUTOCOMP_LLAMA_RUNTIME"))
+        XCTAssertTrue(package.contains("AUTOCOMP_ENABLE_CONSTRAINED_LOCAL_COMPLETION"))
+        XCTAssertTrue(package.contains("AUTOCOMP_CONSTRAINED_LOCAL_COMPLETION"))
         XCTAssertTrue(package.contains("pkg-config"))
         XCTAssertTrue(package.contains("check_llama_pkg_config.sh"))
         XCTAssertFalse(package.contains("/opt/homebrew/include"))
@@ -32,6 +34,8 @@ final class LlamaRuntimeBuildContractTests: XCTestCase {
         )
 
         XCTAssertTrue(environmentSource.contains("#if AUTOCOMP_LLAMA_RUNTIME"))
+        XCTAssertTrue(environmentSource.contains("#if AUTOCOMP_CONSTRAINED_LOCAL_COMPLETION"))
+        XCTAssertTrue(environmentSource.contains("ConstrainedLocalCompletionFeature.isEnabled()"))
         XCTAssertTrue(settingsSource.contains("#if AUTOCOMP_LLAMA_RUNTIME"))
         XCTAssertTrue(settingsSource.contains("runtimeSystemInfo()"))
         XCTAssertFalse(environmentSource.contains("canImport(AutoCompLlamaRuntime)"))
@@ -113,6 +117,20 @@ final class LlamaRuntimeBuildContractTests: XCTestCase {
         XCTAssertTrue(bridge.contains("break;"))
         XCTAssertTrue(runtime.contains("request.stopSequences"))
         XCTAssertTrue(runtime.contains("withCStringArray(stopSequences)"))
+    }
+
+    func testConstrainedLocalFeatureFlagIsRuntimeOptIn() {
+        XCTAssertFalse(ConstrainedLocalCompletionFeature.isEnabled(values: [:]))
+        XCTAssertFalse(
+            ConstrainedLocalCompletionFeature.isEnabled(values: [
+                ConstrainedLocalCompletionFeature.environmentKey: "0"
+            ])
+        )
+        XCTAssertTrue(
+            ConstrainedLocalCompletionFeature.isEnabled(values: [
+                ConstrainedLocalCompletionFeature.environmentKey: "1"
+            ])
+        )
     }
 
     private func packageRoot() throws -> URL {

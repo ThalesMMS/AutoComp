@@ -22,10 +22,7 @@ final class BackendSurfaceConsistencyTests: XCTestCase {
 
     func testDocumentationUsesSettingsTerminologyForTextLeavingMac() throws {
         let packageRoot = try packageRoot()
-        let settingsSource = try String(
-            contentsOf: packageRoot.appendingPathComponent("Sources/AutoCompApp/Views/SettingsRootView.swift"),
-            encoding: .utf8
-        )
+        let settingsSource = try settingsSourceContents(packageRoot: packageRoot)
         let readme = try String(contentsOf: packageRoot.appendingPathComponent("README.md"), encoding: .utf8)
         let privacyPolicy = try String(
             contentsOf: packageRoot.appendingPathComponent("Docs/PrivacyPolicy.md"),

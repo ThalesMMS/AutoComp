@@ -10,10 +10,20 @@ struct LlamaBuildFlags {
 
 let environment = ProcessInfo.processInfo.environment
 let llamaBuildFlags = resolveLlamaBuildFlags(environment: environment)
+let constrainedLocalCompletionEnabled = environmentFlagEnabled(
+    "AUTOCOMP_ENABLE_CONSTRAINED_LOCAL_COMPLETION",
+    environment: environment
+)
+let constrainedLocalCompletionSwiftSettings: [SwiftSetting] = constrainedLocalCompletionEnabled
+    ? [.define("AUTOCOMP_CONSTRAINED_LOCAL_COMPLETION", .when(platforms: [.macOS]))]
+    : []
 
 let appDependencies: [Target.Dependency] = llamaBuildFlags != nil
     ? ["AutoCompCore", "AutoCompLlamaRuntime"]
     : ["AutoCompCore"]
+let appTestDependencies: [Target.Dependency] = llamaBuildFlags != nil
+    ? ["AutoCompApp", "AutoCompLlamaRuntime", "CLlamaBridge"]
+    : ["AutoCompApp"]
 let appSwiftSettings: [SwiftSetting] = llamaBuildFlags != nil
     ? [.define("AUTOCOMP_LLAMA_RUNTIME", .when(platforms: [.macOS]))]
     : []
@@ -27,24 +37,27 @@ var targets: [Target] = [
     .executableTarget(
         name: "AutoCompApp",
         dependencies: appDependencies,
-        swiftSettings: appSwiftSettings
+        swiftSettings: appSwiftSettings + constrainedLocalCompletionSwiftSettings
     ),
     .target(
-        name: "AutoCompCore"
+        name: "AutoCompCore",
+        swiftSettings: constrainedLocalCompletionSwiftSettings
     ),
     .testTarget(
         name: "AutoCompCoreTests",
         dependencies: ["AutoCompCore"],
         resources: [
             .process("Fixtures")
-        ]
+        ],
+        swiftSettings: constrainedLocalCompletionSwiftSettings
     ),
     .testTarget(
         name: "AutoCompAppTests",
-        dependencies: ["AutoCompApp"],
+        dependencies: appTestDependencies,
         resources: [
             .process("Fixtures")
-        ]
+        ],
+        swiftSettings: constrainedLocalCompletionSwiftSettings
     )
 ]
 
@@ -77,7 +90,8 @@ if let llamaBuildFlags {
         ),
         .testTarget(
             name: "AutoCompLlamaRuntimeTests",
-            dependencies: ["AutoCompCore", "AutoCompLlamaRuntime"]
+            dependencies: ["AutoCompCore", "AutoCompLlamaRuntime", "CLlamaBridge"],
+            swiftSettings: constrainedLocalCompletionSwiftSettings
         )
     ]
 }
@@ -139,6 +153,11 @@ func resolveLlamaBuildFlags(environment: [String: String]) -> LlamaBuildFlags? {
     }
 
     return LlamaBuildFlags(cFlags: cFlags, linkerFlags: linkerFlags)
+}
+
+func environmentFlagEnabled(_ name: String, environment: [String: String]) -> Bool {
+    let value = environment[name] ?? ""
+    return ["1", "true", "yes", "on"].contains(value.lowercased())
 }
 
 func llamaPkgConfigPackages() -> [String] {

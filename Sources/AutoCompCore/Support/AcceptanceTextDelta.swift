@@ -1,5 +1,13 @@
-// Intentionally left empty (placeholder).
-//
-// Note: this helper is implemented in AutoCompApp's `AcceptanceService.swift` because acceptance
-// insertion currently lives in AutoCompApp (event injection / paste fallback). If/when acceptance
-// computation moves into AutoCompCore, this file can be revived and used across insertion strategies.
+public enum AcceptanceTextDelta {
+    public static func trimmingSuffixOverlap(token: String, suffix: String?) -> String {
+        guard let suffix, !suffix.isEmpty, !token.isEmpty else {
+            return token
+        }
+
+        guard token.hasSuffix(suffix) else {
+            return token
+        }
+
+        return String(token.dropLast(suffix.count))
+    }
+}

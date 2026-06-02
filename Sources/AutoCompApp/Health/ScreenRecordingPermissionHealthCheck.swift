@@ -1,21 +1,21 @@
-import ApplicationServices
 import AutoCompCore
 
 struct ScreenRecordingPermissionHealthCheck {
     static let id = "permission.screen-recording"
+    let allowed: Bool
+
+    init(allowed: Bool) {
+        self.allowed = allowed
+    }
 
     func evaluate() -> HealthCheck {
-        // AutoComp uses screen capture permission for visual-context features
-        // (e.g., OCR-based geometry fallback and window screenshot pipelines).
-        let allowed = CGPreflightScreenCaptureAccess()
-
         if allowed {
             return HealthCheck(
                 id: Self.id,
                 title: "Screen Recording",
                 status: .ok,
-                summary: "Enabled",
-                details: "Screen Recording permission allows AutoComp to capture on-screen context for visual features (like screenshot/OCR-based assistance). AutoComp captures only when a feature needs visual context.",
+                summary: "Visual context is ready.",
+                details: "Technical cause: Screen Recording is enabled. AutoComp can capture on-screen context only when a feature needs visual context.",
                 actions: []
             )
         }
@@ -24,8 +24,8 @@ struct ScreenRecordingPermissionHealthCheck {
             id: Self.id,
             title: "Screen Recording",
             status: .warn,
-            summary: "Optional (recommended)",
-            details: "Screen Recording permission enables visual-context capture (screenshots/OCR). AutoComp can still provide non-visual suggestions without it, but some features may be limited. Enable AutoComp in System Settings > Privacy & Security > Screen Recording, then relaunch the app.",
+            summary: "Visual context is off.",
+            details: "Technical cause: Screen Recording is off. Text-field suggestions still work, but screenshot and OCR-based visual features stay limited. Enable AutoComp in System Settings > Privacy & Security > Screen Recording, then relaunch the app.",
             actions: [
                 HealthRemediationCatalog.openScreenRecordingSystemSettings,
                 HealthRemediationCatalog.showScreenRecordingInstructions

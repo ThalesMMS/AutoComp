@@ -6,52 +6,64 @@ cd "$ROOT_DIR"
 
 ./script/build_and_run.sh --ui-test-playground >/tmp/autocomp_playground_launch.log
 
-PLAYGROUND_TEXT="$(osascript <<'OSA'
-on visibleText(e)
+osascript <<'OSA'
+on appendAttribute(e, attributeName, currentText)
   tell application "System Events"
-    set found to ""
     try
-      repeat with c in UI elements of e
-        try
-          set r to role of c as text
-          if r is "AXStaticText" or r is "AXTextField" or r is "AXTextArea" or r is "AXButton" then
-            try
-              set v to value of c
-              if v is not missing value then set found to found & (v as text) & linefeed
-            end try
-            try
-              set n to name of c
-              if n is not missing value then set found to found & (n as text) & linefeed
-            end try
-          end if
-        end try
-        set found to found & my visibleText(c)
-      end repeat
+      if attributeName is "name" then set attributeValue to name of e
+      if attributeName is "value" then set attributeValue to value of e
+      if attributeValue is not missing value then return currentText & (attributeValue as text) & linefeed
     end try
-    return found
+    return currentText
   end tell
-end visibleText
+end appendAttribute
+
+on modelWindowText()
+  tell application "System Events"
+    try
+      tell process "AutoComp"
+        if not (exists window "Model") then return ""
+        set found to ""
+        tell scroll area 1 of group 2 of splitter group 1 of group 1 of window "Model"
+          repeat with sectionGroup in groups
+            repeat with e in UI elements of sectionGroup
+              set found to my appendAttribute(e, "name", found)
+              set found to my appendAttribute(e, "value", found)
+            end repeat
+          end repeat
+        end tell
+        return found
+      end tell
+    on error
+      return ""
+    end try
+  end tell
+end modelWindowText
+
+on hasAllRequiredText(foundText)
+  set requiredTexts to {"Prefix", "Fill in middle", "playground completion", "Latency"}
+  repeat with targetText in requiredTexts
+    if foundText does not contain (targetText as text) then return false
+  end repeat
+  return true
+end hasAllRequiredText
+
+on waitForPlaygroundSmoke()
+  tell application "System Events"
+    repeat 40 times
+      if exists process "AutoComp" then
+        set foundText to my modelWindowText()
+        if my hasAllRequiredText(foundText) then return "Playground smoke ready"
+      end if
+      delay 0.5
+    end repeat
+    error "Playground completion did not appear"
+  end tell
+end waitForPlaygroundSmoke
 
 tell application "System Events"
-  repeat 40 times
-    if exists process "AutoComp" then
-      tell process "AutoComp"
-        if exists window "Model" then
-          set textSnapshot to my visibleText(window "Model")
-          if textSnapshot contains "playground completion" then return textSnapshot
-        end if
-      end tell
-    end if
-    delay 0.25
-  end repeat
-  error "Playground completion did not appear"
+  my waitForPlaygroundSmoke()
 end tell
 OSA
-)"
-
-grep -q "Prefix" <<<"$PLAYGROUND_TEXT"
-grep -q "Fill in middle" <<<"$PLAYGROUND_TEXT"
-grep -q "playground completion" <<<"$PLAYGROUND_TEXT"
-grep -q "Latency" <<<"$PLAYGROUND_TEXT"
 
 echo "AutoComp playground smoke test passed"

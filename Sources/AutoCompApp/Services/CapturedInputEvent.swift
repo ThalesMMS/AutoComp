@@ -67,6 +67,17 @@ enum CapturedInputEvent: Equatable, Sendable {
         }
     }
 
+    var mayPublishHostText: Bool {
+        switch self {
+        case .text(let keyCode, _):
+            return !Self.clearOnlyTextMutationKeyCodes.contains(keyCode)
+        case .shortcutMutation(let keyCode):
+            return Self.hostPublishingShortcutMutationKeyCodes.contains(keyCode)
+        case .navigation, .dismissal, .tab, .acceptAll, .pointer:
+            return false
+        }
+    }
+
     var debugName: String {
         switch self {
         case .text(let keyCode, let isSuggestionTrigger):
@@ -89,6 +100,12 @@ enum CapturedInputEvent: Equatable, Sendable {
     private static let clearOnlyTextMutationKeyCodes: Set<UInt16> = [
         51,  // Delete
         117  // Forward delete
+    ]
+
+    private static let hostPublishingShortcutMutationKeyCodes: Set<UInt16> = [
+        6,  // Z: undo/redo can change focused text.
+        7,  // X: cut can change focused text.
+        9   // V: paste can change focused text.
     ]
 }
 

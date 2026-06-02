@@ -160,6 +160,33 @@ final class LocalModelManagementTests: XCTestCase {
     }
 
     @MainActor
+    func testPartialDownloadCleanupRemovesStagingFiles() throws {
+        let directory = try makeTemporaryDirectory()
+        let partialURL = directory.appendingPathComponent("demo.gguf.staging-\(UUID().uuidString).gguf")
+        let modelURL = directory.appendingPathComponent("demo.gguf")
+        try Data("partial".utf8).write(to: partialURL)
+        try Data("installed".utf8).write(to: modelURL)
+        let model = DownloadableLocalModel(
+            filename: "demo.gguf",
+            displayName: "Demo",
+            downloadURL: URL(string: "https://example.com/demo.gguf")!,
+            approximateSizeInGigabytes: 0.1
+        )
+        let manager = ModelDownloadManager(
+            catalog: LocalModelCatalog(downloadableModels: [model]),
+            modelsDirectoryURL: directory,
+            downloader: StubModelDownloader(temporaryURL: modelURL)
+        )
+
+        let removedCount = manager.removePartialDownloads()
+
+        XCTAssertEqual(removedCount, 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: partialURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: modelURL.path))
+        XCTAssertEqual(manager.state(for: model), .ready)
+    }
+
+    @MainActor
     func testRuntimeBootstrapStateReflectsScannedModels() throws {
         let directory = try makeTemporaryDirectory()
         let bootstrap = RuntimeBootstrapModel(
@@ -177,6 +204,66 @@ final class LocalModelManagementTests: XCTestCase {
 
         XCTAssertEqual(bootstrap.state, .ready("1 local model ready"))
         XCTAssertEqual(bootstrap.selectedModel(for: modelURL.path)?.filename, "model.gguf")
+    }
+
+    @MainActor
+    func testSetupCoordinatorImportsGGUFIntoModelsDirectory() throws {
+        let sourceDirectory = try makeTemporaryDirectory()
+        let modelsDirectory = try makeTemporaryDirectory()
+        let sourceURL = sourceDirectory.appendingPathComponent("imported.gguf")
+        try Data("model".utf8).write(to: sourceURL)
+        let coordinator = LocalModelSetupCoordinator(modelsDirectoryURL: modelsDirectory)
+
+        let imported = try coordinator.importLocalModel(from: sourceURL)
+
+        XCTAssertEqual(imported.filename, "imported.gguf")
+        XCTAssertEqual(imported.url.deletingLastPathComponent().standardizedFileURL.path, modelsDirectory.standardizedFileURL.path)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: imported.url.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: sourceURL.path))
+        XCTAssertEqual(coordinator.state, .ready(filename: "imported.gguf"))
+        XCTAssertEqual(coordinator.installedModels.map(\.filename), ["imported.gguf"])
+    }
+
+    @MainActor
+    func testSetupCoordinatorRejectsInvalidImportWithSanitizedMessage() throws {
+        let sourceDirectory = try makeTemporaryDirectory()
+        let modelsDirectory = try makeTemporaryDirectory()
+        let sourceURL = sourceDirectory.appendingPathComponent("invalid.bin")
+        try Data("model".utf8).write(to: sourceURL)
+        let coordinator = LocalModelSetupCoordinator(modelsDirectoryURL: modelsDirectory)
+
+        XCTAssertThrowsError(try coordinator.importLocalModel(from: sourceURL))
+
+        guard case .failed(let message) = coordinator.state else {
+            return XCTFail("Expected failed state, got \(coordinator.state)")
+        }
+        XCTAssertTrue(message.contains(".gguf"))
+        XCTAssertFalse(message.contains(sourceURL.path))
+    }
+
+    @MainActor
+    func testSetupCoordinatorRemovesInstalledModelAndRefusesExternalDelete() throws {
+        let modelsDirectory = try makeTemporaryDirectory()
+        let externalDirectory = try makeTemporaryDirectory()
+        let modelURL = modelsDirectory.appendingPathComponent("installed.gguf")
+        let externalURL = externalDirectory.appendingPathComponent("external.gguf")
+        try Data("model".utf8).write(to: modelURL)
+        try Data("external".utf8).write(to: externalURL)
+        let coordinator = LocalModelSetupCoordinator(modelsDirectoryURL: modelsDirectory)
+        let installed = try XCTUnwrap(coordinator.installedModels.first)
+
+        try coordinator.removeInstalledModel(installed)
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: modelURL.path))
+        XCTAssertEqual(coordinator.state, .idle)
+
+        XCTAssertThrowsError(try coordinator.removeInstalledModel(LocalModelOption(
+            filename: "external.gguf",
+            url: externalURL
+        ))) { error in
+            XCTAssertEqual(error as? LocalModelSetupError, .refusesExternalDelete("external.gguf"))
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: externalURL.path))
     }
 
     private func makeTemporaryDirectory() throws -> URL {

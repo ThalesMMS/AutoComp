@@ -469,6 +469,44 @@ AutoCompLlamaCacheDecision autocomp_llama_prompt_cache_decision(
     return decision;
 }
 
+bool autocomp_llama_model_tokenizer_profile(
+    const AutoCompLlamaModel *model,
+    AutoCompLlamaTokenizerProfile *profile,
+    AutoCompLlamaError *error
+) {
+    if (profile == NULL) {
+        autocomp_llama_set_error(error, 24, "Tokenizer profile output is null.");
+        return false;
+    }
+    memset(profile, 0, sizeof(AutoCompLlamaTokenizerProfile));
+
+    if (model == NULL || model->raw == NULL) {
+        autocomp_llama_set_error(error, 25, "Model is not loaded.");
+        return false;
+    }
+
+    const struct llama_vocab *vocab = llama_model_get_vocab(model->raw);
+    if (vocab == NULL) {
+        autocomp_llama_set_error(error, 26, "Model vocabulary is unavailable.");
+        return false;
+    }
+
+    profile->vocabulary_size = llama_vocab_n_tokens(vocab);
+    profile->vocabulary_type = (int32_t)llama_vocab_type(vocab);
+    profile->bos_token = llama_vocab_bos(vocab);
+    profile->eos_token = llama_vocab_eos(vocab);
+    profile->eot_token = llama_vocab_eot(vocab);
+    profile->newline_token = llama_vocab_nl(vocab);
+    profile->fim_prefix_token = llama_vocab_fim_pre(vocab);
+    profile->fim_suffix_token = llama_vocab_fim_suf(vocab);
+    profile->fim_middle_token = llama_vocab_fim_mid(vocab);
+    profile->supports_fill_in_middle = profile->fim_prefix_token >= 0
+        && profile->fim_suffix_token >= 0
+        && profile->fim_middle_token >= 0;
+    autocomp_llama_set_error(error, 0, "");
+    return true;
+}
+
 void autocomp_llama_backend_init(void) {
     llama_log_set(autocomp_llama_discard_log, NULL);
     llama_backend_init();

@@ -9,6 +9,7 @@ enum AXTextContextError: LocalizedError {
     case noFocusedElement
     case secureOrUnsupportedField
     case noReadableText
+    case interactionPipelineSuspended
 
     var errorDescription: String? {
         switch self {
@@ -22,6 +23,8 @@ enum AXTextContextError: LocalizedError {
             return "The focused field is secure or unsupported."
         case .noReadableText:
             return "The focused text field did not expose readable text."
+        case .interactionPipelineSuspended:
+            return "Interaction pipeline is paused."
         }
     }
 }

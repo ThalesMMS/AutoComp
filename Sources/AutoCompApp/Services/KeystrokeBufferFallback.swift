@@ -275,7 +275,7 @@ final class KeystrokeBufferFallback {
         switch contextError {
         case .noReadableText, .noFocusedElement:
             return true
-        case .accessibilityNotTrusted, .noFrontmostApplication, .secureOrUnsupportedField:
+        case .accessibilityNotTrusted, .noFrontmostApplication, .secureOrUnsupportedField, .interactionPipelineSuspended:
             return false
         }
     }
@@ -286,7 +286,7 @@ final class KeystrokeBufferFallback {
         }
 
         switch contextError {
-        case .accessibilityNotTrusted, .noFrontmostApplication, .secureOrUnsupportedField:
+        case .accessibilityNotTrusted, .noFrontmostApplication, .secureOrUnsupportedField, .interactionPipelineSuspended:
             return true
         case .noFocusedElement, .noReadableText:
             return false

@@ -178,7 +178,7 @@ public struct RemoteCompletionConfiguration: Codable, Equatable, Sendable {
     }
 }
 
-public struct RemoteCompletionProvider: ClipboardContextAwareCompletionProvider, MultipleCompletionProvider {
+public struct RemoteCompletionProvider: MultiplePersonalizationContextAwareCompletionProvider {
     public let configuration: RemoteCompletionConfiguration
     public let requestFactory: CompletionRequestFactory
     public var promptBuilder: PromptBuilder { requestFactory.promptBuilder }
@@ -229,11 +229,28 @@ public struct RemoteCompletionProvider: ClipboardContextAwareCompletionProvider,
         visualContext: VisualContextSnapshot?,
         clipboardContext: ClipboardContextSnapshot?
     ) async throws -> Suggestion {
+        try await complete(
+            context: context,
+            privacySettings: privacySettings,
+            visualContext: visualContext,
+            clipboardContext: clipboardContext,
+            personalizationSamples: []
+        )
+    }
+
+    public func complete(
+        context: TextContext,
+        privacySettings: PrivacySettings,
+        visualContext: VisualContextSnapshot?,
+        clipboardContext: ClipboardContextSnapshot?,
+        personalizationSamples: [PersonalizationSample]
+    ) async throws -> Suggestion {
         let suggestions = try await complete(
             context: context,
             privacySettings: privacySettings,
             visualContext: visualContext,
             clipboardContext: clipboardContext,
+            personalizationSamples: personalizationSamples,
             options: CompletionOptions()
         )
         guard let suggestion = suggestions.first else {
@@ -247,6 +264,24 @@ public struct RemoteCompletionProvider: ClipboardContextAwareCompletionProvider,
         privacySettings: PrivacySettings,
         visualContext: VisualContextSnapshot?,
         clipboardContext: ClipboardContextSnapshot?,
+        options: CompletionOptions
+    ) async throws -> [Suggestion] {
+        try await complete(
+            context: context,
+            privacySettings: privacySettings,
+            visualContext: visualContext,
+            clipboardContext: clipboardContext,
+            personalizationSamples: [],
+            options: options
+        )
+    }
+
+    public func complete(
+        context: TextContext,
+        privacySettings: PrivacySettings,
+        visualContext: VisualContextSnapshot?,
+        clipboardContext: ClipboardContextSnapshot?,
+        personalizationSamples: [PersonalizationSample],
         options: CompletionOptions
     ) async throws -> [Suggestion] {
         guard !configuration.apiKey.isEmpty else {
@@ -267,7 +302,8 @@ public struct RemoteCompletionProvider: ClipboardContextAwareCompletionProvider,
             configuration: configuration,
             privacySettings: privacySettings,
             visualContext: visualContext,
-            clipboardContext: clipboardContext
+            clipboardContext: clipboardContext,
+            personalizationSamples: personalizationSamples
         )
         request.httpBody = try JSONEncoder().encode(RemoteChatRequest(
             completionRequest: completionRequest,

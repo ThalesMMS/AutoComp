@@ -29,6 +29,19 @@ final class AcceptanceServiceTests: XCTestCase {
         XCTAssertEqual(String(decoding: units, as: UTF16.self), text)
     }
 
+    func testEmojiReplacementDeletesTrailingUTF16RunBeforeInsertingGlyph() throws {
+        let poster = RecordingAcceptanceKeyboardEventPoster()
+        let service = acceptanceService(keyboardEventPoster: poster)
+
+        try service.replaceTrailingText(utf16Length: 7, with: "😄")
+
+        XCTAssertEqual(poster.keyEvents, Array(repeating: RecordingAcceptanceKeyboardEventPoster.KeyEvent(
+            keyCode: CGKeyCode(CapturedInputEventAdapter.deleteKeyCode),
+            flags: []
+        ), count: 7))
+        XCTAssertEqual(poster.unicodeStrings, ["😄"])
+    }
+
     func testShortAcceptedTextUsesSingleUnicodeEvent() async throws {
         let poster = RecordingAcceptanceKeyboardEventPoster()
         let service = acceptanceService(keyboardEventPoster: poster)

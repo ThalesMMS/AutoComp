@@ -30,6 +30,59 @@ protocol KeyboardShortcutTapInstalling: AnyObject {
     ) -> KeyboardShortcutTap?
 }
 
+enum ShortcutOwnershipDecision: Equatable, Sendable {
+    case consume(reason: String)
+    case passThrough(reason: String)
+
+    var shouldConsume: Bool {
+        switch self {
+        case .consume:
+            return true
+        case .passThrough:
+            return false
+        }
+    }
+
+    var reason: String {
+        switch self {
+        case .consume(let reason), .passThrough(let reason):
+            return reason
+        }
+    }
+
+    var diagnosticName: String {
+        switch self {
+        case .consume:
+            return "consume"
+        case .passThrough:
+            return "pass-through"
+        }
+    }
+}
+
+struct ShortcutOwnershipEvaluator: Sendable {
+    func evaluate(
+        command: KeyboardShortcutCommand,
+        commandDecision: () -> ShortcutOwnershipDecision,
+        isSuggestionVisible: Bool,
+        inputMethodState: InputMethodState
+    ) -> ShortcutOwnershipDecision {
+        guard command.requiresActiveSuggestion else {
+            return commandDecision()
+        }
+
+        guard isSuggestionVisible else {
+            return .passThrough(reason: "no-visible-suggestion")
+        }
+
+        guard !inputMethodState.shouldPassThroughSuggestionShortcuts else {
+            return .passThrough(reason: "input-method")
+        }
+
+        return commandDecision()
+    }
+}
+
 final class SystemKeyboardShortcutTapInstaller: KeyboardShortcutTapInstalling {
     func hasInputMonitoringPermission() -> Bool {
         CGPreflightListenEventAccess()
@@ -92,13 +145,18 @@ final class KeyboardShortcutService: @unchecked Sendable {
     private var eventTaps: [KeyboardShortcutTap] = []
     private var onCommand: ((KeyboardShortcutCommand) -> Void)?
     private var onInputEvent: ((CapturedInputEvent) -> Void)?
-    private var shouldInterceptCommand: (KeyboardShortcutCommand) -> Bool = { _ in true }
+    private var onEmojiCommand: ((EmojiKeyboardCommand) -> Void)?
+    private var shortcutOwnershipDecision: (KeyboardShortcutCommand) -> ShortcutOwnershipDecision = { _ in .consume(reason: "default") }
     private let inputEventAdapter = CapturedInputEventAdapter()
     private let inputSuppressionController: InputSuppressionController
     private let inputMethodStateProvider: @Sendable () -> InputMethodState
     private let tapInstaller: KeyboardShortcutTapInstalling
     private var shortcutSettings: KeyboardShortcutSettings
     private var passthroughReplay: (keyCode: UInt16, expiresAt: Date)?
+    private var isInteractionPipelineSuspended = false
+    private var isEmojiPickerActive = false
+    private let shortcutOwnershipEvaluator = ShortcutOwnershipEvaluator()
+    private let shortcutLogger = AutoCompLogger(category: "shortcuts")
 
     init(
         inputSuppressionController: InputSuppressionController = InputSuppressionController(),
@@ -124,7 +182,9 @@ final class KeyboardShortcutService: @unchecked Sendable {
         onTab: @escaping () -> Void,
         onAcceptAll: @escaping () -> Void,
         onInputEvent: ((CapturedInputEvent) -> Void)? = nil,
-        shouldInterceptCommand: @escaping (KeyboardShortcutCommand) -> Bool = { _ in true }
+        onEmojiCommand: ((EmojiKeyboardCommand) -> Void)? = nil,
+        shouldInterceptCommand: @escaping (KeyboardShortcutCommand) -> Bool = { _ in true },
+        shortcutOwnershipDecision: ((KeyboardShortcutCommand) -> ShortcutOwnershipDecision)? = nil
     ) {
         start(
             onCommand: { command in
@@ -138,19 +198,25 @@ final class KeyboardShortcutService: @unchecked Sendable {
                 }
             },
             onInputEvent: onInputEvent,
-            shouldInterceptCommand: shouldInterceptCommand
+            onEmojiCommand: onEmojiCommand,
+            shouldInterceptCommand: shouldInterceptCommand,
+            shortcutOwnershipDecision: shortcutOwnershipDecision
         )
     }
 
     func start(
         onCommand: @escaping (KeyboardShortcutCommand) -> Void,
         onInputEvent: ((CapturedInputEvent) -> Void)? = nil,
-        shouldInterceptCommand: @escaping (KeyboardShortcutCommand) -> Bool = { _ in true }
+        onEmojiCommand: ((EmojiKeyboardCommand) -> Void)? = nil,
+        shouldInterceptCommand: @escaping (KeyboardShortcutCommand) -> Bool = { _ in true },
+        shortcutOwnershipDecision: ((KeyboardShortcutCommand) -> ShortcutOwnershipDecision)? = nil
     ) {
         configureHandlers(
             onCommand: onCommand,
             onInputEvent: onInputEvent,
-            shouldInterceptCommand: shouldInterceptCommand
+            onEmojiCommand: onEmojiCommand,
+            shouldInterceptCommand: shouldInterceptCommand,
+            shortcutOwnershipDecision: shortcutOwnershipDecision
         )
 
         let hasPermission = tapInstaller.hasInputMonitoringPermission()
@@ -223,8 +289,11 @@ final class KeyboardShortcutService: @unchecked Sendable {
         removeEventTaps()
         onCommand = nil
         onInputEvent = nil
-        shouldInterceptCommand = { _ in true }
+        onEmojiCommand = nil
+        shortcutOwnershipDecision = { _ in .consume(reason: "default") }
         passthroughReplay = nil
+        isInteractionPipelineSuspended = false
+        isEmojiPickerActive = false
         inputSuppressionController.reset()
     }
 
@@ -239,12 +308,42 @@ final class KeyboardShortcutService: @unchecked Sendable {
     }
 
     func setSuggestionActive(_ active: Bool) {
+        guard !isInteractionPipelineSuspended else {
+            inputSuppressionController.reset()
+            GeometryDebug.log("shortcut-active skipped reason=pipeline-suspended requestedActive=\(active)")
+            return
+        }
         inputSuppressionController.setSuggestionActive(active)
         GeometryDebug.log("shortcut-active active=\(active) armed=\(inputSuppressionController.isShortcutArmed)")
     }
 
+    var isSuggestionActive: Bool {
+        inputSuppressionController.isSuggestionActive
+    }
+
+    func setEmojiPickerActive(_ active: Bool) {
+        guard isEmojiPickerActive != active else {
+            return
+        }
+        isEmojiPickerActive = active
+        GeometryDebug.log("shortcut-emoji-picker-active active=\(active)")
+    }
+
     func clearShortcutGrace() {
         inputSuppressionController.clearShortcutGrace()
+    }
+
+    func setInteractionPipelineSuspended(_ suspended: Bool, reason: String) {
+        guard isInteractionPipelineSuspended != suspended else {
+            return
+        }
+
+        isInteractionPipelineSuspended = suspended
+        if suspended {
+            passthroughReplay = nil
+            inputSuppressionController.reset()
+        }
+        GeometryDebug.log("shortcut-pipeline-suspension suspended=\(suspended) reason=\(reason)")
     }
 
     func replayPassthroughShortcut(_ command: KeyboardShortcutCommand) {
@@ -278,7 +377,9 @@ final class KeyboardShortcutService: @unchecked Sendable {
         onTab: @escaping () -> Void,
         onAcceptAll: @escaping () -> Void,
         onInputEvent: ((CapturedInputEvent) -> Void)? = nil,
-        shouldInterceptCommand: @escaping (KeyboardShortcutCommand) -> Bool = { _ in true }
+        onEmojiCommand: ((EmojiKeyboardCommand) -> Void)? = nil,
+        shouldInterceptCommand: @escaping (KeyboardShortcutCommand) -> Bool = { _ in true },
+        shortcutOwnershipDecision: ((KeyboardShortcutCommand) -> ShortcutOwnershipDecision)? = nil
     ) {
         configureHandlers(
             onCommand: { command in
@@ -292,18 +393,27 @@ final class KeyboardShortcutService: @unchecked Sendable {
                 }
             },
             onInputEvent: onInputEvent,
-            shouldInterceptCommand: shouldInterceptCommand
+            onEmojiCommand: onEmojiCommand,
+            shouldInterceptCommand: shouldInterceptCommand,
+            shortcutOwnershipDecision: shortcutOwnershipDecision
         )
     }
 
     func configureHandlers(
         onCommand: @escaping (KeyboardShortcutCommand) -> Void,
         onInputEvent: ((CapturedInputEvent) -> Void)? = nil,
-        shouldInterceptCommand: @escaping (KeyboardShortcutCommand) -> Bool = { _ in true }
+        onEmojiCommand: ((EmojiKeyboardCommand) -> Void)? = nil,
+        shouldInterceptCommand: @escaping (KeyboardShortcutCommand) -> Bool = { _ in true },
+        shortcutOwnershipDecision: ((KeyboardShortcutCommand) -> ShortcutOwnershipDecision)? = nil
     ) {
         self.onCommand = onCommand
         self.onInputEvent = onInputEvent
-        self.shouldInterceptCommand = shouldInterceptCommand
+        self.onEmojiCommand = onEmojiCommand
+        self.shortcutOwnershipDecision = shortcutOwnershipDecision ?? { command in
+            shouldInterceptCommand(command)
+                ? .consume(reason: "command-enabled")
+                : .passThrough(reason: "command-disabled")
+        }
     }
 
     func capturedInputEvent(type: CGEventType, event: CGEvent) -> CapturedInputEvent? {
@@ -316,6 +426,11 @@ final class KeyboardShortcutService: @unchecked Sendable {
             for eventTap in eventTaps {
                 eventTap.enable(true)
             }
+            return Unmanaged.passUnretained(event)
+        }
+
+        if isInteractionPipelineSuspended {
+            GeometryDebug.log("shortcut-passthrough reason=pipeline-suspended type=\(type.rawValue)")
             return Unmanaged.passUnretained(event)
         }
 
@@ -357,6 +472,20 @@ final class KeyboardShortcutService: @unchecked Sendable {
         let matchedCommand = shortcutSettings.command(matching: type, event: event)
         let isShortcutKey = matchedCommand != nil
         let isArmed = inputSuppressionController.isShortcutArmed
+        logInputCandidate(
+            type: type,
+            keyCode: keyCode,
+            flags: event.flags,
+            inputEvent: inputEvent,
+            matchedCommand: matchedCommand
+        )
+        if let emojiCommand = emojiKeyboardCommand(for: inputEvent, matchedCommand: matchedCommand) {
+            GeometryDebug.log("shortcut-emoji-picker-consumed command=\(emojiCommand) keyCode=\(keyCode)")
+            DispatchQueue.main.async { [weak self] in
+                self?.onEmojiCommand?(emojiCommand)
+            }
+            return nil
+        }
         if matchedCommand == nil, let inputEvent {
             dispatchInputEventIfNeeded(inputEvent, inputMethodState: inputMethodState)
         }
@@ -381,6 +510,14 @@ final class KeyboardShortcutService: @unchecked Sendable {
     private func handleFlagsChanged(_ event: CGEvent) -> Unmanaged<CGEvent>? {
         let keyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
         let matchedCommand = shortcutSettings.command(matching: .flagsChanged, event: event)
+        let inputEvent = capturedInputEvent(type: .flagsChanged, event: event)
+        logInputCandidate(
+            type: .flagsChanged,
+            keyCode: keyCode,
+            flags: event.flags,
+            inputEvent: inputEvent,
+            matchedCommand: matchedCommand
+        )
         if matchedCommand == nil,
            inputSuppressionController.consumeSuppressedKeyRelease(keyCode: keyCode) {
             GeometryDebug.log("shortcut-flags-release-suppressed keyCode=\(keyCode)")
@@ -388,7 +525,7 @@ final class KeyboardShortcutService: @unchecked Sendable {
         }
 
         guard let matchedCommand else {
-            if let inputEvent = capturedInputEvent(type: .flagsChanged, event: event) {
+            if let inputEvent {
                 dispatchInputEventIfNeeded(inputEvent, inputMethodState: inputMethodStateProvider())
             }
             return Unmanaged.passUnretained(event)
@@ -415,20 +552,15 @@ final class KeyboardShortcutService: @unchecked Sendable {
         isArmed: Bool
     ) -> Unmanaged<CGEvent>? {
         GeometryDebug.log("shortcut-command eventKind=\(command.inputEventKind.rawValue) command=\(command.rawValue) keyCode=\(keyCode) armed=\(isArmed)")
-        if command.requiresActiveSuggestion {
-            guard isArmed else {
-                GeometryDebug.log("shortcut-pass-through reason=inactive command=\(command.rawValue) keyCode=\(keyCode)")
-                return Unmanaged.passUnretained(event)
-            }
+        let ownership = shortcutOwnershipEvaluator.evaluate(
+            command: command,
+            commandDecision: { shortcutOwnershipDecision(command) },
+            isSuggestionVisible: inputSuppressionController.isSuggestionActive,
+            inputMethodState: inputMethodState
+        )
+        logShortcutOwnership(command: command, keyCode: keyCode, decision: ownership)
 
-            guard !inputMethodState.shouldPassThroughSuggestionShortcuts else {
-                GeometryDebug.log("shortcut-pass-through reason=input-method state=\(inputMethodState.diagnosticSummary) source=\(inputMethodState.currentInputSourceID ?? "nil")")
-                return Unmanaged.passUnretained(event)
-            }
-        }
-
-        guard shouldInterceptCommand(command) else {
-            GeometryDebug.log("shortcut-pass-through reason=command-disabled command=\(command.rawValue)")
+        guard ownership.shouldConsume else {
             return Unmanaged.passUnretained(event)
         }
 
@@ -446,8 +578,81 @@ final class KeyboardShortcutService: @unchecked Sendable {
         return nil
     }
 
+    private func logShortcutOwnership(
+        command: KeyboardShortcutCommand,
+        keyCode: UInt16,
+        decision: ShortcutOwnershipDecision
+    ) {
+        let message = "shortcut-ownership decision=\(decision.diagnosticName) command=\(command.rawValue) reason=\(decision.reason) keyCode=\(keyCode)"
+        GeometryDebug.log(message)
+        shortcutLogger.info(message)
+    }
+
+    private func logInputCandidate(
+        type: CGEventType,
+        keyCode: UInt16,
+        flags: CGEventFlags,
+        inputEvent: CapturedInputEvent?,
+        matchedCommand: KeyboardShortcutCommand?
+    ) {
+        GeometryDebug.log(
+            "shortcut-input type=\(type.keyboardShortcutDebugName) keyCode=\(keyCode) flags=\(modifierFlagsDescription(flags)) inputEvent=\(inputEvent?.debugName ?? "nil") matchedCommand=\(matchedCommand?.rawValue ?? "nil")"
+        )
+    }
+
+    private func modifierFlagsDescription(_ flags: CGEventFlags) -> String {
+        var names: [String] = []
+        if flags.contains(.maskCommand) { names.append("command") }
+        if flags.contains(.maskAlternate) { names.append("option") }
+        if flags.contains(.maskControl) { names.append("control") }
+        if flags.contains(.maskShift) { names.append("shift") }
+        if flags.contains(.maskSecondaryFn) { names.append("fn") }
+        if flags.contains(.maskAlphaShift) { names.append("caps") }
+        return names.isEmpty ? "none" : names.joined(separator: ",")
+    }
+
     private func hasNoTabModifiers(_ event: CGEvent) -> Bool {
         event.flags.intersection([.maskCommand, .maskAlternate, .maskControl, .maskShift]).isEmpty
+    }
+
+    private func emojiKeyboardCommand(
+        for inputEvent: CapturedInputEvent?,
+        matchedCommand: KeyboardShortcutCommand?
+    ) -> EmojiKeyboardCommand? {
+        guard isEmojiPickerActive else {
+            return nil
+        }
+
+        switch matchedCommand {
+        case .acceptNextWord:
+            return .acceptSelected
+        case .dismissSuggestion:
+            return .cancel
+        case .selectPreviousSuggestion:
+            return .selectPrevious
+        case .selectNextSuggestion:
+            return .selectNext
+        case .acceptFullSuggestion, .manualTrigger, .toggleAutocomplete, nil:
+            break
+        }
+
+        switch inputEvent {
+        case .tab:
+            return .acceptSelected
+        case .dismissal:
+            return .cancel
+        case .navigation(let keyCode):
+            switch keyCode {
+            case 123, 126:
+                return .selectPrevious
+            case 124, 125:
+                return .selectNext
+            default:
+                return nil
+            }
+        case .text, .acceptAll, .shortcutMutation, .pointer, nil:
+            return nil
+        }
     }
 
     private func dispatchInputEventIfNeeded(
@@ -510,6 +715,27 @@ final class KeyboardShortcutService: @unchecked Sendable {
         }
         GeometryDebug.log("shortcut-passthrough-replay-pass type=\(type.rawValue) keyCode=\(keyCode)")
         return true
+    }
+}
+
+private extension CGEventType {
+    var keyboardShortcutDebugName: String {
+        switch self {
+        case .keyDown:
+            "keyDown"
+        case .keyUp:
+            "keyUp"
+        case .flagsChanged:
+            "flagsChanged"
+        case .leftMouseDown:
+            "leftMouseDown"
+        case .rightMouseDown:
+            "rightMouseDown"
+        case .otherMouseDown:
+            "otherMouseDown"
+        default:
+            "\(rawValue)"
+        }
     }
 }
 

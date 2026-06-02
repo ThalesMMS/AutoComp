@@ -4,7 +4,7 @@ import XCTest
 
 final class ShortcutsSettingsConflictFlowTests: XCTestCase {
     func testProposingConflictingBindingIsRejectedAndReturnsOwnerCommand() {
-        var settings = KeyboardShortcutSettings.defaults
+        let settings = KeyboardShortcutSettings.defaults
 
         // Pick a known default binding that exists on another command.
         let existingOwner: KeyboardShortcutCommand = .manualTrigger

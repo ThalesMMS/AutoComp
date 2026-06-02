@@ -12,6 +12,7 @@ final class BuildMatrixScriptTests: XCTestCase {
 
         for requiredText in [
             "unset AUTOCOMP_ENABLE_LLAMA_RUNTIME",
+            "unset AUTOCOMP_ENABLE_CONSTRAINED_LOCAL_COMPLETION",
             "unset AUTOCOMP_LLAMA_CFLAGS",
             "unset AUTOCOMP_LLAMA_LIBS",
             "AutoCompLlamaRuntime",
@@ -33,6 +34,7 @@ final class BuildMatrixScriptTests: XCTestCase {
             "check_llama_pkg_config.sh",
             "swift build --target CLlamaBridge",
             "swift build --target AutoCompLlamaRuntime",
+            "swift build --target AutoCompLlamaRuntimeTests",
             "swift build --product AutoCompLlamaLoadHarness",
             "AutoCompLlamaLoadHarness --status",
             "AUTOCOMP_LOCAL_MODEL_PATH",

@@ -36,6 +36,7 @@ public final class PrivacySettingsStore: @unchecked Sendable {
     public func resetLocalPrivacyDataState() throws {
         var settings = load()
         settings.telemetryEnabled = false
+        settings.localPersonalizationEnabled = false
         settings.writingPreferences = WritingPreferences()
         try save(settings)
     }

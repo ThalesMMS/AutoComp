@@ -145,6 +145,40 @@ final class LocalProductivityMetricsStoreTests: XCTestCase {
         XCTAssertFalse(persisted.contains("com.apple.TextEdit"))
     }
 
+    func testGeneratedShownSuppressedAndLatencyPercentilesStayNumericOnly() throws {
+        let defaults = try makeDefaults()
+        let privacyStore = PrivacySettingsStore(defaults: defaults, key: "privacy")
+        let store = LocalProductivityMetricsStore(
+            defaults: defaults,
+            key: "metrics",
+            privacyStore: privacyStore,
+            calendar: utcCalendar(),
+            now: { Date(timeIntervalSince1970: 100) }
+        )
+
+        store.recordGeneratedSuggestion()
+        store.recordGeneratedSuggestion()
+        store.recordShownSuggestion()
+        store.recordSuppressedSuggestion(reason: "backend paused because user typed secret words")
+        store.recordBackendLatency(10)
+        store.recordBackendLatency(20)
+        store.recordBackendLatency(100)
+
+        XCTAssertEqual(store.snapshot.suggestionsGenerated, 2)
+        XCTAssertEqual(store.snapshot.suggestionsShown, 1)
+        XCTAssertEqual(store.snapshot.suppressedReasonCounts["other"], 1)
+        XCTAssertEqual(store.snapshot.averageBackendLatencyMs, 43)
+        XCTAssertEqual(store.snapshot.p50BackendLatencyMs, 20)
+        XCTAssertEqual(store.snapshot.p95BackendLatencyMs, 100)
+
+        let encoded = try XCTUnwrap(defaults.data(forKey: "metrics"))
+        let persisted = String(data: encoded, encoding: .utf8) ?? ""
+        XCTAssertTrue(persisted.contains("\"suggestionsGenerated\":2"))
+        XCTAssertTrue(persisted.contains("\"suggestionsShown\":1"))
+        XCTAssertFalse(persisted.contains("typed secret words"))
+        XCTAssertFalse(persisted.contains("prompt text"))
+    }
+
     private func makeDefaults() throws -> UserDefaults {
         let suiteName = "AutoCompProductivityMetrics-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))

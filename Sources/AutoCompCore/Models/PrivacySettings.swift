@@ -23,6 +23,7 @@ public struct PrivacySettings: Codable, Equatable, Sendable {
     public var screenContextEnabled: Bool
     public var telemetryEnabled: Bool
     public var productivityMetricsEnabled: Bool
+    public var localPersonalizationEnabled: Bool
     public var personalizationStrength: Double
     public var writingPreferences: WritingPreferences
     public var perAppRules: [String: Bool]
@@ -37,6 +38,7 @@ public struct PrivacySettings: Codable, Equatable, Sendable {
         screenContextEnabled: Bool = false,
         telemetryEnabled: Bool = false,
         productivityMetricsEnabled: Bool = true,
+        localPersonalizationEnabled: Bool = false,
         personalizationStrength: Double = 0.35,
         writingPreferences: WritingPreferences = WritingPreferences(),
         perAppRules: [String: Bool] = [:],
@@ -48,6 +50,7 @@ public struct PrivacySettings: Codable, Equatable, Sendable {
         self.screenContextEnabled = screenContextEnabled
         self.telemetryEnabled = telemetryEnabled
         self.productivityMetricsEnabled = productivityMetricsEnabled
+        self.localPersonalizationEnabled = localPersonalizationEnabled
         self.personalizationStrength = personalizationStrength
         self.writingPreferences = writingPreferences
         self.perAppRules = perAppRules
@@ -61,6 +64,7 @@ public struct PrivacySettings: Codable, Equatable, Sendable {
         case screenContextEnabled
         case telemetryEnabled
         case productivityMetricsEnabled
+        case localPersonalizationEnabled
         case personalizationStrength
         case writingPreferences
         case perAppRules
@@ -76,6 +80,7 @@ public struct PrivacySettings: Codable, Equatable, Sendable {
             screenContextEnabled: try container.decodeIfPresent(Bool.self, forKey: .screenContextEnabled) ?? false,
             telemetryEnabled: try container.decodeIfPresent(Bool.self, forKey: .telemetryEnabled) ?? false,
             productivityMetricsEnabled: try container.decodeIfPresent(Bool.self, forKey: .productivityMetricsEnabled) ?? true,
+            localPersonalizationEnabled: try container.decodeIfPresent(Bool.self, forKey: .localPersonalizationEnabled) ?? false,
             personalizationStrength: try container.decodeIfPresent(Double.self, forKey: .personalizationStrength) ?? 0.35,
             writingPreferences: try container.decodeIfPresent(WritingPreferences.self, forKey: .writingPreferences) ?? WritingPreferences(),
             perAppRules: try container.decodeIfPresent([String: Bool].self, forKey: .perAppRules) ?? [:],

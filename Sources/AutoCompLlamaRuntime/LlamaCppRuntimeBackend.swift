@@ -1,5 +1,5 @@
 import AutoCompCore
-import CLlamaBridge
+internal import CLlamaBridge
 import Foundation
 
 public final class LlamaCppRuntimeBackend: LocalLlamaRuntimeBackend, @unchecked Sendable {
@@ -95,6 +95,36 @@ public final class LlamaCppRuntimeBackend: LocalLlamaRuntimeBackend, @unchecked 
                 return String(cString: generated)
             }
         }.value
+    }
+
+    public func tokenizerProfile() async throws -> LocalLlamaTokenizerProfile {
+        try lock.withLock {
+            guard let loadedModel else {
+                throw LocalLlamaError.runtimeUnavailable
+            }
+
+            var profile = AutoCompLlamaTokenizerProfile()
+            var error = AutoCompLlamaError()
+            guard autocomp_llama_model_tokenizer_profile(loadedModel, &profile, &error) else {
+                throw LocalLlamaError.generationFailed(String(cString: autocomp_llama_error_message(&error)))
+            }
+            let specialTokenSignature = [
+                "bos:\(profile.bos_token)",
+                "eos:\(profile.eos_token)",
+                "eot:\(profile.eot_token)",
+                "nl:\(profile.newline_token)",
+                "fim_pre:\(profile.fim_prefix_token)",
+                "fim_suf:\(profile.fim_suffix_token)",
+                "fim_mid:\(profile.fim_middle_token)"
+            ].joined(separator: "|")
+
+            return LocalLlamaTokenizerProfile(
+                tokenizerKind: "llama-vocab-type-\(profile.vocabulary_type)",
+                vocabularySize: Int(profile.vocabulary_size),
+                specialTokenSignature: specialTokenSignature,
+                supportsFillInMiddle: profile.supports_fill_in_middle
+            )
+        }
     }
 
     public func resetPromptCache() async {

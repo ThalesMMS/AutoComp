@@ -33,7 +33,7 @@ struct HostAppCompatibilityHealthCheck {
                 id: Self.id,
                 title: "Focused app",
                 status: .unknown,
-                summary: "No focused app",
+                summary: "Focus an app to check support.",
                 details: "AutoComp couldn't determine the current focused app. Switch to an app and focus a text field, then try again.",
                 actions: []
             )
@@ -57,7 +57,7 @@ struct HostAppCompatibilityHealthCheck {
 
         if decision.profile.status == .unsupported || decision.overrideMode == .disabled {
             status = .fail
-            summary = "Disabled"
+            summary = "Suggestions are off here."
             let baseReason = decision.profile.status == .unsupported
                 ? (decision.profile.notes.isEmpty ? "This app is currently unsupported." : decision.profile.notes)
                 : "AutoComp is disabled for this app."
@@ -65,13 +65,13 @@ struct HostAppCompatibilityHealthCheck {
             actions.append(HealthRemediationCatalog.openCompatibilitySettings)
         } else if decision.overrideMode == .manualOnly {
             status = .warn
-            summary = "Manual only"
+            summary = "Use the manual trigger here."
             let note = decision.profile.notes.isEmpty ? "" : "\n\n\(decision.profile.notes)"
             details = "\(appName) (\(bundleID))\n\nSuggestions are available, but won't appear automatically. Use the manual trigger shortcut to request a suggestion.\(note)"
             actions.append(HealthRemediationCatalog.openCompatibilitySettings)
         } else {
             status = .ok
-            summary = "Enabled"
+            summary = "Automatic suggestions are on here."
             var detailLines: [String] = ["\(appName) (\(bundleID))", "", "Automatic suggestions are enabled for this app."]
             if let setup = decision.setupMessage {
                 detailLines.append("\nSetup needed: \(setup)")

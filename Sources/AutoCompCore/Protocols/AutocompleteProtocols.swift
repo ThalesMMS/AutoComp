@@ -54,6 +54,27 @@ public protocol ClipboardContextAwareCompletionProvider: VisualContextAwareCompl
     ) async throws -> Suggestion
 }
 
+public protocol PersonalizationContextAwareCompletionProvider: ClipboardContextAwareCompletionProvider {
+    func complete(
+        context: TextContext,
+        privacySettings: PrivacySettings,
+        visualContext: VisualContextSnapshot?,
+        clipboardContext: ClipboardContextSnapshot?,
+        personalizationSamples: [PersonalizationSample]
+    ) async throws -> Suggestion
+}
+
+public protocol MultiplePersonalizationContextAwareCompletionProvider: PersonalizationContextAwareCompletionProvider, MultipleCompletionProvider {
+    func complete(
+        context: TextContext,
+        privacySettings: PrivacySettings,
+        visualContext: VisualContextSnapshot?,
+        clipboardContext: ClipboardContextSnapshot?,
+        personalizationSamples: [PersonalizationSample],
+        options: CompletionOptions
+    ) async throws -> [Suggestion]
+}
+
 @MainActor
 public protocol SuggestionPresenter: AnyObject {
     func show(_ suggestion: Suggestion, for context: TextContext, mode: SuggestionDisplayMode)

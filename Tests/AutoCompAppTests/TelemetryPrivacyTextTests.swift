@@ -4,10 +4,7 @@ import XCTest
 
 final class TelemetryPrivacyTextTests: XCTestCase {
     func testPrivacySettingsDoesNotExposeTelemetrySharingAndProvidesLocalDebugExport() throws {
-        let settingsSource = try String(
-            contentsOf: try packageRoot().appendingPathComponent("Sources/AutoCompApp/Views/SettingsRootView.swift"),
-            encoding: .utf8
-        )
+        let settingsSource = try settingsSourceContents(packageRoot: packageRoot())
 
         XCTAssertFalse(settingsSource.contains("Crash & error reporting"))
         XCTAssertFalse(settingsSource.contains("Share redacted crash and error telemetry"))

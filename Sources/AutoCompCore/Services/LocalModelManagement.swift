@@ -97,8 +97,7 @@ public struct LocalModelCatalog: Equatable, Sendable {
     ])
 
     public static var defaultModelsDirectoryURL: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("AutoComp", isDirectory: true)
+        AutoCompUserDirectories.appSupportDirectory
             .appendingPathComponent("Models", isDirectory: true)
     }
 
@@ -573,6 +572,38 @@ public final class ModelDownloadManager: ObservableObject {
         downloadTasks[filename]?.cancel()
     }
 
+    public func clearFailedState(filename: String) {
+        if case .failed = modelStates[filename] {
+            modelStates[filename] = installedModelURL(forFilename: filename) == nil ? .idle : .ready
+        }
+    }
+
+    @discardableResult
+    public func removePartialDownloads() -> Int {
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: modelsDirectoryURL,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) else {
+            return 0
+        }
+
+        var removedCount = 0
+        for file in files where isPartialDownloadFile(file) {
+            do {
+                try FileManager.default.removeItem(at: file)
+                removedCount += 1
+            } catch {
+                modelStates[file.lastPathComponent] = .failed("Could not remove partial download.")
+            }
+        }
+        refreshModelStates()
+        if removedCount > 0 {
+            onModelDirectoryChanged?()
+        }
+        return removedCount
+    }
+
     public func modelFileURL(for model: DownloadableLocalModel) -> URL {
         modelsDirectoryURL.appendingPathComponent(model.filename, isDirectory: false)
     }
@@ -585,6 +616,11 @@ public final class ModelDownloadManager: ObservableObject {
             }
         }
         return nil
+    }
+
+    private func installedModelURL(forFilename filename: String) -> URL? {
+        let url = modelsDirectoryURL.appendingPathComponent(filename, isDirectory: false)
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
     }
 
     public func installDownloadedFile(
@@ -673,6 +709,13 @@ public final class ModelDownloadManager: ObservableObject {
             try FileManager.default.moveItem(at: stagingURL, to: destinationURL)
         }
     }
+
+    private func isPartialDownloadFile(_ url: URL) -> Bool {
+        let filename = url.lastPathComponent
+        return filename.contains(".staging-")
+            || filename.hasSuffix(".download")
+            || filename.hasSuffix(".partial")
+    }
 }
 
 public enum RuntimeBootstrapState: Equatable, Sendable {
@@ -733,6 +776,227 @@ public final class RuntimeBootstrapModel: ObservableObject {
         let selectedPath = URL(fileURLWithPath: path).standardizedFileURL.path
         return availableModels.first {
             $0.url.standardizedFileURL.path == selectedPath
+        }
+    }
+}
+
+public enum LocalModelSetupState: Equatable, Sendable {
+    case idle
+    case browsingCatalog
+    case downloading(progress: Double?)
+    case validating
+    case importing
+    case ready(filename: String)
+    case failed(message: String)
+
+    public var statusText: String {
+        switch self {
+        case .idle:
+            return "No local model selected"
+        case .browsingCatalog:
+            return "Browsing recommended models"
+        case .downloading(let progress):
+            if let progress {
+                return "Downloading \(Int((progress * 100).rounded()))%"
+            }
+            return "Downloading model"
+        case .validating:
+            return "Validating GGUF"
+        case .importing:
+            return "Importing model"
+        case .ready(let filename):
+            return "Ready: \(filename)"
+        case .failed(let message):
+            return message
+        }
+    }
+}
+
+@MainActor
+public final class LocalModelSetupCoordinator: ObservableObject {
+    @Published public private(set) var state: LocalModelSetupState = .idle
+    @Published public private(set) var installedModels: [LocalModelOption] = []
+
+    private let modelsDirectoryURL: URL
+    private let scanner: ModelDirectoryScanner
+    private let preferredFilenames: [String]
+    private let fileManager: FileManager
+
+    public init(
+        modelsDirectoryURL: URL = LocalModelCatalog.defaultModelsDirectoryURL,
+        scanner: ModelDirectoryScanner = ModelDirectoryScanner(),
+        preferredFilenames: [String] = LocalModelCatalog.preferredFilenames,
+        fileManager: FileManager = .default
+    ) {
+        self.modelsDirectoryURL = modelsDirectoryURL
+        self.scanner = scanner
+        self.preferredFilenames = preferredFilenames
+        self.fileManager = fileManager
+        refreshInstalledModels()
+    }
+
+    public var modelsDirectory: URL {
+        modelsDirectoryURL
+    }
+
+    public func beginCatalogBrowsing() {
+        state = .browsingCatalog
+    }
+
+    public func updateDownloadState(_ downloadState: ModelDownloadState, filename: String) {
+        switch downloadState {
+        case .idle:
+            state = .browsingCatalog
+        case .loading(let progress):
+            state = .downloading(progress: progress)
+        case .ready:
+            state = .ready(filename: filename)
+        case .failed(let message):
+            state = .failed(message: message)
+        }
+    }
+
+    public func refreshInstalledModels() {
+        do {
+            installedModels = try scanner.scan(
+                directoryURL: modelsDirectoryURL,
+                preferredFilenames: preferredFilenames
+            )
+            state = installedModels.isEmpty ? .idle : .ready(filename: installedModels[0].filename)
+        } catch {
+            installedModels = []
+            state = .failed(message: sanitizedErrorMessage(error))
+        }
+    }
+
+    @discardableResult
+    public func importLocalModel(from sourceURL: URL) throws -> LocalModelOption {
+        state = .validating
+        do {
+            try ModelFileValidator.validateGGUFFile(at: sourceURL)
+            state = .importing
+            let destinationURL = try copyIntoModelsDirectory(sourceURL)
+            try ModelFileValidator.validateGGUFFile(at: destinationURL)
+            refreshInstalledModels()
+            let option = LocalModelOption(
+                filename: destinationURL.lastPathComponent,
+                url: destinationURL,
+                byteCount: fileSize(at: destinationURL)
+            )
+            state = .ready(filename: option.filename)
+            return option
+        } catch {
+            state = .failed(message: sanitizedErrorMessage(error, url: sourceURL))
+            throw error
+        }
+    }
+
+    @discardableResult
+    public func selectInstalledModel(at url: URL) throws -> LocalModelOption {
+        let standardizedPath = url.standardizedFileURL.path
+        guard let option = installedModels.first(where: { $0.url.standardizedFileURL.path == standardizedPath }) else {
+            let message = "Model is not installed in AutoComp Models."
+            state = .failed(message: message)
+            throw LocalModelSetupError.modelNotInstalled(url.lastPathComponent)
+        }
+        try ModelFileValidator.validateGGUFFile(at: option.url)
+        state = .ready(filename: option.filename)
+        return option
+    }
+
+    public func removeInstalledModel(_ option: LocalModelOption) throws {
+        guard isInsideModelsDirectory(option.url) else {
+            let message = "Only installed AutoComp models can be removed here."
+            state = .failed(message: message)
+            throw LocalModelSetupError.refusesExternalDelete(option.filename)
+        }
+
+        do {
+            try fileManager.removeItem(at: option.url)
+            refreshInstalledModels()
+            if installedModels.isEmpty {
+                state = .idle
+            }
+        } catch {
+            state = .failed(message: "Could not remove \(option.filename).")
+            throw error
+        }
+    }
+
+    private func copyIntoModelsDirectory(_ sourceURL: URL) throws -> URL {
+        try fileManager.createDirectory(
+            at: modelsDirectoryURL,
+            withIntermediateDirectories: true
+        )
+
+        let destinationURL = modelsDirectoryURL
+            .appendingPathComponent(sourceURL.lastPathComponent, isDirectory: false)
+            .standardizedFileURL
+        let standardizedSource = sourceURL.standardizedFileURL
+        guard standardizedSource.path != destinationURL.path else {
+            return destinationURL
+        }
+
+        let stagingURL = modelsDirectoryURL.appendingPathComponent(
+            "\(sourceURL.lastPathComponent).import-\(UUID().uuidString).gguf",
+            isDirectory: false
+        )
+        do {
+            try fileManager.copyItem(at: sourceURL, to: stagingURL)
+            try promote(stagingURL: stagingURL, destinationURL: destinationURL)
+            return destinationURL
+        } catch {
+            try? fileManager.removeItem(at: stagingURL)
+            throw error
+        }
+    }
+
+    private func promote(stagingURL: URL, destinationURL: URL) throws {
+        if fileManager.fileExists(atPath: destinationURL.path) {
+            let replacedURL = try fileManager.replaceItemAt(
+                destinationURL,
+                withItemAt: stagingURL,
+                backupItemName: nil,
+                options: []
+            )
+            guard replacedURL != nil else {
+                throw ModelDownloadError.promotionFailed(destinationURL.lastPathComponent)
+            }
+        } else {
+            try fileManager.moveItem(at: stagingURL, to: destinationURL)
+        }
+    }
+
+    private func isInsideModelsDirectory(_ url: URL) -> Bool {
+        let modelsPath = modelsDirectoryURL.standardizedFileURL.path
+        return url.standardizedFileURL.path.hasPrefix(modelsPath + "/")
+    }
+
+    private func fileSize(at url: URL) -> Int64? {
+        (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init)
+    }
+
+    private func sanitizedErrorMessage(_ error: Error, url: URL? = nil) -> String {
+        let rawMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        guard let url else {
+            return rawMessage.replacingOccurrences(of: modelsDirectoryURL.path, with: "AutoComp Models")
+        }
+        return rawMessage
+            .replacingOccurrences(of: url.path, with: url.lastPathComponent)
+            .replacingOccurrences(of: modelsDirectoryURL.path, with: "AutoComp Models")
+    }
+}
+
+public enum LocalModelSetupError: LocalizedError, Equatable, Sendable {
+    case modelNotInstalled(String)
+    case refusesExternalDelete(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .modelNotInstalled(let filename):
+            return "\(filename) is not installed in AutoComp Models."
+        case .refusesExternalDelete(let filename):
+            return "\(filename) is outside AutoComp Models and was not removed."
         }
     }
 }

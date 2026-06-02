@@ -11,17 +11,19 @@ final class AppController: ObservableObject {
     private static let onboardingWindowMaximumContentSize = NSSize(width: 680, height: 600)
     private static let settingsWindowMinimumContentSize = NSSize(width: 880, height: 560)
 
-    @Published var selectedSettingsSection: SettingsSection = .permissions
+    @Published var selectedSettingsSection: SettingsSection = .general
     @Published private(set) var completionBackendSummary: String
     @Published var completionBackendSettings: CompletionBackendSettings
 
     let permissionService: PermissionService
+    let permissionGuidanceController: PermissionGuidanceController
     let compatibilityCatalog: CompatibilityCatalog
     let compatibilitySettings: CompatibilitySettingsStore
     let privacySettingsStore: PrivacySettingsStore
     let personalizationStore: SecurePersonalizationStore
     let focusTrackingModel: FocusTrackingModel
     let suggestionEngine: SuggestionEngine
+    let interactionPipelineSuspensionController: InteractionPipelineSuspensionController
     let shortcutSettingsStore: KeyboardShortcutSettingsStore
     let healthSnapshotService: HealthSnapshotService
     let remoteCompletionConsentStore: RemoteCompletionConsentStore
@@ -34,12 +36,15 @@ final class AppController: ObservableObject {
     private let environment: AutoCompAppEnvironment
     private let acceptanceService: AcceptanceService
     private let keyboardShortcuts: KeyboardShortcutService
+    private let emojiVariantPreferencesStore: EmojiVariantPreferencesStore
+    private let emojiPickerController: EmojiPickerController
     private let completionBackendConfigurationService: CompletionBackendConfigurationService
     private let completionPlaygroundService = CompletionPlaygroundService()
     private let debugArtifactStore: DebugArtifactStore
     private let suggestionDebugLogger: SuggestionDebugLogger
     private let localPrivacyDataResetService: LocalPrivacyDataResetService
     private let telemetryClient: any TelemetryClient
+    private let activationPolicyController: AppActivationPolicyController
     private let settingsWindowResizeDelegate = MinimumContentSizeWindowDelegate(
         minContentSize: AppController.settingsWindowMinimumContentSize
     )
@@ -47,6 +52,8 @@ final class AppController: ObservableObject {
     private var onboardingWindow: NSWindow?
     private var settingsWindow: NSWindow?
     private var cancellables: Set<AnyCancellable> = []
+    private var windowCloseObserver: NSObjectProtocol?
+    private var pipelineSuspensionHandlerID: UUID?
     private var hasStarted = false
 
     convenience init() {
@@ -56,12 +63,14 @@ final class AppController: ObservableObject {
     init(environment: AutoCompAppEnvironment) {
         self.environment = environment
         self.permissionService = environment.permissionService
+        self.permissionGuidanceController = environment.permissionGuidanceController
         self.compatibilityCatalog = environment.compatibilityCatalog
         self.compatibilitySettings = environment.compatibilitySettings
         self.privacySettingsStore = environment.privacySettingsStore
         self.personalizationStore = environment.personalizationStore
         self.focusTrackingModel = environment.focusTrackingModel
         self.suggestionEngine = environment.suggestionEngine
+        self.interactionPipelineSuspensionController = environment.interactionPipelineSuspensionController
         self.shortcutSettingsStore = environment.shortcutSettingsStore
         self.healthSnapshotService = environment.healthSnapshotService
         self.remoteCompletionConsentStore = environment.remoteCompletionConsentStore
@@ -71,6 +80,8 @@ final class AppController: ObservableObject {
         self.productivityMetricsStore = environment.productivityMetricsStore
         self.acceptanceService = environment.acceptanceService
         self.keyboardShortcuts = environment.keyboardShortcuts
+        self.emojiVariantPreferencesStore = environment.emojiVariantPreferencesStore
+        self.emojiPickerController = environment.emojiPickerController
         self.completionBackendConfigurationService = environment.completionBackendConfigurationService
         self.debugArtifactStore = environment.debugArtifactStore
         self.suggestionDebugLogger = environment.suggestionDebugLogger
@@ -86,6 +97,7 @@ final class AppController: ObservableObject {
         )
         self.installationLocationService = environment.installationLocationService
         self.telemetryClient = environment.telemetryClient
+        self.activationPolicyController = AppActivationPolicyController()
         self.usesInlinePreviewTestProvider = environment.usesInlinePreviewTestProvider
         self.completionBackendSettings = environment.initialCompletionBackendSettings
         self.completionBackendSummary = environment.initialCompletionBackendSettings.summary
@@ -97,6 +109,36 @@ final class AppController: ObservableObject {
                 self?.startKeyboardShortcuts()
             }
             .store(in: &cancellables)
+
+        pipelineSuspensionHandlerID = interactionPipelineSuspensionController.addStateChangeHandler { [weak self] isSuspended, activeReasons in
+            Task { @MainActor in
+                self?.applyInteractionPipelineSuspension(isSuspended, activeReasons: activeReasons)
+            }
+        }
+
+        windowCloseObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let window = notification.object as? NSWindow else {
+                return
+            }
+            MainActor.assumeIsolated {
+                self?.handleWindowWillClose(window)
+            }
+        }
+
+        emojiPickerController.onActiveChanged = { [weak self] active in
+            guard let self else {
+                return
+            }
+            self.keyboardShortcuts.setEmojiPickerActive(active)
+            if active {
+                self.suggestionEngine.hideSuggestion()
+                self.syncShortcutStateAfterAcceptance()
+            }
+        }
 
         Task { @MainActor [weak self] in
             self?.start()
@@ -126,18 +168,59 @@ final class AppController: ObservableObject {
             },
             onInputEvent: { [weak self] event in
                 Task { @MainActor in
-                    self?.suggestionEngine.recordCapturedInputEvent(event)
+                    guard let self else {
+                        return
+                    }
+                    let handledByEmoji = await self.emojiPickerController.handleInputEvent(event)
+                    if !handledByEmoji {
+                        self.suggestionEngine.recordCapturedInputEvent(event)
+                    }
                 }
             },
-            shouldInterceptCommand: { [weak self] command in
-                switch command {
-                case .selectPreviousSuggestion, .selectNextSuggestion:
-                    return self?.suggestionEngine.isMultiSuggestionPopupVisible == true
-                case .acceptNextWord, .acceptFullSuggestion, .manualTrigger, .dismissSuggestion, .toggleAutocomplete:
-                    return true
+            onEmojiCommand: { [weak self] command in
+                Task { @MainActor in
+                    await self?.handleEmojiKeyboardCommand(command)
                 }
+            },
+            shortcutOwnershipDecision: { [weak self] command in
+                guard let self else {
+                    return .passThrough(reason: "controller-unavailable")
+                }
+
+                return self.suggestionEngine.shortcutOwnershipDecision(
+                    for: command,
+                    isSuggestionVisible: self.keyboardShortcuts.isSuggestionActive
+                )
             }
         )
+    }
+
+    private func handleEmojiKeyboardCommand(_ command: EmojiKeyboardCommand) async {
+        await emojiPickerController.handleKeyboardCommand(command)
+        syncShortcutStateAfterAcceptance()
+    }
+
+    private func applyInteractionPipelineSuspension(
+        _ suspended: Bool,
+        activeReasons: Set<InteractionPipelineSuspensionReason>
+    ) {
+        let reason = activeReasons
+            .map(\.rawValue)
+            .sorted()
+            .joined(separator: ",")
+        let reasonSummary = reason.isEmpty ? "none" : reason
+
+        suggestionEngine.setInteractionPipelineSuspended(suspended, reason: reasonSummary)
+        keyboardShortcuts.setInteractionPipelineSuspended(suspended, reason: reasonSummary)
+
+        guard !suspended else {
+            return
+        }
+
+        permissionService.refresh()
+        if hasStarted {
+            startKeyboardShortcuts()
+        }
     }
 
     private func handleShortcutCommand(_ command: KeyboardShortcutCommand) async {
@@ -146,6 +229,7 @@ final class AppController: ObservableObject {
             let outcome = await suggestionEngine.acceptNextWord(using: acceptanceService)
             syncShortcutStateAfterAcceptance()
             if outcome == .passedThrough {
+                GeometryDebug.log("shortcut-command outcome=passed-through command=\(command.rawValue) replay=passthrough")
                 keyboardShortcuts.replayPassthroughShortcut(command)
             }
         case .acceptFullSuggestion:
@@ -176,8 +260,25 @@ final class AppController: ObservableObject {
         }
     }
 
+    func emojiVariantPreferences() -> EmojiVariantPreferences {
+        emojiVariantPreferencesStore.load()
+    }
+
+    func saveEmojiVariantPreferences(_ preferences: EmojiVariantPreferences) {
+        try? emojiVariantPreferencesStore.save(preferences)
+        emojiPickerController.updatePreferences(preferences)
+    }
+
+    var emojiPickerAcceptKeyLabel: String {
+        shortcutSettingsStore.load()[.acceptNextWord].displayName
+    }
+
     func toggleAutocompleteEnabled() {
-        suggestionEngine.setAutocompleteEnabled(!suggestionEngine.isAutocompleteEnabled)
+        setAutocompleteEnabled(!suggestionEngine.isAutocompleteEnabled)
+    }
+
+    func setAutocompleteEnabled(_ enabled: Bool) {
+        suggestionEngine.setAutocompleteEnabled(enabled)
         syncShortcutStateAfterAcceptance()
     }
 
@@ -254,8 +355,37 @@ final class AppController: ObservableObject {
         remoteCompletionConsentStore.reset()
     }
 
+    func startPermissionGuidance(for kind: PermissionKind) {
+        permissionGuidanceController.begin(for: kind)
+    }
+
+    func cancelPermissionGuidance() {
+        permissionGuidanceController.cancel()
+    }
+
     func deleteDebugArtifacts() throws {
         try debugArtifactStore.deleteAll()
+    }
+
+    @discardableResult
+    func withInteractionPipelineSuspended<T>(
+        reason: InteractionPipelineSuspensionReason,
+        operation: () throws -> T
+    ) rethrows -> T {
+        try interactionPipelineSuspensionController.withPipelineSuspended(
+            reason: reason,
+            operation: operation
+        )
+    }
+
+    @discardableResult
+    func withInteractionPipelineSuspended<T>(
+        reason: InteractionPipelineSuspensionReason,
+        operation: () async throws -> T
+    ) async rethrows -> T {
+        let token = interactionPipelineSuspensionController.suspend(reason: reason)
+        defer { interactionPipelineSuspensionController.resume(token) }
+        return try await operation()
     }
 
     func exportDebugLogs(to directory: URL) throws -> URL {
@@ -410,6 +540,14 @@ final class AppController: ObservableObject {
         environment.usesPlaygroundTestProvider
     }
 
+    var shouldRunSettingsConnectionUITest: Bool {
+        environment.runsSettingsConnectionUITest
+    }
+
+    var settingsConnectionUITestBackendSettings: CompletionBackendSettings {
+        environment.settingsConnectionUITestBackendSettings
+    }
+
     func playgroundPreview(
         prefix: String,
         suffix: String,
@@ -434,17 +572,47 @@ final class AppController: ObservableObject {
     }
 
     func showOnboardingWindow() {
-        let window = onboardingWindow ?? makeWindow(
-            title: "AutoComp Onboarding",
-            size: Self.onboardingWindowContentSize,
-            minSize: Self.onboardingWindowMinimumContentSize,
-            maxSize: Self.onboardingWindowMaximumContentSize,
-            content: OnboardingView()
-                .environmentObject(self)
-                .environmentObject(permissionService)
-        )
+        let window: NSWindow
+        if let existingWindow = onboardingWindow, existingWindow.isVisible {
+            window = existingWindow
+        } else {
+            window = makeWindow(
+                title: "AutoComp Onboarding",
+                size: Self.onboardingWindowContentSize,
+                minSize: Self.onboardingWindowMinimumContentSize,
+                maxSize: Self.onboardingWindowMaximumContentSize,
+                content: OnboardingView()
+                    .environmentObject(self)
+                    .environmentObject(permissionService)
+            )
+        }
         onboardingWindow = window
-        show(window)
+        show(window, id: .onboarding)
+    }
+
+    func closeOnboardingWindow() {
+        onboardingWindow?.close()
+        onboardingWindow = nil
+    }
+
+    private func handleWindowWillClose(_ window: NSWindow?) {
+        guard let window else {
+            return
+        }
+
+        if window === onboardingWindow {
+            activationPolicyController.windowDidClose(.onboarding)
+            onboardingWindow = nil
+            cancelPermissionGuidance()
+            return
+        }
+
+        if window === settingsWindow {
+            activationPolicyController.windowDidClose(.settings)
+            settingsWindow = nil
+            cancelPermissionGuidance()
+            return
+        }
     }
 
     func showSettingsWindow() {
@@ -458,10 +626,11 @@ final class AppController: ObservableObject {
                 .environmentObject(permissionService)
                 .environmentObject(suggestionEngine)
                 .environmentObject(localLlamaRuntimeStatusStore)
+                .environmentObject(installationLocationService)
         )
         window.delegate = settingsWindowResizeDelegate
         settingsWindow = window
-        show(window)
+        show(window, id: .settings)
     }
 
     private func makeWindow<Content: View>(
@@ -492,10 +661,9 @@ final class AppController: ObservableObject {
         return window
     }
 
-    private func show(_ window: NSWindow) {
-        NSApp.setActivationPolicy(.regular)
+    private func show(_ window: NSWindow, id: AppActivationPolicyController.WindowID) {
+        activationPolicyController.windowDidOpen(id)
         window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
     }
 
     private func openRequestedDebugWindowIfNeeded() {
@@ -508,34 +676,6 @@ final class AppController: ObservableObject {
             showSettingsWindow()
         } else if arguments.contains("--ui-test-onboarding") {
             showOnboardingWindow()
-        }
-    }
-}
-
-enum SettingsSection: String, CaseIterable, Identifiable {
-    case health = "Health"
-    case permissions = "Permissions"
-    case apps = "Apps"
-    case privacy = "Privacy"
-    case shortcuts = "Shortcuts"
-    case model = "Model"
-
-    var id: String { rawValue }
-
-    var systemImage: String {
-        switch self {
-        case .health:
-            return "heart.text.square"
-        case .permissions:
-            return "lock.shield"
-        case .apps:
-            return "rectangle.stack"
-        case .privacy:
-            return "hand.raised"
-        case .shortcuts:
-            return "keyboard"
-        case .model:
-            return "cpu"
         }
     }
 }

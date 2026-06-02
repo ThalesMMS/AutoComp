@@ -32,6 +32,7 @@ final class LocalPrivacyDataResetServiceTests: XCTestCase {
             screenContextEnabled: true,
             telemetryEnabled: true,
             productivityMetricsEnabled: true,
+            localPersonalizationEnabled: true,
             writingPreferences: WritingPreferences(
                 enabled: true,
                 rules: ["Write objectively", "Avoid emoji"]
@@ -164,6 +165,7 @@ final class LocalPrivacyDataResetServiceTests: XCTestCase {
         XCTAssertTrue(privacySettings.clipboardContextEnabled)
         XCTAssertTrue(privacySettings.screenContextEnabled)
         XCTAssertTrue(privacySettings.productivityMetricsEnabled)
+        XCTAssertFalse(privacySettings.localPersonalizationEnabled)
         XCTAssertFalse(privacySettings.telemetryEnabled)
         XCTAssertEqual(privacySettings.perAppRules["com.apple.TextEdit"], false)
         XCTAssertEqual(privacySettings.perDomainRules["docs.google.com"], false)

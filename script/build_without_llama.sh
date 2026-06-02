@@ -46,6 +46,7 @@ fail() {
 
 run_without_llama_env() (
   unset AUTOCOMP_ENABLE_LLAMA_RUNTIME
+  unset AUTOCOMP_ENABLE_CONSTRAINED_LOCAL_COMPLETION
   unset AUTOCOMP_LLAMA_CFLAGS
   unset AUTOCOMP_LLAMA_LIBS
   "$@"

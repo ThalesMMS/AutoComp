@@ -8,16 +8,20 @@ import AutoCompLlamaRuntime
 @MainActor
 struct AutoCompAppEnvironment {
     let permissionService: PermissionService
+    let permissionGuidanceController: PermissionGuidanceController
     let compatibilityCatalog: CompatibilityCatalog
     let compatibilitySettings: CompatibilitySettingsStore
     let privacySettingsStore: PrivacySettingsStore
     let personalizationStore: SecurePersonalizationStore
     let focusTrackingModel: FocusTrackingModel
     let visualContextCoordinator: VisualContextCoordinator
+    let interactionPipelineSuspensionController: InteractionPipelineSuspensionController
     let clipboardContextProvider: SystemClipboardContextProvider
     let suggestionEngine: SuggestionEngine
     let acceptanceService: AcceptanceService
     let keyboardShortcuts: KeyboardShortcutService
+    let emojiVariantPreferencesStore: EmojiVariantPreferencesStore
+    let emojiPickerController: EmojiPickerController
     let inputSourceMonitor: InputSourceMonitor
     let shortcutSettingsStore: KeyboardShortcutSettingsStore
     let completionBackendConfigurationService: CompletionBackendConfigurationService
@@ -33,11 +37,13 @@ struct AutoCompAppEnvironment {
     let installationLocationService: InstallationLocationService
     let telemetryClient: any TelemetryClient
     let usesInlinePreviewTestProvider: Bool
+    let runsSettingsConnectionUITest: Bool
     let usesPlaygroundTestProvider: Bool
     let initialCompletionBackendSettings: CompletionBackendSettings
 
     init(arguments: [String] = ProcessInfo.processInfo.arguments) {
         let usesInlinePreviewTestProvider = arguments.contains("--ui-test-inline-preview")
+        let runsSettingsConnectionUITest = arguments.contains("--ui-test-settings")
         let usesPlaygroundTestProvider = arguments.contains("--ui-test-playground")
         let completionBackendConfigurationService = CompletionBackendConfigurationService()
         let localLlamaRuntimeStatusStore = LocalLlamaRuntimeStatusStore()
@@ -46,6 +52,7 @@ struct AutoCompAppEnvironment {
             ? CompletionBackendSettings()
             : completionBackendConfigurationService.load()
         let permissionService = PermissionService()
+        let permissionGuidanceController = PermissionGuidanceController(permissionService: permissionService)
         let compatibilityCatalog = CompatibilityCatalog()
         let compatibilitySettings = CompatibilitySettingsStore()
         let privacySettingsStore = PrivacySettingsStore()
@@ -59,9 +66,11 @@ struct AutoCompAppEnvironment {
         )
         let installationLocationService = InstallationLocationService()
         let telemetryClient = DisabledTelemetryClient()
+        let interactionPipelineSuspensionController = InteractionPipelineSuspensionController()
         let inputSuppressionController = InputSuppressionController()
         let inputSourceMonitor = InputSourceMonitor()
         let shortcutSettingsStore = KeyboardShortcutSettingsStore()
+        let emojiVariantPreferencesStore = EmojiVariantPreferencesStore()
         let keyboardShortcuts = KeyboardShortcutService(
             inputSuppressionController: inputSuppressionController,
             shortcutSettings: shortcutSettingsStore.load(),
@@ -72,12 +81,23 @@ struct AutoCompAppEnvironment {
             pasteboardRecoveryStore: pasteboardRecoveryStore
         )
         let personalizationStore = SecurePersonalizationStore(directory: Self.personalizationDirectory())
+        let personalizationRecorder = PersonalizationSampleRecorder(store: personalizationStore)
         let focusTrackingModel = FocusTrackingModel(
             axCapabilitySnapshotRecorder: AXCapabilitySnapshotRecorder(
                 artifactStore: debugArtifactStore
-            )
+            ),
+            interactionPipelineSuspensionController: interactionPipelineSuspensionController
         )
-        let visualContextCoordinator = VisualContextCoordinator(privacyStore: privacySettingsStore)
+        let emojiPickerController = EmojiPickerController(
+            contextProvider: focusTrackingModel,
+            textReplacer: acceptanceService,
+            preferencesStore: emojiVariantPreferencesStore,
+            panelController: EmojiPickerPanelController()
+        )
+        let visualContextCoordinator = VisualContextCoordinator(
+            privacyStore: privacySettingsStore,
+            interactionPipelineSuspensionController: interactionPipelineSuspensionController
+        )
         let clipboardContextProvider = SystemClipboardContextProvider()
         let keystrokeBufferFallback = KeystrokeBufferFallback()
         let previewCoordinator = PreviewCoordinator(
@@ -109,6 +129,7 @@ struct AutoCompAppEnvironment {
             compatibilityCatalog: compatibilityCatalog,
             compatibilitySettings: compatibilitySettings,
             privacyStore: privacySettingsStore,
+            personalizationRecorder: personalizationRecorder,
             productivityMetrics: productivityMetricsStore,
             multiSuggestionEnabled: backendSettings.multiSuggestionEnabled,
             inputMethodStateProvider: { inputSourceMonitor.currentState },
@@ -130,16 +151,20 @@ struct AutoCompAppEnvironment {
         )
 
         self.permissionService = permissionService
+        self.permissionGuidanceController = permissionGuidanceController
         self.compatibilityCatalog = compatibilityCatalog
         self.compatibilitySettings = compatibilitySettings
         self.privacySettingsStore = privacySettingsStore
         self.personalizationStore = personalizationStore
         self.focusTrackingModel = focusTrackingModel
         self.visualContextCoordinator = visualContextCoordinator
+        self.interactionPipelineSuspensionController = interactionPipelineSuspensionController
         self.clipboardContextProvider = clipboardContextProvider
         self.suggestionEngine = suggestionEngine
         self.acceptanceService = acceptanceService
         self.keyboardShortcuts = keyboardShortcuts
+        self.emojiVariantPreferencesStore = emojiVariantPreferencesStore
+        self.emojiPickerController = emojiPickerController
         self.inputSourceMonitor = inputSourceMonitor
         self.shortcutSettingsStore = shortcutSettingsStore
         self.completionBackendConfigurationService = completionBackendConfigurationService
@@ -155,6 +180,7 @@ struct AutoCompAppEnvironment {
         self.installationLocationService = installationLocationService
         self.telemetryClient = telemetryClient
         self.usesInlinePreviewTestProvider = usesInlinePreviewTestProvider
+        self.runsSettingsConnectionUITest = runsSettingsConnectionUITest
         self.usesPlaygroundTestProvider = usesPlaygroundTestProvider
         self.initialCompletionBackendSettings = backendSettings
         self.keyboardShortcuts.setSuggestionActive(false)
@@ -174,6 +200,10 @@ struct AutoCompAppEnvironment {
             return PlaygroundTestCompletionProvider()
         }
         return completionProvider(for: settings)
+    }
+
+    var settingsConnectionUITestBackendSettings: CompletionBackendSettings {
+        CompletionBackendSettings(remoteAPIKey: "apikey")
     }
 
     private static func completionProvider(
@@ -214,12 +244,29 @@ struct AutoCompAppEnvironment {
         runtimeStatusStore: LocalLlamaRuntimeStatusStore
     ) -> CompletionProvider {
         #if AUTOCOMP_LLAMA_RUNTIME
+        #if AUTOCOMP_CONSTRAINED_LOCAL_COMPLETION
+        if ConstrainedLocalCompletionFeature.isEnabled() {
+            return ConstrainedLocalCompletionProvider(
+                localConfiguration: settings.localConfiguration,
+                runtime: LocalLlamaRuntimeCore(backend: LlamaCppRuntimeBackend()),
+                runtimeStatusRecorder: runtimeStatusStore.makeRecorder()
+            )
+        }
+        #endif
         return LocalLlamaCompletionProvider(
             configuration: settings.localConfiguration,
             runtime: LocalLlamaRuntimeCore(backend: LlamaCppRuntimeBackend()),
             runtimeStatusRecorder: runtimeStatusStore.makeRecorder()
         )
         #else
+        #if AUTOCOMP_CONSTRAINED_LOCAL_COMPLETION
+        if ConstrainedLocalCompletionFeature.isEnabled() {
+            return ConstrainedLocalCompletionProvider(
+                localConfiguration: settings.localConfiguration,
+                runtimeStatusRecorder: runtimeStatusStore.makeRecorder()
+            )
+        }
+        #endif
         return LocalLlamaCompletionProvider(
             configuration: settings.localConfiguration,
             runtimeStatusRecorder: runtimeStatusStore.makeRecorder()
@@ -239,8 +286,7 @@ struct AutoCompAppEnvironment {
     }
 
     private static func personalizationDirectory() -> URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("AutoComp", isDirectory: true)
+        AutoCompUserDirectories.appSupportDirectory
             .appendingPathComponent("Personalization", isDirectory: true)
     }
 }

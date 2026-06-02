@@ -32,6 +32,12 @@ final class InputSuppressionController {
         return suggestionActive || now() <= shortcutGraceUntil
     }
 
+    var isSuggestionActive: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return suggestionActive
+    }
+
     func setSuggestionActive(_ active: Bool) {
         lock.lock()
         suggestionActive = active

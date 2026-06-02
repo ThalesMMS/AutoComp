@@ -31,12 +31,40 @@ final class InstallationLocationServiceTests: XCTestCase {
         XCTAssertFalse(status.shouldWarn)
     }
 
-    func testDoesNotWarnWhenRunningAsSwiftPMExecutable() {
+    func testWarnsWhenRunningAsSwiftPMExecutable() {
         let status = InstallationLocationService.status(
             bundleURL: URL(fileURLWithPath: "/Users/test/GitHub/AutoComp/.build/debug/AutoComp"),
             homeDirectory: URL(fileURLWithPath: "/Users/test", isDirectory: true)
         )
 
-        XCTAssertFalse(status.shouldWarn)
+        XCTAssertTrue(status.shouldWarn)
+        XCTAssertEqual(status.currentDirectoryPath, "/Users/test/GitHub/AutoComp/.build/debug")
+        XCTAssertEqual(status.revealPath, "/Users/test/GitHub/AutoComp/.build/debug/AutoComp")
+    }
+
+    func testRevealTargetUsesExecutableWhenBundleURLIsDebugDirectory() {
+        let status = InstallationLocationService.status(
+            bundleURL: URL(fileURLWithPath: "/Users/test/GitHub/AutoComp/.build/debug", isDirectory: true),
+            executablePath: "/Users/test/GitHub/AutoComp/.build/debug/AutoComp",
+            homeDirectory: URL(fileURLWithPath: "/Users/test", isDirectory: true)
+        )
+
+        XCTAssertTrue(status.shouldWarn)
+        XCTAssertEqual(status.currentPath, "/Users/test/GitHub/AutoComp/.build/debug/AutoComp")
+        XCTAssertEqual(status.currentDirectoryPath, "/Users/test/GitHub/AutoComp/.build/debug")
+        XCTAssertEqual(status.revealPath, "/Users/test/GitHub/AutoComp/.build/debug/AutoComp")
+    }
+
+    func testRevealTargetDerivesAppBundleWhenBundleURLIsInsideAppContents() {
+        let status = InstallationLocationService.status(
+            bundleURL: URL(fileURLWithPath: "/Users/test/GitHub/AutoComp/dist/AutoComp.app/Contents/MacOS", isDirectory: true),
+            executablePath: "/Users/test/GitHub/AutoComp/dist/AutoComp.app/Contents/MacOS/AutoComp",
+            homeDirectory: URL(fileURLWithPath: "/Users/test", isDirectory: true)
+        )
+
+        XCTAssertTrue(status.shouldWarn)
+        XCTAssertEqual(status.currentPath, "/Users/test/GitHub/AutoComp/dist/AutoComp.app")
+        XCTAssertEqual(status.currentDirectoryPath, "/Users/test/GitHub/AutoComp/dist")
+        XCTAssertEqual(status.revealPath, "/Users/test/GitHub/AutoComp/dist/AutoComp.app")
     }
 }

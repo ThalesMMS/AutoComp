@@ -145,6 +145,29 @@ final class PromptBuilderTests: XCTestCase {
         XCTAssertTrue(enabledPrompt.contains("Writing preferences:\n- Write objectively\n- Avoid emoji"))
     }
 
+    func testPromptIncludesLanguageHintsWithoutForcingLanguage() {
+        let context = TextContext(
+            app: AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1),
+            focusedElementID: "field",
+            textBeforeCursor: "Please "
+        )
+
+        let prompt = PromptBuilder().prompt(
+            for: context,
+            privacySettings: PrivacySettings(
+                writingPreferences: WritingPreferences(
+                    enabled: true,
+                    languageHints: ["Portuguese (Brazil)", "English"]
+                )
+            )
+        )
+
+        XCTAssertTrue(prompt.contains("Language hints: follow the surrounding text language first."))
+        XCTAssertTrue(prompt.contains("If ambiguous, prefer: Portuguese (Brazil), English."))
+        XCTAssertFalse(prompt.localizedCaseInsensitiveContains("always use Portuguese"))
+        XCTAssertFalse(prompt.localizedCaseInsensitiveContains("force language"))
+    }
+
     func testContinuationUsesContinuationPrefixBudget() {
         let context = TextContext(
             app: AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1),
@@ -237,5 +260,58 @@ final class PromptBuilderTests: XCTestCase {
         XCTAssertTrue(prompt.contains("Clipboard context:\nCLIPB"))
         XCTAssertFalse(prompt.contains("VISIBLE-CONTEXT-LONG"))
         XCTAssertFalse(prompt.contains("CLIPBOARD-CONTEXT-LONG"))
+    }
+
+    func testPromptIncludesLimitedShortPersonalizationSamples() {
+        let context = TextContext(
+            app: AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1),
+            focusedElementID: "field",
+            textBeforeCursor: "Please continue"
+        )
+        let builder = PromptBuilder(budgets: PromptInputBudgets(
+            continuationPrefixCharacters: 100,
+            fimPrefixCharacters: 100,
+            fimSuffixCharacters: 100,
+            selectionCharacters: 100,
+            clipboardCharacters: 100,
+            visualContextCharacters: 100,
+            fullTextWindowCharacters: 100,
+            personalizationSampleCharacters: 10,
+            personalizationSampleCount: 2
+        ))
+        let samples = [
+            PersonalizationSample(
+                excerpt: "first sample is longer than budget",
+                appBundleID: "com.apple.TextEdit",
+                domain: nil,
+                languageHint: nil,
+                createdAt: Date(timeIntervalSince1970: 1)
+            ),
+            PersonalizationSample(
+                excerpt: "second sample is also longer",
+                appBundleID: "com.apple.TextEdit",
+                domain: nil,
+                languageHint: nil,
+                createdAt: Date(timeIntervalSince1970: 2)
+            ),
+            PersonalizationSample(
+                excerpt: "third sample should not appear",
+                appBundleID: "com.apple.TextEdit",
+                domain: nil,
+                languageHint: nil,
+                createdAt: Date(timeIntervalSince1970: 3)
+            )
+        ]
+
+        let prompt = builder.prompt(
+            for: context,
+            personalizationSamples: samples
+        )
+
+        XCTAssertTrue(prompt.contains("Local writing examples:"))
+        XCTAssertTrue(prompt.contains("- first samp"))
+        XCTAssertTrue(prompt.contains("- second sam"))
+        XCTAssertFalse(prompt.contains("third sample"))
+        XCTAssertFalse(prompt.contains("longer than budget"))
     }
 }

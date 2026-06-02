@@ -6,6 +6,34 @@ import XCTest
 
 @MainActor
 final class FocusTrackingModelTests: XCTestCase {
+    func testSuspendedPipelineDoesNotResolveAXContext() async throws {
+        let suspensionController = InteractionPipelineSuspensionController()
+        let token = suspensionController.suspend(reason: .openPanel)
+        let resolver = StubFocusSnapshotResolver(
+            results: [
+                .success(focusSnapshot(focusedElementID: "field-a", textBeforeCursor: "Please "))
+            ]
+        )
+        let model = FocusTrackingModel(
+            focusSnapshotResolver: resolver,
+            textGeometryResolver: StubGeometryResolver(),
+            interactionPipelineSuspensionController: suspensionController
+        )
+
+        do {
+            _ = try await model.currentContext()
+            XCTFail("Expected suspended pipeline to throw")
+        } catch {
+            XCTAssertEqual(error as? AXTextContextError, .interactionPipelineSuspended)
+            XCTAssertEqual(model.capability, .unavailable)
+            XCTAssertEqual(model.rejectionReason, AXTextContextError.interactionPipelineSuspended.errorDescription)
+        }
+
+        suspensionController.resume(token)
+        let context = try await model.currentContext()
+        XCTAssertEqual(context.textBeforeCursor, "Please ")
+    }
+
     func testPublishesSnapshotAndIncrementsSequenceOnlyForRealFocusChange() async throws {
         let app = AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1)
         let resolver = StubFocusSnapshotResolver(
@@ -254,6 +282,41 @@ final class FocusTrackingModelTests: XCTestCase {
         XCTAssertEqual(fallbackResolver.authoritativeTexts, [])
     }
 
+    func testScreenOCRGeometryFallbackTimeoutKeepsReadableContext() async throws {
+        let fallbackResolver = HangingScreenOCRGeometryFallbackResolver()
+        let resolver = StubFocusSnapshotResolver(
+            results: [
+                .success(focusSnapshot(focusedElementID: "field-a", textBeforeCursor: "AX text "))
+            ]
+        )
+        let model = FocusTrackingModel(
+            focusSnapshotResolver: resolver,
+            textGeometryResolver: StubGeometryResolver(
+                geometries: [
+                    "field-a": geometry(
+                        focusedElementRect: CGRect(x: 100, y: 100, width: 500, height: 40),
+                        caretRect: nil,
+                        quality: .elementFrame
+                    )
+                ],
+                useScreenOCRFallback: true
+            ),
+            screenOCRGeometryFallbackResolver: fallbackResolver,
+            screenOCRGeometryFallbackTimeout: 0.01
+        )
+
+        let context = try await model.currentContext()
+
+        XCTAssertEqual(context.textBeforeCursor, "AX text ")
+        XCTAssertNil(context.caretRect)
+        XCTAssertEqual(context.focusedElementRect, CGRect(x: 100, y: 100, width: 500, height: 40))
+        XCTAssertEqual(context.caretGeometryQuality, .elementFrame)
+        XCTAssertEqual(context.captureSources, [.accessibility])
+        let fallbackCallCount = await fallbackResolver.callCount()
+        XCTAssertEqual(fallbackCallCount, 1)
+        await fallbackResolver.resumeHangingResolutions()
+    }
+
     func testPublishesSuffixSelectionAndFullTextWindow() async throws {
         let resolver = StubFocusSnapshotResolver(
             results: [
@@ -391,7 +454,7 @@ private struct StubGeometryResolver: AXTextGeometryResolving {
     }
 }
 
-private final class StubScreenOCRGeometryFallbackResolver: ScreenOCRGeometryFallbackResolving {
+private final class StubScreenOCRGeometryFallbackResolver: ScreenOCRGeometryFallbackResolving, @unchecked Sendable {
     private let fallback: ScreenOCRGeometryFallback?
     private(set) var authoritativeTexts: [String] = []
 
@@ -402,5 +465,29 @@ private final class StubScreenOCRGeometryFallbackResolver: ScreenOCRGeometryFall
     func resolve(searchRect: CGRect?, authoritativeText: String) async -> ScreenOCRGeometryFallback? {
         authoritativeTexts.append(authoritativeText)
         return fallback
+    }
+}
+
+private actor HangingScreenOCRGeometryFallbackResolver: ScreenOCRGeometryFallbackResolving {
+    private var storedCallCount = 0
+    private var continuations: [CheckedContinuation<ScreenOCRGeometryFallback?, Never>] = []
+
+    func callCount() -> Int {
+        storedCallCount
+    }
+
+    func resolve(searchRect: CGRect?, authoritativeText: String) async -> ScreenOCRGeometryFallback? {
+        storedCallCount += 1
+        return await withCheckedContinuation { continuation in
+            continuations.append(continuation)
+        }
+    }
+
+    func resumeHangingResolutions() {
+        let pendingContinuations = continuations
+        continuations.removeAll()
+        for continuation in pendingContinuations {
+            continuation.resume(returning: nil)
+        }
     }
 }

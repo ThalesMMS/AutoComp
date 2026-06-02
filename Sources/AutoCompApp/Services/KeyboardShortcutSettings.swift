@@ -39,6 +39,25 @@ enum KeyboardShortcutCommand: String, CaseIterable, Codable, Identifiable, Senda
             return "Toggle AutoComp"
         }
     }
+
+    var settingsDescription: String {
+        switch self {
+        case .acceptNextWord:
+            return "Accept only the next token from the visible suggestion."
+        case .acceptFullSuggestion:
+            return "Accept the full visible suggestion."
+        case .selectPreviousSuggestion:
+            return "Move to the previous multi-suggestion option."
+        case .selectNextSuggestion:
+            return "Move to the next multi-suggestion option."
+        case .manualTrigger:
+            return "Request a suggestion without waiting for automatic activation."
+        case .dismissSuggestion:
+            return "Hide the current suggestion and let the key pass through."
+        case .toggleAutocomplete:
+            return "Turn AutoComp on or off without changing app rules."
+        }
+    }
 }
 
 enum KeyboardShortcutTrigger: String, Codable, Sendable {
@@ -446,7 +465,7 @@ struct KeyboardShortcutSettings: Codable, Equatable, Sendable {
         }
 
         if let duplicate = issues.first(where: { issue in
-            if case let .duplicateBinding(command: loser, conflictsWith: winner, binding: issueBinding) = issue {
+            if case let .duplicateBinding(command: loser, conflictsWith: _, binding: issueBinding) = issue {
                 return loser == command.rawValue && issueBinding == binding.asCoreBinding
             }
             return false

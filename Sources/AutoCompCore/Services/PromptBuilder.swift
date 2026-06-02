@@ -8,6 +8,8 @@ public struct PromptInputBudgets: Equatable, Sendable {
     public var clipboardCharacters: Int
     public var visualContextCharacters: Int
     public var fullTextWindowCharacters: Int
+    public var personalizationSampleCharacters: Int
+    public var personalizationSampleCount: Int
 
     public init(
         continuationPrefixCharacters: Int,
@@ -16,7 +18,9 @@ public struct PromptInputBudgets: Equatable, Sendable {
         selectionCharacters: Int,
         clipboardCharacters: Int,
         visualContextCharacters: Int,
-        fullTextWindowCharacters: Int
+        fullTextWindowCharacters: Int,
+        personalizationSampleCharacters: Int = 140,
+        personalizationSampleCount: Int = PersonalizationSampleRecorder.defaultPromptSampleLimit
     ) {
         self.continuationPrefixCharacters = continuationPrefixCharacters
         self.fimPrefixCharacters = fimPrefixCharacters
@@ -25,6 +29,8 @@ public struct PromptInputBudgets: Equatable, Sendable {
         self.clipboardCharacters = clipboardCharacters
         self.visualContextCharacters = visualContextCharacters
         self.fullTextWindowCharacters = fullTextWindowCharacters
+        self.personalizationSampleCharacters = personalizationSampleCharacters
+        self.personalizationSampleCount = personalizationSampleCount
     }
 
     public static let `default` = PromptInputBudgets(
@@ -45,7 +51,9 @@ public struct PromptInputBudgets: Equatable, Sendable {
             selectionCharacters: characterCount,
             clipboardCharacters: characterCount,
             visualContextCharacters: characterCount,
-            fullTextWindowCharacters: characterCount
+            fullTextWindowCharacters: characterCount,
+            personalizationSampleCharacters: characterCount,
+            personalizationSampleCount: PersonalizationSampleRecorder.defaultPromptSampleLimit
         )
     }
 }
@@ -140,7 +148,8 @@ public struct PromptBuilder: Sendable {
         for context: TextContext,
         privacySettings: PrivacySettings = PrivacySettings(),
         visualContext: VisualContextSnapshot? = nil,
-        clipboardContext: ClipboardContextSnapshot? = nil
+        clipboardContext: ClipboardContextSnapshot? = nil,
+        personalizationSamples: [PersonalizationSample] = []
     ) -> String {
         let requestMode = mode(for: context)
         let trimmedContext = truncatedTextBeforeCursor(for: context)
@@ -164,6 +173,7 @@ public struct PromptBuilder: Sendable {
         )
         let allowedClipboardContext = truncatedClipboardContext(privacyAllowedClipboardContext)
         let writingPreferences = writingPreferencesBlock(privacySettings.writingPreferences)
+        let personalizationSamples = personalizationSamplesBlock(personalizationSamples)
         let sourceDescription = allowedContextSources
             .union(allowedVisualContext?.captureSources ?? [])
             .union(allowedClipboardContext?.captureSources ?? [])
@@ -180,7 +190,8 @@ public struct PromptBuilder: Sendable {
                 sourceDescription: sourceDescription,
                 visualContext: allowedVisualContext,
                 clipboardContext: allowedClipboardContext,
-                writingPreferences: writingPreferences
+                writingPreferences: writingPreferences,
+                personalizationSamples: personalizationSamples
             )
         }
 
@@ -192,6 +203,7 @@ public struct PromptBuilder: Sendable {
             Language hint: \(context.languageHint ?? "unknown")
             Context sources: \(sourceDescription)
             \(writingPreferences)
+            \(personalizationSamples)
             \(visualContextBlock(allowedVisualContext))\(clipboardBlock(allowedClipboardContext))
             Text before cursor:
             \(trimmedContext)
@@ -206,6 +218,7 @@ public struct PromptBuilder: Sendable {
         Language hint: \(context.languageHint ?? "unknown")
         Context sources: \(sourceDescription)
         \(writingPreferences)
+        \(personalizationSamples)
         \(clipboardBlock(allowedClipboardContext))
         Text before cursor:
         \(trimmedContext)
@@ -221,7 +234,8 @@ public struct PromptBuilder: Sendable {
         sourceDescription: String,
         visualContext: VisualContextSnapshot?,
         clipboardContext: ClipboardContextSnapshot?,
-        writingPreferences: String
+        writingPreferences: String,
+        personalizationSamples: String
     ) -> String {
         let suffix = trimmedSuffix ?? ""
         let selection = trimmedSelection ?? ""
@@ -235,6 +249,7 @@ public struct PromptBuilder: Sendable {
         Language hint: \(context.languageHint ?? "unknown")
         Context sources: \(sourceDescription)
         \(writingPreferences)
+        \(personalizationSamples)
         \(optionalVisualBlock)Text before cursor (prefix):
         \(trimmedContext)
         \(clipboardBlock(clipboardContext))
@@ -259,6 +274,28 @@ public struct PromptBuilder: Sendable {
 
         return """
         \(promptPreview)
+
+        """
+    }
+
+    private func personalizationSamplesBlock(_ samples: [PersonalizationSample]) -> String {
+        let excerpts = samples
+            .prefix(max(0, budgets.personalizationSampleCount))
+            .map { sample in
+                String(sample.excerpt.prefix(nonNegativeLimit(budgets.personalizationSampleCharacters)))
+                    .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            .filter { !$0.isEmpty }
+
+        guard !excerpts.isEmpty else {
+            return ""
+        }
+
+        let lines = excerpts.map { "- \($0)" }.joined(separator: "\n")
+        return """
+        Local writing examples:
+        \(lines)
 
         """
     }

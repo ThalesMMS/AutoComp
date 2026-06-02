@@ -337,8 +337,7 @@ struct CompletionBackendSettings: Equatable {
     }
 
     static var defaultLocalModelPath: String {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("AutoComp", isDirectory: true)
+        AutoCompUserDirectories.appSupportDirectory
             .appendingPathComponent("Models", isDirectory: true)
             .appendingPathComponent("autocomp.gguf")
             .path

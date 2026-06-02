@@ -4,10 +4,7 @@ import XCTest
 
 final class PrivacyPolicyTextTests: XCTestCase {
     func testPrivacySettingsExposeSourcePolicyDomainRulesAndDeleteAll() throws {
-        let settingsSource = try String(
-            contentsOf: try packageRoot().appendingPathComponent("Sources/AutoCompApp/Views/SettingsRootView.swift"),
-            encoding: .utf8
-        )
+        let settingsSource = try settingsSourceContents(packageRoot: packageRoot())
 
         XCTAssertTrue(settingsSource.contains("Section(\"Source policy\")"))
         XCTAssertTrue(settingsSource.contains("AX text"))
@@ -24,6 +21,10 @@ final class PrivacyPolicyTextTests: XCTestCase {
         XCTAssertTrue(settingsSource.contains("Delete All Local Privacy Data"))
         XCTAssertTrue(settingsSource.contains("remoteBackendExposure(sourceEnabled: settings.clipboardContextEnabled)"))
         XCTAssertTrue(settingsSource.contains("remoteBackendExposure(sourceEnabled: settings.screenContextEnabled)"))
+        XCTAssertTrue(settingsSource.contains("Add language hint"))
+        XCTAssertTrue(settingsSource.contains("Clear language hints"))
+        XCTAssertTrue(settingsSource.contains("WritingPreferences.suggestedLanguageHints"))
+        XCTAssertTrue(settingsSource.contains("Preference prompt block"))
     }
 
     func testPrivacyDocumentationCoversSourceLimitsAndDeletion() throws {

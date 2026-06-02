@@ -48,7 +48,7 @@ public struct AllowingRemoteCompletionConsentChecker: RemoteCompletionConsentChe
     }
 }
 
-public struct CompletionProviderRouter: ClipboardContextAwareCompletionProvider, MultipleCompletionProvider, PromptCacheReportingCompletionProvider, RuntimeSwitchPreparingCompletionProvider, CompletionRoutingProviding {
+public struct CompletionProviderRouter: MultiplePersonalizationContextAwareCompletionProvider, PromptCacheReportingCompletionProvider, RuntimeSwitchPreparingCompletionProvider, CompletionRoutingProviding {
     public let activeKind: CompletionEngineKind
     public let fallbackKind: CompletionEngineKind?
     private let providers: [CompletionEngineKind: CompletionProvider]
@@ -126,6 +126,22 @@ public struct CompletionProviderRouter: ClipboardContextAwareCompletionProvider,
         visualContext: VisualContextSnapshot?,
         clipboardContext: ClipboardContextSnapshot?
     ) async throws -> Suggestion {
+        try await complete(
+            context: context,
+            privacySettings: privacySettings,
+            visualContext: visualContext,
+            clipboardContext: clipboardContext,
+            personalizationSamples: []
+        )
+    }
+
+    public func complete(
+        context: TextContext,
+        privacySettings: PrivacySettings,
+        visualContext: VisualContextSnapshot?,
+        clipboardContext: ClipboardContextSnapshot?,
+        personalizationSamples: [PersonalizationSample]
+    ) async throws -> Suggestion {
         try requireRemoteConsent(for: activeKind, scope: .remoteBackend)
         guard let provider = provider() else {
             if let fallbackProvider = fallbackProvider() {
@@ -135,7 +151,8 @@ public struct CompletionProviderRouter: ClipboardContextAwareCompletionProvider,
                     context: context,
                     privacySettings: privacySettings,
                     visualContext: visualContext,
-                    clipboardContext: clipboardContext
+                    clipboardContext: clipboardContext,
+                    personalizationSamples: personalizationSamples
                 )
                 return routed(
                     suggestion,
@@ -152,7 +169,8 @@ public struct CompletionProviderRouter: ClipboardContextAwareCompletionProvider,
                 context: context,
                 privacySettings: privacySettings,
                 visualContext: visualContext,
-                clipboardContext: clipboardContext
+                clipboardContext: clipboardContext,
+                personalizationSamples: personalizationSamples
             )
             return routed(suggestion, deliveredBy: activeKind)
         } catch {
@@ -178,7 +196,8 @@ public struct CompletionProviderRouter: ClipboardContextAwareCompletionProvider,
                 context: context,
                 privacySettings: privacySettings,
                 visualContext: visualContext,
-                clipboardContext: clipboardContext
+                clipboardContext: clipboardContext,
+                personalizationSamples: personalizationSamples
             )
             return routed(suggestion, deliveredBy: fallbackKind ?? activeKind, primaryError: error)
         }
@@ -191,6 +210,24 @@ public struct CompletionProviderRouter: ClipboardContextAwareCompletionProvider,
         clipboardContext: ClipboardContextSnapshot?,
         options: CompletionOptions
     ) async throws -> [Suggestion] {
+        try await complete(
+            context: context,
+            privacySettings: privacySettings,
+            visualContext: visualContext,
+            clipboardContext: clipboardContext,
+            personalizationSamples: [],
+            options: options
+        )
+    }
+
+    public func complete(
+        context: TextContext,
+        privacySettings: PrivacySettings,
+        visualContext: VisualContextSnapshot?,
+        clipboardContext: ClipboardContextSnapshot?,
+        personalizationSamples: [PersonalizationSample],
+        options: CompletionOptions
+    ) async throws -> [Suggestion] {
         try requireRemoteConsent(for: activeKind, scope: .remoteBackend)
         guard let provider = provider() else {
             if let fallbackProvider = fallbackProvider() {
@@ -201,6 +238,7 @@ public struct CompletionProviderRouter: ClipboardContextAwareCompletionProvider,
                     privacySettings: privacySettings,
                     visualContext: visualContext,
                     clipboardContext: clipboardContext,
+                    personalizationSamples: personalizationSamples,
                     options: options
                 )
                 return routed(
@@ -219,6 +257,7 @@ public struct CompletionProviderRouter: ClipboardContextAwareCompletionProvider,
                 privacySettings: privacySettings,
                 visualContext: visualContext,
                 clipboardContext: clipboardContext,
+                personalizationSamples: personalizationSamples,
                 options: options
             )
             return routed(suggestions, deliveredBy: activeKind)
@@ -246,6 +285,7 @@ public struct CompletionProviderRouter: ClipboardContextAwareCompletionProvider,
                 privacySettings: privacySettings,
                 visualContext: visualContext,
                 clipboardContext: clipboardContext,
+                personalizationSamples: personalizationSamples,
                 options: options
             )
             return routed(suggestions, deliveredBy: fallbackKind ?? activeKind, primaryError: error)
@@ -303,8 +343,18 @@ public struct CompletionProviderRouter: ClipboardContextAwareCompletionProvider,
         context: TextContext,
         privacySettings: PrivacySettings,
         visualContext: VisualContextSnapshot?,
-        clipboardContext: ClipboardContextSnapshot?
+        clipboardContext: ClipboardContextSnapshot?,
+        personalizationSamples: [PersonalizationSample]
     ) async throws -> Suggestion {
+        if let provider = provider as? PersonalizationContextAwareCompletionProvider {
+            return try await provider.complete(
+                context: context,
+                privacySettings: privacySettings,
+                visualContext: visualContext,
+                clipboardContext: clipboardContext,
+                personalizationSamples: personalizationSamples
+            )
+        }
         if let provider = provider as? ClipboardContextAwareCompletionProvider {
             return try await provider.complete(
                 context: context,
@@ -329,8 +379,19 @@ public struct CompletionProviderRouter: ClipboardContextAwareCompletionProvider,
         privacySettings: PrivacySettings,
         visualContext: VisualContextSnapshot?,
         clipboardContext: ClipboardContextSnapshot?,
+        personalizationSamples: [PersonalizationSample],
         options: CompletionOptions
     ) async throws -> [Suggestion] {
+        if let provider = provider as? MultiplePersonalizationContextAwareCompletionProvider {
+            return try await provider.complete(
+                context: context,
+                privacySettings: privacySettings,
+                visualContext: visualContext,
+                clipboardContext: clipboardContext,
+                personalizationSamples: personalizationSamples,
+                options: options
+            )
+        }
         if let provider = provider as? MultipleCompletionProvider {
             return try await provider.complete(
                 context: context,
@@ -346,7 +407,8 @@ public struct CompletionProviderRouter: ClipboardContextAwareCompletionProvider,
                 context: context,
                 privacySettings: privacySettings,
                 visualContext: visualContext,
-                clipboardContext: clipboardContext
+                clipboardContext: clipboardContext,
+                personalizationSamples: personalizationSamples
             )
         ]
     }

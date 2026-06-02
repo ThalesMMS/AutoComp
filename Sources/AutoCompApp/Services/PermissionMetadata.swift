@@ -34,6 +34,11 @@ enum PermissionStatus: Equatable {
     }
 }
 
+enum PermissionGuidanceStyle: Equatable {
+    case guidedOverlay
+    case settingsOnly
+}
+
 enum PermissionKind: String, CaseIterable, Identifiable {
     case accessibility
     case inputMonitoring
@@ -137,6 +142,37 @@ enum PermissionKind: String, CaseIterable, Identifiable {
             return URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!
         }
     }
+
+    var guidanceStyle: PermissionGuidanceStyle {
+        switch self {
+        case .accessibility, .inputMonitoring:
+            return .guidedOverlay
+        case .screenRecording:
+            return .settingsOnly
+        }
+    }
+
+    var guidanceActionTitle: String {
+        switch self {
+        case .accessibility:
+            return "Drag AutoComp into Accessibility if it is not listed, then turn it on."
+        case .inputMonitoring:
+            return "Approve the prompt, or drag AutoComp into Input Monitoring if it is not listed."
+        case .screenRecording:
+            return "Turn on Screen Recording only if you use visual context."
+        }
+    }
+
+    var guidanceFallbackText: String {
+        switch self {
+        case .accessibility:
+            return "If the System Settings window is not highlighted, open Privacy & Security > Accessibility, drag AutoComp into the list if needed, turn it on, then return to AutoComp."
+        case .inputMonitoring:
+            return "If the guided overlay cannot attach, open Privacy & Security > Input Monitoring, approve the prompt or drag AutoComp into the list if needed, turn it on, then relaunch AutoComp if macOS asks."
+        case .screenRecording:
+            return "Open Privacy & Security > Screen Recording, turn on AutoComp only for visual context features, then relaunch AutoComp."
+        }
+    }
 }
 
 struct PermissionStateSnapshot: Equatable {
@@ -163,6 +199,9 @@ struct PermissionPresentation: Identifiable, Equatable {
     let requestButtonTitle: String
     let openSettingsButtonTitle: String
     let settingsURL: URL
+    let guidanceStyle: PermissionGuidanceStyle
+    let guidanceActionTitle: String
+    let guidanceFallbackText: String
 
     var id: PermissionKind { kind }
     var isComplete: Bool { status == .enabled }
@@ -186,7 +225,10 @@ enum PermissionPresentationFactory {
             nextActionTitle: nextAction(for: kind, status: status),
             requestButtonTitle: kind.requestButtonTitle,
             openSettingsButtonTitle: kind.openSettingsButtonTitle,
-            settingsURL: kind.settingsURL
+            settingsURL: kind.settingsURL,
+            guidanceStyle: kind.guidanceStyle,
+            guidanceActionTitle: kind.guidanceActionTitle,
+            guidanceFallbackText: kind.guidanceFallbackText
         )
     }
 

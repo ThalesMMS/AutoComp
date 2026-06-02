@@ -22,6 +22,32 @@ public struct LocalLlamaConfiguration: Codable, Equatable, Sendable {
     }
 }
 
+public struct LocalLlamaTokenizerProfile: Codable, Equatable, Sendable {
+    public var tokenizerKind: String
+    public var vocabularySize: Int
+    public var specialTokenSignature: String
+    public var supportsFillInMiddle: Bool
+
+    public init(
+        tokenizerKind: String,
+        vocabularySize: Int,
+        specialTokenSignature: String,
+        supportsFillInMiddle: Bool
+    ) {
+        self.tokenizerKind = tokenizerKind
+        self.vocabularySize = vocabularySize
+        self.specialTokenSignature = specialTokenSignature
+        self.supportsFillInMiddle = supportsFillInMiddle
+    }
+
+    public func isCompatible(with actual: LocalLlamaTokenizerProfile) -> Bool {
+        tokenizerKind == actual.tokenizerKind
+            && vocabularySize == actual.vocabularySize
+            && specialTokenSignature == actual.specialTokenSignature
+            && supportsFillInMiddle == actual.supportsFillInMiddle
+    }
+}
+
 public enum LocalLlamaRuntimeLoadState: String, Codable, Equatable, Sendable {
     case unloaded
     case loading
@@ -91,12 +117,17 @@ public enum LocalLlamaError: LocalizedError, Equatable, Sendable {
 public protocol LocalLlamaRuntimeBackend: Sendable {
     func loadModel(configuration: LocalLlamaConfiguration) async throws
     func generateCompletion(for request: CompletionRequest) async throws -> String
+    func tokenizerProfile() async throws -> LocalLlamaTokenizerProfile
     func resetPromptCache() async
     func promptCacheStats() async -> LlamaPromptCacheStats
     func shutdown() async
 }
 
 public extension LocalLlamaRuntimeBackend {
+    func tokenizerProfile() async throws -> LocalLlamaTokenizerProfile {
+        throw LocalLlamaError.runtimeUnavailable
+    }
+
     func resetPromptCache() async {}
     func promptCacheStats() async -> LlamaPromptCacheStats { .empty }
 }
@@ -157,6 +188,10 @@ public actor LocalLlamaRuntimeCore {
         }
     }
 
+    public func tokenizerProfile() async throws -> LocalLlamaTokenizerProfile {
+        try await backend.tokenizerProfile()
+    }
+
     public func resetPromptCache() async {
         await backend.resetPromptCache()
     }
@@ -192,13 +227,17 @@ public struct UnavailableLocalLlamaRuntimeBackend: LocalLlamaRuntimeBackend {
         throw LocalLlamaError.runtimeUnavailable
     }
 
+    public func tokenizerProfile() async throws -> LocalLlamaTokenizerProfile {
+        throw LocalLlamaError.runtimeUnavailable
+    }
+
     public func resetPromptCache() async {}
     public func promptCacheStats() async -> LlamaPromptCacheStats { .empty }
 
     public func shutdown() async {}
 }
 
-public struct LocalLlamaCompletionProvider: ClipboardContextAwareCompletionProvider, PromptCacheReportingCompletionProvider, RuntimeSwitchPreparingCompletionProvider {
+public struct LocalLlamaCompletionProvider: PersonalizationContextAwareCompletionProvider, PromptCacheReportingCompletionProvider, RuntimeSwitchPreparingCompletionProvider {
     public let configuration: LocalLlamaConfiguration
     public let requestFactory: CompletionRequestFactory
     private let runtime: LocalLlamaRuntimeCore
@@ -242,6 +281,22 @@ public struct LocalLlamaCompletionProvider: ClipboardContextAwareCompletionProvi
         visualContext: VisualContextSnapshot?,
         clipboardContext: ClipboardContextSnapshot?
     ) async throws -> Suggestion {
+        try await complete(
+            context: context,
+            privacySettings: privacySettings,
+            visualContext: visualContext,
+            clipboardContext: clipboardContext,
+            personalizationSamples: []
+        )
+    }
+
+    public func complete(
+        context: TextContext,
+        privacySettings: PrivacySettings,
+        visualContext: VisualContextSnapshot?,
+        clipboardContext: ClipboardContextSnapshot?,
+        personalizationSamples: [PersonalizationSample]
+    ) async throws -> Suggestion {
         let startedAt = ContinuousClock.now
         let completionRequest = requestFactory.makeRequest(
             for: context,
@@ -254,7 +309,8 @@ public struct LocalLlamaCompletionProvider: ClipboardContextAwareCompletionProvi
             ),
             privacySettings: privacySettings,
             visualContext: visualContext,
-            clipboardContext: clipboardContext
+            clipboardContext: clipboardContext,
+            personalizationSamples: personalizationSamples
         )
 
         if await promptCacheHintTracker.observe(context: context, configuration: configuration) != nil {

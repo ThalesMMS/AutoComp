@@ -286,7 +286,7 @@ enum OverlayGeometryCorpus {
             screenFrames: [defaultScreen],
             contentSize: defaultContentSize,
             expected: OverlayGeometryCorpusExpectation(
-                tier: .visualInlineOverlay,
+                tier: .simpleCaretPopup,
                 reason: "rejected-far-from-field",
                 validation: OverlayGeometryValidationExpectation(
                     focusedElementRect: CGRect(x: 100, y: 820, width: 300, height: 80),
@@ -394,7 +394,7 @@ enum OverlayGeometryCorpus {
             screenFrames: [defaultScreen],
             contentSize: defaultContentSize,
             expected: OverlayGeometryCorpusExpectation(
-                tier: .visualInlineOverlay,
+                tier: .simpleCaretPopup,
                 reason: "line-metric-collapsed-caret",
                 validation: OverlayGeometryValidationExpectation(
                     focusedElementRect: CGRect(x: 768, y: 620, width: 625, height: 2),
@@ -429,7 +429,7 @@ enum OverlayGeometryCorpus {
             screenFrames: [defaultScreen],
             contentSize: defaultContentSize,
             expected: OverlayGeometryCorpusExpectation(
-                tier: .visualInlineOverlay,
+                tier: .simpleCaretPopup,
                 reason: "screen-ocr-proximity-bypass",
                 validation: OverlayGeometryValidationExpectation(
                     focusedElementRect: CGRect(x: 100, y: 830, width: 250, height: 70),

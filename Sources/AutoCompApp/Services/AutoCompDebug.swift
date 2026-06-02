@@ -94,6 +94,111 @@ struct AutoCompLogger: Sendable {
     }
 }
 
+enum SuggestionPipelineLog {
+    private static let logger = AutoCompLogger(category: "suggestion-pipeline")
+
+    static func log(_ event: String, fields: [String] = []) {
+        logger.info(line(event: event, fields: fields))
+    }
+
+    static func line(event: String, fields: [String] = []) -> String {
+        (["pipeline", "event=\(event)"] + fields.filter { !$0.isEmpty })
+            .joined(separator: " ")
+    }
+
+    static func contextDescription(_ context: TextContext?) -> String {
+        guard let context else {
+            return "nil"
+        }
+
+        let capture = ContextCaptureDiagnostics(context: context)
+        return [
+            "appBundle=\(context.app.bundleID)",
+            "domain=\(context.domain ?? "nil")",
+            "source=\(capture.contextSourceLogValue)",
+            "trust=\(capture.trustTitle)",
+            "geometry=\(capture.geometryQualityLogValue)",
+            "prefixLen=\((context.textBeforeCursor as NSString).length)",
+            "suffixLen=\(context.textAfterCursor.map { ($0 as NSString).length } ?? 0)",
+            "selectedRange=\(selectedRangeDescription(context.selectedRange))",
+            "selectedTextLen=\(context.selectedText.map { ($0 as NSString).length } ?? 0)",
+            "trailingWhitespace=\(trailingWhitespaceDescription(context.textBeforeCursor))",
+            "focusID=\(stableToken(for: context.focusedElementID))",
+            "stableSeq=\(context.stableFieldIdentity?.focusChangeSequence.map(String.init) ?? "nil")"
+        ].joined(separator: ",")
+    }
+
+    static func suggestionDescription(_ suggestion: Suggestion?) -> String {
+        guard let suggestion else {
+            return "nil"
+        }
+
+        return [
+            "visibleLen=\((suggestion.visibleText as NSString).length)",
+            "remainingLen=\((suggestion.remainingText as NSString).length)",
+            "acceptedPrefixLen=\((suggestion.acceptedPrefix as NSString).length)",
+            "alternatives=\(suggestion.alternatives.count)",
+            "selected=\(suggestion.selectedAlternativeIndex)",
+            "exhausted=\(suggestion.isExhausted)",
+            "route=\(routeDescription(suggestion.completionRoute))",
+            "bound=\(suggestion.binding == nil ? "false" : "true")"
+        ].joined(separator: ",")
+    }
+
+    static func privacySafeErrorSummary(_ error: Error) -> String {
+        let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        return privacySafeTextSummary(message)
+    }
+
+    static func privacySafeTextSummary(_ text: String) -> String {
+        let summary = AutoCompLogger.redactedSummary(for: text)
+        return "chars:\(summary.characterCount),bytes:\(summary.utf8ByteCount),sha256:\(summary.sha256Prefix)"
+    }
+
+    static func routingDescription(_ policy: CompletionRoutingPolicy?) -> String {
+        guard let policy else {
+            return "unknown"
+        }
+        return "\(policy.activeKind.rawValue)->\(policy.fallbackKind?.rawValue ?? "none")"
+    }
+
+    static func discardReasonDescription(_ reason: SuggestionPipeline.DiscardReason) -> String {
+        var fields = ["kind=\(reason.kind.rawValue)"]
+        if let backendIssue = reason.backendIssue {
+            fields.append("issue=\(backendIssue.logValue)")
+        }
+        if let message = reason.message {
+            fields.append("message=\(privacySafeTextSummary(message))")
+        }
+        return fields.joined(separator: ",")
+    }
+
+    private static func routeDescription(_ route: CompletionRoute?) -> String {
+        guard let route else {
+            return "unknown"
+        }
+        return "\(route.requestedKind.rawValue)->\(route.deliveredKind.rawValue)"
+    }
+
+    private static func selectedRangeDescription(_ range: NSRange?) -> String {
+        guard let range else {
+            return "nil"
+        }
+        return "\(range.location):\(range.length)"
+    }
+
+    private static func trailingWhitespaceDescription(_ text: String) -> String {
+        guard let lastScalar = text.unicodeScalars.last else {
+            return "empty"
+        }
+        return CharacterSet.whitespacesAndNewlines.contains(lastScalar) ? "true" : "false"
+    }
+
+    private static func stableToken(for value: String) -> String {
+        AutoCompLogger.redactedSummary(for: value).sha256Prefix
+    }
+}
+
 struct DebugArtifactStore {
     let directory: URL
     private let fileManager: FileManager
@@ -231,8 +336,7 @@ struct DebugArtifactStore {
     }
 
     static var defaultDirectory: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("AutoComp", isDirectory: true)
+        AutoCompUserDirectories.appSupportDirectory
             .appendingPathComponent("DebugArtifacts", isDirectory: true)
     }
 }

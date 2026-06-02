@@ -1,4 +1,4 @@
-import CLlamaBridge
+internal import CLlamaBridge
 
 struct LlamaPromptCacheCompatibility: Equatable, Sendable {
     let canReuse: Bool

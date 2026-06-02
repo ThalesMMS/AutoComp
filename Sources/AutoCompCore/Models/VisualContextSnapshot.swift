@@ -59,8 +59,19 @@ public protocol VisualContextProvider: Sendable {
     func currentVisualContext() async -> VisualContextSnapshot?
 }
 
+public protocol TextContextVisualContextProvider: VisualContextProvider {
+    func currentVisualContext(for context: TextContext) async -> VisualContextSnapshot?
+}
+
 public protocol VisualContextSessionClearing: Sendable {
     func clearVisualContextSession()
+}
+
+public protocol VisualContextSessionControlling: VisualContextSessionClearing {
+    func startIfEligible(for context: TextContext)
+    func refreshOnFocusOrWindowChange(_ context: TextContext)
+    func refreshTick()
+    func stopAndClear()
 }
 
 public protocol StableFieldVisualContextProvider: VisualContextProvider {

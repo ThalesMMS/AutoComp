@@ -5,20 +5,36 @@ import Vision
 
 final class ScreenOCRGeometryFallbackResolver: @unchecked Sendable {
     private let stateLock = NSLock()
+    private let screenshotTimeout: TimeInterval
+    private let screenCaptureCooldown: ScreenCaptureCooldown
     private var lastStableContext: ScreenOCRGeometryCandidate?
     private var lastRawText: String?
     private var repeatedRawTextCount = 0
+
+    init(
+        screenshotTimeout: TimeInterval = 1.25,
+        screenCaptureCooldown: ScreenCaptureCooldown = .shared
+    ) {
+        self.screenshotTimeout = max(0.05, screenshotTimeout)
+        self.screenCaptureCooldown = screenCaptureCooldown
+    }
 
     func resolve(searchRect: CGRect?, authoritativeText: String) async -> ScreenOCRGeometryFallback? {
         guard CGPreflightScreenCaptureAccess() else {
             GeometryDebug.log("ax-fallback source=screenOCR-geometry status=screen-recording-off")
             return nil
         }
+        guard !isCaptureFailureCooldownActive() else {
+            GeometryDebug.log("ax-fallback source=screenOCR-geometry status=screenshot-cooldown")
+            return nil
+        }
         guard let screen = NSScreen.screens.first,
               let image = await captureScreenImage(in: screen.frame) else {
+            recordCaptureFailure()
             GeometryDebug.log("ax-fallback source=screenOCR-geometry status=screenshot-unavailable")
             return nil
         }
+        clearCaptureFailure()
 
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
@@ -367,15 +383,39 @@ final class ScreenOCRGeometryFallbackResolver: @unchecked Sendable {
         guard #available(macOS 15.2, *) else {
             return nil
         }
-        return await withCheckedContinuation { continuation in
+
+        let result: CallbackTimeoutResult<CGImage> = await AsyncTimeout.waitForCallback(
+            seconds: screenshotTimeout,
+            onTimeout: {
+                GeometryDebug.log("ax-fallback source=screenOCR-geometry status=screenshot-timeout")
+            }
+        ) { complete in
             SCScreenshotManager.captureImage(in: rect) { image, _ in
-                continuation.resume(returning: image)
+                complete(image)
             }
         }
+        switch result {
+        case .completed(let image):
+            return image
+        case .timedOut:
+            return nil
+        }
+    }
+
+    private func isCaptureFailureCooldownActive() -> Bool {
+        screenCaptureCooldown.isActive
+    }
+
+    private func recordCaptureFailure() {
+        screenCaptureCooldown.recordFailure()
+    }
+
+    private func clearCaptureFailure() {
+        screenCaptureCooldown.clearFailure()
     }
 }
 
-struct ScreenOCRGeometryFallback {
+struct ScreenOCRGeometryFallback: Sendable {
     let focusedElementRect: CGRect
     let caretRect: CGRect
     let previousGlyphRect: CGRect

@@ -10,6 +10,7 @@ public enum ProviderInvocation {
         public let privacySettings: PrivacySettings
         public let visualContext: VisualContextSnapshot?
         public let clipboardContext: ClipboardContextSnapshot?
+        public let personalizationSamples: [PersonalizationSample]
         public let options: CompletionOptions
 
         public init(
@@ -17,12 +18,14 @@ public enum ProviderInvocation {
             privacySettings: PrivacySettings = PrivacySettings(),
             visualContext: VisualContextSnapshot? = nil,
             clipboardContext: ClipboardContextSnapshot? = nil,
+            personalizationSamples: [PersonalizationSample] = [],
             options: CompletionOptions = CompletionOptions()
         ) {
             self.context = context
             self.privacySettings = privacySettings
             self.visualContext = visualContext
             self.clipboardContext = clipboardContext
+            self.personalizationSamples = personalizationSamples
             self.options = options
         }
     }

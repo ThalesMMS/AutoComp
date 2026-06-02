@@ -157,6 +157,19 @@ final class SuggestionSessionReconcilerTests: XCTestCase {
         XCTAssertEqual(result, .diverged)
     }
 
+    func testSuffixChangeReturnsDiverged() {
+        let base = makeContext(textBeforeCursor: "Please ", textAfterCursor: " today")
+        let observed = makeContext(textBeforeCursor: "Please ", textAfterCursor: " tomorrow")
+        let session = makeSession(base: base)
+
+        let result = SuggestionSessionReconciler().reconcile(
+            context: observed,
+            session: session
+        )
+
+        XCTAssertEqual(result, .diverged)
+    }
+
     func testAcceptedExhaustedSessionReturnsExhausted() {
         let base = makeContext(textBeforeCursor: "Please ")
         let observed = makeContext(textBeforeCursor: "Please continue")
@@ -195,12 +208,14 @@ final class SuggestionSessionReconcilerTests: XCTestCase {
     private func makeContext(
         focusedElementID: String = "field-a",
         textBeforeCursor: String,
+        textAfterCursor: String? = nil,
         selectedRange: NSRange? = NSRange(location: 0, length: 0)
     ) -> TextContext {
         TextContext(
             app: AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1),
             focusedElementID: focusedElementID,
             textBeforeCursor: textBeforeCursor,
+            textAfterCursor: textAfterCursor,
             selectedRange: selectedRange
         )
     }

@@ -324,6 +324,10 @@ final class AcceptanceService: TextInserter, ShortcutLeakRepairing {
         }
     }
 
+    func pressDeleteBackward() throws {
+        try pressKey(CGKeyCode(CapturedInputEventAdapter.deleteKeyCode))
+    }
+
     private func pressKey(_ keyCode: CGKeyCode) throws {
         guard keyboardEventPoster.postKey(keyCode, flags: []) else {
             throw AcceptanceError.insertionFailed

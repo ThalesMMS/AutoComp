@@ -3,6 +3,7 @@ import Foundation
 
 struct InstallationLocationStatus: Equatable {
     let currentPath: String
+    let revealPath: String
     let recommendedDirectoryPath: String
     let shouldWarn: Bool
 
@@ -15,19 +16,30 @@ final class InstallationLocationService: ObservableObject {
     @Published private(set) var status: InstallationLocationStatus
 
     private let bundleURL: URL
+    private let executablePath: String
     private let homeDirectory: URL
 
     init(
         bundleURL: URL = Bundle.main.bundleURL,
+        executablePath: String = Bundle.main.executablePath ?? "",
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
     ) {
         self.bundleURL = bundleURL
+        self.executablePath = executablePath
         self.homeDirectory = homeDirectory
-        self.status = Self.status(bundleURL: bundleURL, homeDirectory: homeDirectory)
+        self.status = Self.status(
+            bundleURL: bundleURL,
+            executablePath: executablePath,
+            homeDirectory: homeDirectory
+        )
     }
 
     func refresh() {
-        status = Self.status(bundleURL: bundleURL, homeDirectory: homeDirectory)
+        status = Self.status(
+            bundleURL: bundleURL,
+            executablePath: executablePath,
+            homeDirectory: homeDirectory
+        )
     }
 
     func openApplicationsFolder() {
@@ -35,27 +47,62 @@ final class InstallationLocationService: ObservableObject {
     }
 
     func revealCurrentApp() {
-        NSWorkspace.shared.activateFileViewerSelecting([bundleURL])
+        NSWorkspace.shared.activateFileViewerSelecting([
+            URL(fileURLWithPath: status.revealPath)
+        ])
     }
 
     static func status(
         bundleURL: URL,
+        executablePath: String = "",
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
     ) -> InstallationLocationStatus {
-        let standardizedBundleURL = bundleURL.standardizedFileURL
+        let standardizedBundleURL = resolvedCurrentURL(
+            bundleURL: bundleURL,
+            executablePath: executablePath
+        )
         let recommendedDirectory = URL(fileURLWithPath: "/Applications", isDirectory: true)
         let isAppBundle = standardizedBundleURL.pathExtension == "app"
-        let shouldWarn = isAppBundle
-            && !isInsideApplicationsDirectory(
+        let shouldWarn = !isAppBundle
+            || !isInsideApplicationsDirectory(
                 standardizedBundleURL,
                 homeDirectory: homeDirectory
             )
 
         return InstallationLocationStatus(
             currentPath: standardizedBundleURL.path,
+            revealPath: standardizedBundleURL.path,
             recommendedDirectoryPath: recommendedDirectory.path,
             shouldWarn: shouldWarn
         )
+    }
+
+    private static func resolvedCurrentURL(bundleURL: URL, executablePath: String) -> URL {
+        if let appBundle = appBundleURL(containingExecutablePath: executablePath) {
+            return appBundle
+        }
+
+        if !executablePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return URL(fileURLWithPath: executablePath).standardizedFileURL
+        }
+
+        return bundleURL.standardizedFileURL
+    }
+
+    private static func appBundleURL(containingExecutablePath executablePath: String) -> URL? {
+        guard !executablePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+
+        var candidate = URL(fileURLWithPath: executablePath).standardizedFileURL
+        while candidate.path != "/" {
+            if candidate.pathExtension.localizedCaseInsensitiveCompare("app") == .orderedSame {
+                return candidate
+            }
+            candidate.deleteLastPathComponent()
+        }
+
+        return nil
     }
 
     private static func isInsideApplicationsDirectory(

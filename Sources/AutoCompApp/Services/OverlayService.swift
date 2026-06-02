@@ -12,13 +12,21 @@ final class PreviewCoordinator: SuggestionPresenter {
     private let focusDebugOverlayPresenter: FocusDebugOverlayPresenting
     private let safeOverlayModeEnabled: Bool
     private let overlayRecoveryAdvisor: OverlayRecoveryAdvisor?
+    private let stabilityGate: SuggestionOverlayStabilityGate
+    private let presentationPolicy: SuggestionPresentationPolicy
+    private let now: () -> Date
+    private var lastPresentationSnapshot: SuggestionOverlayStabilityGate.Snapshot?
+    private var lastAcceptedPresentationAt: Date?
 
     private(set) var activeTier: PreviewPresentationTier = .disabled
 
     init(
         safeOverlayModeEnabled: Bool = SafeOverlayMode.isEnabled,
         overlayRecoveryAdvisor: OverlayRecoveryAdvisor? = nil,
-        focusDebugOverlayPresenter: FocusDebugOverlayPresenting? = nil
+        focusDebugOverlayPresenter: FocusDebugOverlayPresenting? = nil,
+        stabilityGate: SuggestionOverlayStabilityGate = SuggestionOverlayStabilityGate(),
+        presentationPolicy: SuggestionPresentationPolicy = SuggestionPresentationPolicy(),
+        now: @escaping () -> Date = Date.init
     ) {
         let shortcutSettingsStore = KeyboardShortcutSettingsStore()
         let hintsProvider = OverlayShortcutHintsProvider()
@@ -44,6 +52,9 @@ final class PreviewCoordinator: SuggestionPresenter {
         self.focusDebugOverlayPresenter = focusDebugOverlayPresenter ?? FocusDebugOverlayController()
         self.safeOverlayModeEnabled = safeOverlayModeEnabled
         self.overlayRecoveryAdvisor = overlayRecoveryAdvisor
+        self.stabilityGate = stabilityGate
+        self.presentationPolicy = presentationPolicy
+        self.now = now
     }
 
     init(
@@ -55,7 +66,10 @@ final class PreviewCoordinator: SuggestionPresenter {
         activationIndicator: ActivationIndicatorPresenting? = nil,
         focusDebugOverlayPresenter: FocusDebugOverlayPresenting? = nil,
         safeOverlayModeEnabled: Bool = SafeOverlayMode.isEnabled,
-        overlayRecoveryAdvisor: OverlayRecoveryAdvisor? = nil
+        overlayRecoveryAdvisor: OverlayRecoveryAdvisor? = nil,
+        stabilityGate: SuggestionOverlayStabilityGate = SuggestionOverlayStabilityGate(),
+        presentationPolicy: SuggestionPresentationPolicy = SuggestionPresentationPolicy(),
+        now: @escaping () -> Date = Date.init
     ) {
         let shortcutSettingsStore = KeyboardShortcutSettingsStore()
         let hintsProvider = OverlayShortcutHintsProvider()
@@ -75,6 +89,9 @@ final class PreviewCoordinator: SuggestionPresenter {
         self.focusDebugOverlayPresenter = focusDebugOverlayPresenter ?? FocusDebugOverlayController()
         self.safeOverlayModeEnabled = safeOverlayModeEnabled
         self.overlayRecoveryAdvisor = overlayRecoveryAdvisor
+        self.stabilityGate = stabilityGate
+        self.presentationPolicy = presentationPolicy
+        self.now = now
     }
 
     func show(_ suggestion: Suggestion, for context: TextContext, mode: SuggestionDisplayMode) {
@@ -88,6 +105,8 @@ final class PreviewCoordinator: SuggestionPresenter {
     func hide() {
         GeometryDebug.log("presenter-hide activeTier=\(activeTier)")
         activeTier = .disabled
+        lastPresentationSnapshot = nil
+        lastAcceptedPresentationAt = nil
         nativeInlinePresenter.hide()
         multiSuggestionPopupPresenter.hide()
         visualInlinePresenter.hide()
@@ -98,54 +117,38 @@ final class PreviewCoordinator: SuggestionPresenter {
     }
 
     func resolveTier(for suggestion: Suggestion, context: TextContext, mode: SuggestionDisplayMode) -> PreviewPresentationTier {
-        guard mode != .disabled, !suggestion.visibleText.isEmpty else {
-            return .disabled
-        }
-        if safeOverlayModeEnabled {
-            switch mode {
-            case .inline:
-                if simpleCaretPopupPresenter.canPresent(suggestion, for: context) {
-                    return .simpleCaretPopup
-                }
-                return .mirrorWindow
-            case .mirrorWindow:
-                return .mirrorWindow
-            case .disabled:
-                return .disabled
-            }
-        }
-
-        if suggestion.hasMultipleAlternatives,
-           multiSuggestionPopupPresenter.canPresent(suggestion, for: context) {
-            return .multiSuggestionPopup
-        }
-
-        switch mode {
-        case .inline:
-            if nativeInlinePresenter.canPresent(suggestion, for: context) {
-                return .nativeInline
-            }
-            if visualInlinePresenter.canPresent(suggestion, for: context) {
-                return .visualInlineOverlay
-            }
-            if simpleCaretPopupPresenter.canPresent(suggestion, for: context) {
-                return .simpleCaretPopup
-            }
-            return .mirrorWindow
-        case .mirrorWindow:
-            return .mirrorWindow
-        case .disabled:
-            return .disabled
-        }
+        resolvePresentation(for: suggestion, context: context, mode: mode).tier
     }
 
     private func present(_ suggestion: Suggestion, for context: TextContext, mode: SuggestionDisplayMode, isUpdate: Bool) {
-        let nextTier = resolveTier(for: suggestion, context: context, mode: mode)
+        let presentationDecision = resolvePresentation(for: suggestion, context: context, mode: mode)
+        let nextTier = presentationDecision.tier
         if safeOverlayModeEnabled {
             GeometryDebug.log("safe-overlay-mode active feature=preview-tier mode=\(mode.rawValue) resolvedTier=\(nextTier)")
         }
-        recordOverlayRecoverySignal(tier: nextTier, mode: mode)
+        GeometryDebug.log("presentation-policy mode=\(presentationDecision.mode.rawValue) reason=\(presentationDecision.reason.rawValue) requestedMode=\(mode.rawValue) resolvedTier=\(nextTier)")
         GeometryDebug.log("presenter-present update=\(isUpdate) previousTier=\(String(describing: activeTier)) mode=\(mode.rawValue) resolvedTier=\(nextTier) app=\(context.app.displayName) bundle=\(context.app.bundleID) visibleLength=\((suggestion.visibleText as NSString).length) context=\(context.geometryDebugDescription)")
+        let proposedSnapshot = SuggestionOverlayStabilityGate.Snapshot(
+            suggestion: suggestion,
+            context: context,
+            displayMode: mode,
+            presentationTier: nextTier
+        )
+        let currentDate = now()
+        if isUpdate {
+            let decision = stabilityGate.decision(
+                previous: lastPresentationSnapshot,
+                proposed: proposedSnapshot,
+                now: currentDate,
+                lastAcceptanceAt: lastAcceptedPresentationAt
+            )
+            GeometryDebug.log("overlay-stability decision=\(decision.diagnosticName) reason=\(decision.reason.rawValue) tier=\(nextTier)")
+            guard decision.shouldPresent else {
+                return
+            }
+        }
+
+        recordOverlayRecoverySignal(tier: nextTier, mode: mode)
         let shouldUpdateExistingTier = isUpdate && activeTier == nextTier
         hidePresenters(except: nextTier)
         activeTier = nextTier
@@ -184,6 +187,37 @@ final class PreviewCoordinator: SuggestionPresenter {
         case .disabled:
             break
         }
+        recordPresentedSnapshot(proposedSnapshot, now: currentDate)
+    }
+
+    private func resolvePresentation(
+        for suggestion: Suggestion,
+        context: TextContext,
+        mode: SuggestionDisplayMode
+    ) -> SuggestionPresentationPolicy.Decision {
+        presentationPolicy.decision(
+            for: suggestion,
+            context: context,
+            requestedDisplayMode: mode,
+            safeOverlayModeEnabled: safeOverlayModeEnabled,
+            capabilities: SuggestionPresentationPolicy.Capabilities(
+                canUseNativeInline: nativeInlinePresenter.canPresent(suggestion, for: context),
+                canUseVisualInline: visualInlinePresenter.canPresent(suggestion, for: context),
+                canUseCaretPopup: simpleCaretPopupPresenter.canPresent(suggestion, for: context),
+                canUseMultiSuggestionPopup: multiSuggestionPopupPresenter.canPresent(suggestion, for: context)
+            )
+        )
+    }
+
+    private func recordPresentedSnapshot(
+        _ snapshot: SuggestionOverlayStabilityGate.Snapshot,
+        now: Date
+    ) {
+        if !snapshot.acceptedPrefix.isEmpty,
+           snapshot.acceptedPrefix != lastPresentationSnapshot?.acceptedPrefix {
+            lastAcceptedPresentationAt = now
+        }
+        lastPresentationSnapshot = snapshot
     }
 
     private func recordOverlayRecoverySignal(tier: PreviewPresentationTier, mode: SuggestionDisplayMode) {
@@ -239,5 +273,3 @@ extension TextContext {
         ].joined(separator: " ")
     }
 }
-
-

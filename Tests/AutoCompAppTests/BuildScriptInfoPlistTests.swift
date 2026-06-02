@@ -27,6 +27,20 @@ final class BuildScriptInfoPlistTests: XCTestCase {
         XCTAssertTrue(script.contains("configured autocomplete backend on the local network"))
     }
 
+    func testGeneratedBundlesDeclarePrivacyUsageDescriptions() throws {
+        let root = try packageRoot()
+        let scripts = [
+            try String(contentsOf: root.appendingPathComponent("script/build_and_run.sh"), encoding: .utf8),
+            try String(contentsOf: root.appendingPathComponent("script/release_build.sh"), encoding: .utf8)
+        ]
+
+        for script in scripts {
+            XCTAssertTrue(script.contains("<key>NSAccessibilityUsageDescription</key>"))
+            XCTAssertTrue(script.contains("<key>NSInputMonitoringUsageDescription</key>"))
+            XCTAssertTrue(script.contains("<key>NSScreenCaptureUsageDescription</key>"))
+        }
+    }
+
     private func packageRoot() throws -> URL {
         var url = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
         while url.path != "/" {

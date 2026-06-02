@@ -185,8 +185,50 @@ final class PreviewCoordinatorTests: XCTestCase {
         XCTAssertEqual(mirror.showCount, 0)
     }
 
-    func testInlineUsesVisualOverlayWithFocusedElementFallback() {
+    func testPostAcceptanceCaretDriftDoesNotRepositionUntilWindowExpires() {
         let native = RecordingPreviewPresenter(canPresentResult: false)
+        let visual = RecordingPreviewPresenter(canPresentResult: true)
+        let mirror = RecordingPreviewPresenter(canPresentResult: true)
+        var currentDate = Date(timeIntervalSince1970: 100)
+        let coordinator = PreviewCoordinator(
+            nativeInlinePresenter: native,
+            visualInlinePresenter: visual,
+            mirrorWindowPresenter: mirror,
+            now: { currentDate }
+        )
+
+        coordinator.show(
+            suggestion(visibleText: " first second"),
+            for: context(caretRect: CGRect(x: 100, y: 100, width: 2, height: 20)),
+            mode: .inline
+        )
+        currentDate = currentDate.addingTimeInterval(0.05)
+        coordinator.update(
+            suggestion(visibleText: " second", acceptedPrefix: " first"),
+            for: context(caretRect: CGRect(x: 115, y: 100, width: 2, height: 20)),
+            mode: .inline
+        )
+        currentDate = currentDate.addingTimeInterval(0.05)
+        coordinator.update(
+            suggestion(visibleText: " second", acceptedPrefix: " first"),
+            for: context(caretRect: CGRect(x: 150, y: 100, width: 2, height: 20)),
+            mode: .inline
+        )
+        currentDate = currentDate.addingTimeInterval(0.6)
+        coordinator.update(
+            suggestion(visibleText: " second", acceptedPrefix: " first"),
+            for: context(caretRect: CGRect(x: 150, y: 100, width: 2, height: 20)),
+            mode: .inline
+        )
+
+        XCTAssertEqual(coordinator.activeTier, .visualInlineOverlay)
+        XCTAssertEqual(visual.showCount, 1)
+        XCTAssertEqual(visual.updateCount, 2)
+    }
+
+    func testWeakFocusedElementGeometryUsesCaretPopupInsteadOfInlineOverlay() {
+        let native = RecordingPreviewPresenter(canPresentResult: false)
+        let simple = RecordingPreviewPresenter(canPresentResult: true)
         let mirror = RecordingPreviewPresenter(canPresentResult: true)
         let coordinator = PreviewCoordinator(
             nativeInlinePresenter: native,
@@ -194,19 +236,21 @@ final class PreviewCoordinatorTests: XCTestCase {
                 shortcutSettingsStore: KeyboardShortcutSettingsStore(),
                 hintsProvider: OverlayShortcutHintsProvider()
             ),
-            mirrorWindowPresenter: mirror
+            mirrorWindowPresenter: mirror,
+            simpleCaretPopupPresenter: simple
         )
 
         let tier = coordinator.resolveTier(
             for: suggestion(),
             context: context(
                 caretRect: nil,
-                focusedElementRect: CGRect(x: 120, y: 500, width: 520, height: 48)
+                focusedElementRect: CGRect(x: 120, y: 500, width: 520, height: 48),
+                caretGeometryQuality: .elementFrame
             ),
             mode: .inline
         )
 
-        XCTAssertEqual(tier, .visualInlineOverlay)
+        XCTAssertEqual(tier, .simpleCaretPopup)
         XCTAssertEqual(mirror.showCount, 0)
     }
 
@@ -351,8 +395,16 @@ final class PreviewCoordinatorTests: XCTestCase {
         XCTAssertTrue(multiView.constraints.isEmpty)
     }
 
-    private func suggestion(visibleText: String = " continuation") -> Suggestion {
-        Suggestion(baseContextID: UUID(), visibleText: visibleText, latencyMs: 12)
+    private func suggestion(
+        visibleText: String = " continuation",
+        acceptedPrefix: String = ""
+    ) -> Suggestion {
+        Suggestion(
+            baseContextID: UUID(),
+            visibleText: visibleText,
+            acceptedPrefix: acceptedPrefix,
+            latencyMs: 12
+        )
     }
 
     private func multiSuggestion() -> Suggestion {
@@ -372,16 +424,20 @@ final class PreviewCoordinatorTests: XCTestCase {
         app: AppIdentity = AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1),
         domain: String? = nil,
         caretRect: CGRect? = CGRect(x: 100, y: 100, width: 2, height: 20),
-        focusedElementRect: CGRect? = nil
+        focusedElementRect: CGRect? = nil,
+        textAfterCursor: String? = nil,
+        caretGeometryQuality: CaretGeometryQuality = .directCaret
     ) -> TextContext {
         TextContext(
             app: app,
             domain: domain,
             focusedElementID: "field",
             textBeforeCursor: "Hello",
+            textAfterCursor: textAfterCursor,
             selectedRange: NSRange(location: 5, length: 0),
             caretRect: caretRect,
-            focusedElementRect: focusedElementRect
+            focusedElementRect: focusedElementRect,
+            caretGeometryQuality: caretGeometryQuality
         )
     }
 }

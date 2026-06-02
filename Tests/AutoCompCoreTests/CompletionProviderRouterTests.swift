@@ -210,6 +210,38 @@ final class CompletionProviderRouterTests: XCTestCase {
         XCTAssertEqual(prepareCount, 1)
     }
 
+    func testRemoteConsentBlocksPersonalizationSamplesBeforeProviderInvocation() async throws {
+        let provider = RecordingPersonalizationCompletionProvider(text: "remote")
+        let router = CompletionProviderRouter(
+            activeKind: .remote,
+            providers: [.remote: provider],
+            remoteConsentChecker: FixedRemoteConsentChecker(allowedScopes: [])
+        )
+        let sample = PersonalizationSample(
+            excerpt: "private local style example",
+            appBundleID: "com.apple.TextEdit",
+            domain: nil,
+            languageHint: nil,
+            createdAt: Date()
+        )
+
+        do {
+            _ = try await router.complete(
+                context: makeContext(),
+                privacySettings: PrivacySettings(localPersonalizationEnabled: true),
+                visualContext: nil,
+                clipboardContext: nil,
+                personalizationSamples: [sample]
+            )
+            XCTFail("Expected remote consent error")
+        } catch let error as CompletionProviderRouterError {
+            XCTAssertEqual(error, .remoteConsentRequired(.remoteBackend))
+        }
+
+        let recordedSamples = await provider.recordedPersonalizationSamples()
+        XCTAssertTrue(recordedSamples.isEmpty)
+    }
+
     private func makeContext() -> TextContext {
         TextContext(
             app: AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1),
@@ -312,6 +344,62 @@ private actor RecordingVisualCompletionProvider: VisualContextAwareCompletionPro
         visualContext: VisualContextSnapshot?
     ) async throws -> Suggestion {
         storedVisualContext = visualContext
+        return Suggestion(baseContextID: context.id, visibleText: text, latencyMs: 1)
+    }
+}
+
+private actor RecordingPersonalizationCompletionProvider: PersonalizationContextAwareCompletionProvider {
+    let text: String
+    private var storedPersonalizationSamples: [PersonalizationSample] = []
+
+    init(text: String) {
+        self.text = text
+    }
+
+    func recordedPersonalizationSamples() -> [PersonalizationSample] {
+        storedPersonalizationSamples
+    }
+
+    func complete(context: TextContext) async throws -> Suggestion {
+        try await complete(context: context, privacySettings: PrivacySettings(), visualContext: nil)
+    }
+
+    func complete(
+        context: TextContext,
+        privacySettings: PrivacySettings,
+        visualContext: VisualContextSnapshot?
+    ) async throws -> Suggestion {
+        try await complete(
+            context: context,
+            privacySettings: privacySettings,
+            visualContext: visualContext,
+            clipboardContext: nil
+        )
+    }
+
+    func complete(
+        context: TextContext,
+        privacySettings: PrivacySettings,
+        visualContext: VisualContextSnapshot?,
+        clipboardContext: ClipboardContextSnapshot?
+    ) async throws -> Suggestion {
+        try await complete(
+            context: context,
+            privacySettings: privacySettings,
+            visualContext: visualContext,
+            clipboardContext: clipboardContext,
+            personalizationSamples: []
+        )
+    }
+
+    func complete(
+        context: TextContext,
+        privacySettings: PrivacySettings,
+        visualContext: VisualContextSnapshot?,
+        clipboardContext: ClipboardContextSnapshot?,
+        personalizationSamples: [PersonalizationSample]
+    ) async throws -> Suggestion {
+        storedPersonalizationSamples = personalizationSamples
         return Suggestion(baseContextID: context.id, visibleText: text, latencyMs: 1)
     }
 }

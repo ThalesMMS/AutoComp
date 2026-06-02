@@ -104,6 +104,233 @@ final class SuggestionEngineAcceptanceTests: XCTestCase {
         XCTAssertEqual(presenter.lastSuggestion?.visibleText, "continue this")
     }
 
+    func testShortcutOwnershipRequiresVisibleValidSuggestion() async throws {
+        let app = AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1)
+        let context = TextContext(
+            app: app,
+            focusedElementID: "textedit-field",
+            textBeforeCursor: "Please "
+        )
+        let completionProvider = CountingCompletionProvider(
+            suggestion: Suggestion(
+                baseContextID: context.id,
+                visibleText: "continue this",
+                latencyMs: 25
+            )
+        )
+        let engine = SuggestionEngine(
+            contextProvider: MutableContextProvider(context: context),
+            completionProvider: completionProvider,
+            presenter: RecordingSuggestionPresenter()
+        )
+
+        engine.recordCapturedInputEvent(.text(keyCode: CapturedInputEventAdapter.spaceKeyCode, isSuggestionTrigger: true))
+        try await Task.sleep(nanoseconds: 700_000_000)
+
+        XCTAssertEqual(engine.currentSuggestion?.visibleText, "continue this")
+        XCTAssertEqual(
+            engine.shortcutOwnershipDecision(for: .acceptNextWord, isSuggestionVisible: false),
+            .passThrough(reason: "no-visible-suggestion")
+        )
+        XCTAssertEqual(
+            engine.shortcutOwnershipDecision(for: .acceptNextWord, isSuggestionVisible: true),
+            .consume(reason: "valid-suggestion")
+        )
+    }
+
+    func testCapturedTextEventWaitsForHostPublishBeforeGenerating() async throws {
+        let app = AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1)
+        let baselineContext = TextContext(
+            app: app,
+            focusedElementID: "textedit-field",
+            textBeforeCursor: "Please"
+        )
+        let publishedContext = TextContext(
+            app: app,
+            focusedElementID: "textedit-field",
+            textBeforeCursor: "Please "
+        )
+        let contextProvider = MutableContextProvider(context: baselineContext)
+        let completionProvider = RecordingContextCompletionProvider(visibleText: "continue this")
+        let engine = SuggestionEngine(
+            contextProvider: contextProvider,
+            completionProvider: completionProvider,
+            presenter: RecordingSuggestionPresenter(),
+            hostPublishAwaiter: HostPublishAwaiter(configuration: .fastTest)
+        )
+
+        engine.start()
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        engine.recordCapturedInputEvent(.text(keyCode: CapturedInputEventAdapter.spaceKeyCode, isSuggestionTrigger: true))
+        Task {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+            await contextProvider.updateContext(publishedContext)
+        }
+        try await Task.sleep(nanoseconds: 450_000_000)
+
+        let recordedContexts = await completionProvider.recordedContexts()
+        XCTAssertEqual(recordedContexts.map(\.textBeforeCursor), ["Please "])
+        XCTAssertEqual(engine.currentSuggestion?.visibleText, "continue this")
+        engine.stop()
+    }
+
+    func testRapidCapturedTextEventsCancelOlderHostPublishWaits() async throws {
+        let app = AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1)
+        let baselineContext = TextContext(
+            app: app,
+            focusedElementID: "textedit-field",
+            textBeforeCursor: "Please"
+        )
+        let publishedContext = TextContext(
+            app: app,
+            focusedElementID: "textedit-field",
+            textBeforeCursor: "Please now "
+        )
+        let contextProvider = MutableContextProvider(context: baselineContext)
+        let completionProvider = RecordingContextCompletionProvider(visibleText: "continue this")
+        let engine = SuggestionEngine(
+            contextProvider: contextProvider,
+            completionProvider: completionProvider,
+            presenter: RecordingSuggestionPresenter(),
+            hostPublishAwaiter: HostPublishAwaiter(configuration: .slowTimeoutTest)
+        )
+
+        engine.start()
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        engine.recordCapturedInputEvent(.text(keyCode: 0, isSuggestionTrigger: false))
+        try await Task.sleep(nanoseconds: 10_000_000)
+        engine.recordCapturedInputEvent(.text(keyCode: CapturedInputEventAdapter.spaceKeyCode, isSuggestionTrigger: true))
+        Task {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+            await contextProvider.updateContext(publishedContext)
+        }
+        try await Task.sleep(nanoseconds: 500_000_000)
+
+        let recordedContexts = await completionProvider.recordedContexts()
+        XCTAssertEqual(recordedContexts.map(\.textBeforeCursor), ["Please now "])
+        engine.stop()
+    }
+
+    func testNonPublishingShortcutMutationsDoNotCancelPendingTextPublish() async throws {
+        let app = AppIdentity(bundleID: "com.google.Chrome", displayName: "Google Chrome", processID: 1)
+        let baselineContext = TextContext(
+            app: app,
+            domain: "docs.google.com",
+            focusedElementID: "docs-field",
+            textBeforeCursor: "Please"
+        )
+        let publishedContext = TextContext(
+            app: app,
+            domain: "docs.google.com",
+            focusedElementID: "docs-field",
+            textBeforeCursor: "Please "
+        )
+        let contextProvider = MutableContextProvider(context: baselineContext)
+        let completionProvider = RecordingContextCompletionProvider(visibleText: "continue this")
+        let engine = SuggestionEngine(
+            contextProvider: contextProvider,
+            completionProvider: completionProvider,
+            presenter: RecordingSuggestionPresenter(),
+            hostPublishAwaiter: HostPublishAwaiter(configuration: HostPublishAwaitConfiguration(
+                firstReadDelayNanoseconds: 100_000_000,
+                pollIntervalNanoseconds: 100_000_000,
+                timeoutNanoseconds: 800_000_000
+            ))
+        )
+
+        engine.start()
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        engine.recordCapturedInputEvent(.text(keyCode: CapturedInputEventAdapter.spaceKeyCode, isSuggestionTrigger: true))
+        Task {
+            try? await Task.sleep(nanoseconds: 30_000_000)
+            await contextProvider.updateContext(publishedContext)
+        }
+        Task { @MainActor in
+            for _ in 0..<16 {
+                try? await Task.sleep(nanoseconds: 20_000_000)
+                engine.recordCapturedInputEvent(.shortcutMutation(keyCode: 55))
+            }
+        }
+
+        try await Task.sleep(nanoseconds: 520_000_000)
+
+        let recordedContexts = await completionProvider.recordedContexts()
+        XCTAssertEqual(recordedContexts.map(\.textBeforeCursor), ["Please "])
+        XCTAssertEqual(engine.currentSuggestion?.visibleText, "continue this")
+        engine.stop()
+    }
+
+    func testNavigationNoiseDoesNotCancelPendingTextPublish() async throws {
+        let app = AppIdentity(bundleID: "com.google.Chrome", displayName: "Google Chrome", processID: 1)
+        let baselineContext = TextContext(
+            app: app,
+            domain: "docs.google.com",
+            focusedElementID: "docs-field",
+            textBeforeCursor: "Please"
+        )
+        let publishedContext = TextContext(
+            app: app,
+            domain: "docs.google.com",
+            focusedElementID: "docs-field",
+            textBeforeCursor: "Please "
+        )
+        let contextProvider = MutableContextProvider(context: baselineContext)
+        let completionProvider = RecordingContextCompletionProvider(visibleText: "continue this")
+        let engine = SuggestionEngine(
+            contextProvider: contextProvider,
+            completionProvider: completionProvider,
+            presenter: RecordingSuggestionPresenter(),
+            hostPublishAwaiter: HostPublishAwaiter(configuration: HostPublishAwaitConfiguration(
+                firstReadDelayNanoseconds: 100_000_000,
+                pollIntervalNanoseconds: 100_000_000,
+                timeoutNanoseconds: 800_000_000
+            ))
+        )
+
+        engine.start()
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        engine.recordCapturedInputEvent(.text(keyCode: CapturedInputEventAdapter.spaceKeyCode, isSuggestionTrigger: true))
+        Task {
+            try? await Task.sleep(nanoseconds: 30_000_000)
+            await contextProvider.updateContext(publishedContext)
+        }
+        Task { @MainActor in
+            for index in 0..<16 {
+                try? await Task.sleep(nanoseconds: 20_000_000)
+                if index.isMultiple(of: 2) {
+                    engine.recordCapturedInputEvent(.navigation(keyCode: CapturedInputEventAdapter.tabKeyCode))
+                } else {
+                    engine.recordCapturedInputEvent(.pointer)
+                }
+            }
+        }
+
+        try await waitForVisibleSuggestion("continue this", engine: engine, timeoutNanoseconds: 1_500_000_000)
+
+        let recordedContexts = await completionProvider.recordedContexts()
+        XCTAssertEqual(recordedContexts.map(\.textBeforeCursor), ["Please "])
+        XCTAssertEqual(engine.currentSuggestion?.visibleText, "continue this")
+        engine.stop()
+    }
+
+    private func waitForVisibleSuggestion(
+        _ visibleText: String,
+        engine: SuggestionEngine,
+        timeoutNanoseconds: UInt64
+    ) async throws {
+        let deadline = Date().addingTimeInterval(TimeInterval(timeoutNanoseconds) / 1_000_000_000)
+        while Date() < deadline {
+            if engine.currentSuggestion?.visibleText == visibleText {
+                return
+            }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+    }
+
     func testPromptCacheDiagnosticsRecordedAfterCompletion() async throws {
         let app = AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1)
         let context = TextContext(
@@ -1655,6 +1882,125 @@ final class SuggestionEngineAcceptanceTests: XCTestCase {
         XCTAssertEqual(recordedContext?.focusedElementRect, focusedElementRect)
         XCTAssertEqual(recordedStableFieldIdentity, stableFieldIdentity)
         XCTAssertEqual(recordedPrivacySettings?.screenContextEnabled, true)
+        engine.stop()
+    }
+
+    func testMissingVisualContextDoesNotBlockCompletion() async throws {
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "AutoCompVisualCooldown-\(UUID().uuidString)"))
+        let privacyStore = PrivacySettingsStore(defaults: defaults, key: "privacy")
+        try privacyStore.save(PrivacySettings(screenContextEnabled: true))
+        let app = AppIdentity(bundleID: "com.google.Chrome", displayName: "Google Chrome", processID: 1)
+        let stableFieldIdentity = StableFieldIdentity(
+            app: app,
+            domain: "docs.google.com",
+            role: "AXWebArea",
+            focusedElementFrame: CGRect(x: 100, y: 100, width: 600, height: 300),
+            focusChangeSequence: 4
+        )
+        let context = TextContext(
+            app: app,
+            domain: "docs.google.com",
+            focusedElementID: "docs-field",
+            stableFieldIdentity: stableFieldIdentity,
+            textBeforeCursor: "Please ",
+            caretRect: CGRect(x: 180, y: 110, width: 1, height: 18),
+            focusedElementRect: CGRect(x: 100, y: 100, width: 600, height: 300)
+        )
+        let visualContextProvider = RecordingManagedVisualContextProvider(snapshot: nil)
+        let completionProvider = RecordingVisualContextCompletionProvider()
+        let engine = SuggestionEngine(
+            contextProvider: MutableContextProvider(context: context),
+            completionProvider: completionProvider,
+            visualContextProvider: visualContextProvider,
+            presenter: RecordingSuggestionPresenter(),
+            privacyStore: privacyStore
+        )
+
+        engine.recordSuggestionTriggerKey(.text(keyCode: CapturedInputEventAdapter.spaceKeyCode, isSuggestionTrigger: true))
+        try await waitForVisibleSuggestion("continue this", engine: engine, timeoutNanoseconds: 1_500_000_000)
+
+        let recordedVisualContext = await completionProvider.recordedVisualContext()
+        let recordedContext = await completionProvider.recordedContext()
+        XCTAssertNil(recordedVisualContext)
+        XCTAssertEqual(recordedContext?.domain, "docs.google.com")
+        XCTAssertEqual(visualContextProvider.cacheReadContextIDs(), [context.id])
+        XCTAssertEqual(engine.currentSuggestion?.visibleText, "continue this")
+        engine.stop()
+    }
+
+    func testCapturedTextEventReadsVisualCacheWithoutStartingRefresh() async throws {
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "AutoCompVisualCacheOnly-\(UUID().uuidString)"))
+        let privacyStore = PrivacySettingsStore(defaults: defaults, key: "privacy")
+        try privacyStore.save(PrivacySettings(screenContextEnabled: true))
+        let app = AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1)
+        let stableFieldIdentity = StableFieldIdentity(
+            app: app,
+            role: "AXTextArea",
+            focusedElementFrame: CGRect(x: 100, y: 100, width: 500, height: 40),
+            focusChangeSequence: 3
+        )
+        let context = TextContext(
+            app: app,
+            focusedElementID: "textedit-field",
+            stableFieldIdentity: stableFieldIdentity,
+            textBeforeCursor: "Please "
+        )
+        let visualContext = VisualContextSnapshot(
+            summary: "Cached visible title",
+            stableFieldIdentity: stableFieldIdentity
+        )
+        let visualContextProvider = RecordingManagedVisualContextProvider(snapshot: visualContext)
+        let completionProvider = RecordingVisualContextCompletionProvider()
+        let engine = SuggestionEngine(
+            contextProvider: MutableContextProvider(context: context),
+            completionProvider: completionProvider,
+            visualContextProvider: visualContextProvider,
+            presenter: RecordingSuggestionPresenter(),
+            privacyStore: privacyStore
+        )
+
+        engine.recordSuggestionTriggerKey(.text(keyCode: CapturedInputEventAdapter.spaceKeyCode, isSuggestionTrigger: true))
+        try await Task.sleep(nanoseconds: 900_000_000)
+
+        let recordedVisualContext = await completionProvider.recordedVisualContext()
+        XCTAssertEqual(recordedVisualContext, visualContext)
+        XCTAssertEqual(visualContextProvider.cacheReadContextIDs(), [context.id])
+        XCTAssertTrue(visualContextProvider.refreshContexts().isEmpty)
+        XCTAssertTrue(visualContextProvider.startContexts().isEmpty)
+        engine.stop()
+    }
+
+    func testStartupStartsVisualContextOutOfBand() async throws {
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "AutoCompVisualStartup-\(UUID().uuidString)"))
+        let privacyStore = PrivacySettingsStore(defaults: defaults, key: "privacy")
+        try privacyStore.save(PrivacySettings(screenContextEnabled: true))
+        let app = AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1)
+        let stableFieldIdentity = StableFieldIdentity(
+            app: app,
+            role: "AXTextArea",
+            focusedElementFrame: CGRect(x: 100, y: 100, width: 500, height: 40),
+            focusChangeSequence: 3
+        )
+        let context = TextContext(
+            app: app,
+            focusedElementID: "textedit-field",
+            stableFieldIdentity: stableFieldIdentity,
+            textBeforeCursor: "Please"
+        )
+        let visualContextProvider = RecordingManagedVisualContextProvider(snapshot: nil)
+        let engine = SuggestionEngine(
+            contextProvider: MutableContextProvider(context: context),
+            completionProvider: RecordingContextCompletionProvider(visibleText: " done"),
+            visualContextProvider: visualContextProvider,
+            presenter: RecordingSuggestionPresenter(),
+            privacyStore: privacyStore
+        )
+
+        engine.start()
+        try await Task.sleep(nanoseconds: 300_000_000)
+
+        XCTAssertEqual(visualContextProvider.startContexts().map(\.id), [context.id])
+        XCTAssertTrue(visualContextProvider.refreshContexts().isEmpty)
         engine.stop()
     }
 
@@ -3666,6 +4012,89 @@ private actor StaticVisualContextProvider: StableFieldVisualContextProvider {
 
     func recordedStableFieldIdentity() -> StableFieldIdentity? {
         storedStableFieldIdentity
+    }
+}
+
+private final class RecordingManagedVisualContextProvider: TextContextVisualContextProvider,
+    StableFieldVisualContextProvider,
+    VisualContextSessionControlling,
+    @unchecked Sendable
+{
+    private let lock = NSLock()
+    private let snapshot: VisualContextSnapshot?
+    private var storedCacheReadContextIDs: [UUID] = []
+    private var storedStableFieldIdentities: [StableFieldIdentity?] = []
+    private var storedStartContexts: [TextContext] = []
+    private var storedRefreshContexts: [TextContext] = []
+    private var storedTickCount = 0
+    private var storedClearCount = 0
+
+    init(snapshot: VisualContextSnapshot?) {
+        self.snapshot = snapshot
+    }
+
+    func currentVisualContext() async -> VisualContextSnapshot? {
+        snapshot
+    }
+
+    func currentVisualContext(for context: TextContext) async -> VisualContextSnapshot? {
+        lock.withLock {
+            storedCacheReadContextIDs.append(context.id)
+        }
+        return snapshot
+    }
+
+    func currentVisualContext(for stableFieldIdentity: StableFieldIdentity?) async -> VisualContextSnapshot? {
+        lock.withLock {
+            storedStableFieldIdentities.append(stableFieldIdentity)
+        }
+        return snapshot
+    }
+
+    func startIfEligible(for context: TextContext) {
+        lock.lock()
+        storedStartContexts.append(context)
+        lock.unlock()
+    }
+
+    func refreshOnFocusOrWindowChange(_ context: TextContext) {
+        lock.lock()
+        storedRefreshContexts.append(context)
+        lock.unlock()
+    }
+
+    func refreshTick() {
+        lock.lock()
+        storedTickCount += 1
+        lock.unlock()
+    }
+
+    func stopAndClear() {
+        clearVisualContextSession()
+    }
+
+    func clearVisualContextSession() {
+        lock.lock()
+        storedClearCount += 1
+        lock.unlock()
+    }
+
+    func cacheReadContextIDs() -> [UUID] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedCacheReadContextIDs
+    }
+
+    func startContexts() -> [TextContext] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedStartContexts
+    }
+
+    func refreshContexts() -> [TextContext] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedRefreshContexts
     }
 }
 

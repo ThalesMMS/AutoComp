@@ -12,9 +12,14 @@ public enum SuggestionSessionReconciliationResult: Equatable, Sendable {
 
 public struct SuggestionSessionReconciler: Sendable {
     public var acceptanceEchoGraceInterval: TimeInterval
+    public var anchorReconciler: SuggestionAnchorReconciler
 
-    public init(acceptanceEchoGraceInterval: TimeInterval = 3.0) {
+    public init(
+        acceptanceEchoGraceInterval: TimeInterval = 3.0,
+        anchorReconciler: SuggestionAnchorReconciler = SuggestionAnchorReconciler()
+    ) {
         self.acceptanceEchoGraceInterval = acceptanceEchoGraceInterval
+        self.anchorReconciler = anchorReconciler
     }
 
     public func reconcile(
@@ -23,55 +28,69 @@ public struct SuggestionSessionReconciler: Sendable {
         now: Date = Date(),
         targetMatches: Bool? = nil
     ) -> SuggestionSessionReconciliationResult {
-        guard context.app == session.target.app,
-              context.domain == session.target.domain,
-              (targetMatches ?? (context.focusedElementID == session.target.focusedElementID)) else {
-            return .targetChanged
-        }
-
-        if let selectedRange = context.selectedRange,
-           selectedRange.length > 0 {
-            return .diverged
-        }
-
-        if session.isExhausted,
-           Self.textMatchesExpectedOrOnlyAddsTrailingWhitespace(
-            context.textBeforeCursor,
-            expectedText: session.expectedTextBeforeCursor
-           ) {
-            return .exhausted
-        }
-
-        if let typedThrough = typedThroughSession(
-            observedText: context.textBeforeCursor,
-            session: session,
-            now: now
-        ) {
-            return typedThrough
-        }
-
-        return relation(
-            observedText: context.textBeforeCursor,
-            session: session,
-            now: now
+        let anchor = session.anchor
+        let anchorResult = anchorReconciler.reconcile(
+            context: context,
+            anchor: anchor,
+            targetMatches: targetMatches
         )
+
+        switch anchorResult {
+        case .exhausted:
+            if !session.isExhausted,
+               let typedText = typedThroughText(
+                observedText: context.textBeforeCursor,
+                session: session
+               ),
+               let updatedSession = session.advancingTypedText(typedText, at: now) {
+                return .typedThrough(session: updatedSession, typedText: typedText)
+            }
+            return .exhausted
+        case .remaining(let remainingText):
+            if remainingText == session.remainingText {
+                return relation(
+                    observedText: context.textBeforeCursor,
+                    session: session,
+                    now: now
+                )
+            }
+
+            guard let typedText = session.typedText(toRemainingText: remainingText),
+                  let updatedSession = session.advancingTypedText(typedText, at: now) else {
+                return .diverged
+            }
+            return .typedThrough(session: updatedSession, typedText: typedText)
+        case .diverged(let reason):
+            switch reason {
+            case .appChanged, .domainChanged, .focusedElementChanged, .stableFieldChanged:
+                return .targetChanged
+            case .selectionChanged, .suffixChanged:
+                return .diverged
+            case .baseTextChanged, .acceptedTextDeleted, .typedTextMismatch:
+                return relation(
+                    observedText: context.textBeforeCursor,
+                    session: session,
+                    now: now
+                )
+            }
+        }
     }
 
-    private func typedThroughSession(
+    private func typedThroughText(
         observedText: String,
-        session: ActiveSuggestionSession,
-        now: Date
-    ) -> SuggestionSessionReconciliationResult? {
+        session: ActiveSuggestionSession
+    ) -> String? {
         guard observedText.hasPrefix(session.expectedTextBeforeCursor) else {
             return nil
         }
 
         let typedText = String(observedText.dropFirst(session.expectedTextBeforeCursor.count))
-        guard let updatedSession = session.advancingTypedText(typedText, at: now) else {
+        guard !typedText.isEmpty,
+              session.remainingText.hasPrefix(typedText) else {
             return nil
         }
 
-        return .typedThrough(session: updatedSession, typedText: typedText)
+        return typedText
     }
 
     private func relation(
@@ -137,36 +156,13 @@ public struct SuggestionSessionReconciler: Sendable {
         _ observedText: String,
         expectedText: String
     ) -> Bool {
-        if observedText == expectedText {
-            return true
-        }
-
-        guard observedText.hasPrefix(expectedText) else {
-            return false
-        }
-
-        let suffix = observedText.dropFirst(expectedText.count)
-        return suffix.unicodeScalars.allSatisfy {
-            CharacterSet.whitespacesAndNewlines.contains($0)
-        }
+        SuggestionAnchorReconciler.textMatchesExpectedOrOnlyAddsTrailingWhitespace(
+            observedText,
+            expectedText: expectedText
+        )
     }
 
     public static func normalizedWhitespace(in text: String) -> String {
-        var result = String.UnicodeScalarView()
-        var previousWasWhitespace = false
-
-        for scalar in text.unicodeScalars {
-            if CharacterSet.whitespacesAndNewlines.contains(scalar) {
-                if !previousWasWhitespace {
-                    result.append(" ")
-                    previousWasWhitespace = true
-                }
-            } else {
-                result.append(scalar)
-                previousWasWhitespace = false
-            }
-        }
-
-        return String(result)
+        SuggestionAnchorReconciler.normalizedWhitespace(in: text)
     }
 }

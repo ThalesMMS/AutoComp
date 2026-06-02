@@ -4,8 +4,51 @@ import CoreGraphics
 import Foundation
 import IOKit.hid
 
+protocol PermissionAccessChecking {
+    func isAccessibilityTrusted() -> Bool
+    func requestAccessibilityAccess() -> Bool
+    func hasInputMonitoringAccess() -> Bool
+    func requestInputMonitoringAccess() -> Bool
+    func hasScreenRecordingAccess() -> Bool
+    func requestScreenRecordingAccess() -> Bool
+}
+
+struct SystemPermissionAccessChecker: PermissionAccessChecking {
+    func isAccessibilityTrusted() -> Bool {
+        AXIsProcessTrusted()
+    }
+
+    func requestAccessibilityAccess() -> Bool {
+        let options = [
+            "AXTrustedCheckOptionPrompt": true
+        ] as CFDictionary
+        return AXIsProcessTrustedWithOptions(options)
+    }
+
+    func hasInputMonitoringAccess() -> Bool {
+        InputMonitoringPermissionPolicy.isUsableForGlobalShortcuts(
+            cgPreflightListenEventAccess: CGPreflightListenEventAccess(),
+            ioHIDListenEventAccessGranted: IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeGranted
+        )
+    }
+
+    func requestInputMonitoringAccess() -> Bool {
+        CGRequestListenEventAccess()
+    }
+
+    func hasScreenRecordingAccess() -> Bool {
+        CGPreflightScreenCaptureAccess()
+    }
+
+    func requestScreenRecordingAccess() -> Bool {
+        CGRequestScreenCaptureAccess()
+    }
+}
+
 @MainActor
 final class PermissionService: ObservableObject {
+    private static let inputMonitoringApprovalPrompt = "Approve AutoComp in Privacy & Security > Input Monitoring."
+
     @Published private(set) var accessibilityTrusted: Bool = false
     @Published private(set) var inputMonitoringAllowed: Bool = false
     @Published private(set) var inputMonitoringStatus: String = PermissionKind.inputMonitoring.baselineDescription
@@ -19,8 +62,10 @@ final class PermissionService: ObservableObject {
     private var appActivationObserver: NSObjectProtocol?
     private var screenRecordingWasRequested: Bool = false
     private var lastLoggedPermissionState: PermissionDebugState?
+    private let accessChecker: PermissionAccessChecking
 
-    init() {
+    init(accessChecker: PermissionAccessChecking = SystemPermissionAccessChecker()) {
+        self.accessChecker = accessChecker
         refresh()
         startMonitoring()
     }
@@ -40,82 +85,51 @@ final class PermissionService: ObservableObject {
     }
 
     func refresh() {
-        accessibilityTrusted = AXIsProcessTrusted()
-        inputMonitoringAllowed = hasInputMonitoringAccess()
-        if inputMonitoringAllowed {
-            inputMonitoringStatus = "Enabled"
-        } else if inputMonitoringStatus != "Approve AutoComp in Privacy & Security > Input Monitoring." {
-            inputMonitoringStatus = PermissionKind.inputMonitoring.baselineDescription
-        }
-        updateScreenRecordingStatus(preflightAllowed: CGPreflightScreenCaptureAccess())
-        runtimeBundleID = Bundle.main.bundleIdentifier ?? "unknown"
-        runtimeExecutablePath = Bundle.main.executablePath ?? "unknown"
+        setIfChanged(\.accessibilityTrusted, accessChecker.isAccessibilityTrusted())
+        updateInputMonitoringStatus(allowed: accessChecker.hasInputMonitoringAccess())
+        updateScreenRecordingStatus(preflightAllowed: accessChecker.hasScreenRecordingAccess())
+        updateRuntimeIdentity()
         logPermissionStateIfNeeded()
     }
 
     func requestAccessibility() {
-        let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
-        accessibilityTrusted = AXIsProcessTrustedWithOptions(options)
+        setIfChanged(\.accessibilityTrusted, accessChecker.requestAccessibilityAccess())
     }
 
     func requestInputMonitoring() {
-        NSApp.activate(ignoringOtherApps: true)
-        inputMonitoringStatus = "Requesting Input Monitoring permission..."
+        if let app = NSApp {
+            app.activate(ignoringOtherApps: true)
+        }
+        setIfChanged(\.inputMonitoringStatus, "Requesting Input Monitoring permission...")
 
-        if CGPreflightListenEventAccess() {
-            inputMonitoringAllowed = true
-            inputMonitoringStatus = "Enabled"
-        } else {
-            // Creating a temporary event tap is the canonical way to trigger
-            // the macOS Input Monitoring consent dialog, but a created tap is
-            // not treated as proof that the global shortcut tap can run.
-            let tap = CGEvent.tapCreate(
-                tap: .cgSessionEventTap,
-                place: .headInsertEventTap,
-                options: .listenOnly,
-                eventsOfInterest: CGEventMask(1 << CGEventType.keyDown.rawValue),
-                callback: { _, _, event, _ in Unmanaged.passUnretained(event) },
-                userInfo: nil
-            )
-
-            if let tap {
-                CFMachPortInvalidate(tap)
-            }
-
-            // Tap creation triggers the system prompt on first attempt.
-            // Also try the IOKit path as a secondary trigger.
-            _ = IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)
-
-            inputMonitoringAllowed = hasInputMonitoringAccess()
-            if inputMonitoringAllowed {
-                inputMonitoringStatus = "Enabled"
-            } else {
-                inputMonitoringAllowed = false
-                inputMonitoringStatus = "Approve AutoComp in Privacy & Security > Input Monitoring."
-                openInputMonitoringSettings()
-            }
+        let requested = accessChecker.requestInputMonitoringAccess()
+        let allowed = requested || accessChecker.hasInputMonitoringAccess()
+        updateInputMonitoringStatus(allowed: allowed)
+        if !allowed {
+            setIfChanged(\.inputMonitoringStatus, Self.inputMonitoringApprovalPrompt)
+            openInputMonitoringSettings()
         }
 
-        accessibilityTrusted = AXIsProcessTrusted()
-        updateScreenRecordingStatus(preflightAllowed: CGPreflightScreenCaptureAccess())
+        setIfChanged(\.accessibilityTrusted, accessChecker.isAccessibilityTrusted())
+        updateScreenRecordingStatus(preflightAllowed: accessChecker.hasScreenRecordingAccess())
         updateRuntimeIdentity()
         logPermissionStateIfNeeded()
     }
 
     func requestScreenRecording() {
         screenRecordingWasRequested = true
-        let preflightBefore = CGPreflightScreenCaptureAccess()
-        _ = CGRequestScreenCaptureAccess()
-        let preflightAfter = CGPreflightScreenCaptureAccess()
+        let preflightBefore = accessChecker.hasScreenRecordingAccess()
+        _ = accessChecker.requestScreenRecordingAccess()
+        let preflightAfter = accessChecker.hasScreenRecordingAccess()
 
         if preflightAfter {
-            screenRecordingAllowed = true
-            screenRecordingNeedsRelaunch = false
-            screenRecordingStatus = "Enabled"
+            setIfChanged(\.screenRecordingAllowed, true)
+            setIfChanged(\.screenRecordingNeedsRelaunch, false)
+            setIfChanged(\.screenRecordingStatus, "Enabled")
         } else {
-            screenRecordingAllowed = false
-            screenRecordingNeedsRelaunch = true
-            screenRecordingStatus = "If AutoComp is enabled in System Settings, relaunch it to apply Screen Recording."
+            setIfChanged(\.screenRecordingAllowed, false)
+            setIfChanged(\.screenRecordingNeedsRelaunch, true)
+            setIfChanged(\.screenRecordingStatus, "If AutoComp is enabled in System Settings, relaunch it to apply Screen Recording.")
             if !preflightBefore {
                 openScreenRecordingSettings()
             }
@@ -161,11 +175,13 @@ final class PermissionService: ObservableObject {
 
     func startMonitoring() {
         if refreshTimer == nil {
-            refreshTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            let timer = Timer(timeInterval: 2.0, repeats: true) { [weak self] _ in
                 Task { @MainActor in
                     self?.refresh()
                 }
             }
+            RunLoop.main.add(timer, forMode: .common)
+            refreshTimer = timer
         }
 
         if appActivationObserver == nil {
@@ -190,16 +206,9 @@ final class PermissionService: ObservableObject {
         }
     }
 
-    private func hasInputMonitoringAccess() -> Bool {
-        InputMonitoringPermissionPolicy.isUsableForGlobalShortcuts(
-            cgPreflightListenEventAccess: CGPreflightListenEventAccess(),
-            ioHIDListenEventAccessGranted: IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeGranted
-        )
-    }
-
     private func updateRuntimeIdentity() {
-        runtimeBundleID = Bundle.main.bundleIdentifier ?? "unknown"
-        runtimeExecutablePath = Bundle.main.executablePath ?? "unknown"
+        setIfChanged(\.runtimeBundleID, Bundle.main.bundleIdentifier ?? "unknown")
+        setIfChanged(\.runtimeExecutablePath, Bundle.main.executablePath ?? "unknown")
     }
 
     private func logPermissionStateIfNeeded() {
@@ -217,18 +226,39 @@ final class PermissionService: ObservableObject {
         GeometryDebug.log("permissions accessibility=\(state.accessibilityTrusted) inputMonitoring=\(state.inputMonitoringAllowed) screenRecording=\(state.screenRecordingAllowed) bundle=\(state.runtimeBundleID) executable=\(state.runtimeExecutablePath)")
     }
 
-    private func updateScreenRecordingStatus(preflightAllowed: Bool) {
-        screenRecordingAllowed = preflightAllowed
-        if preflightAllowed {
-            screenRecordingNeedsRelaunch = false
-            screenRecordingWasRequested = false
-            screenRecordingStatus = "Enabled"
-        } else if screenRecordingWasRequested || screenRecordingNeedsRelaunch {
-            screenRecordingNeedsRelaunch = true
-            screenRecordingStatus = "If AutoComp is enabled in System Settings, relaunch it to apply Screen Recording."
-        } else {
-            screenRecordingStatus = PermissionKind.screenRecording.baselineDescription
+    private func updateInputMonitoringStatus(allowed: Bool) {
+        setIfChanged(\.inputMonitoringAllowed, allowed)
+        if allowed {
+            setIfChanged(\.inputMonitoringStatus, "Enabled")
+        } else if inputMonitoringStatus != Self.inputMonitoringApprovalPrompt {
+            setIfChanged(\.inputMonitoringStatus, PermissionKind.inputMonitoring.baselineDescription)
         }
+    }
+
+    private func updateScreenRecordingStatus(preflightAllowed: Bool) {
+        if preflightAllowed {
+            setIfChanged(\.screenRecordingAllowed, true)
+            screenRecordingWasRequested = false
+            setIfChanged(\.screenRecordingNeedsRelaunch, false)
+            setIfChanged(\.screenRecordingStatus, "Enabled")
+        } else if screenRecordingWasRequested || screenRecordingNeedsRelaunch {
+            setIfChanged(\.screenRecordingAllowed, false)
+            setIfChanged(\.screenRecordingNeedsRelaunch, true)
+            setIfChanged(\.screenRecordingStatus, "If AutoComp is enabled in System Settings, relaunch it to apply Screen Recording.")
+        } else {
+            setIfChanged(\.screenRecordingAllowed, false)
+            setIfChanged(\.screenRecordingStatus, PermissionKind.screenRecording.baselineDescription)
+        }
+    }
+
+    private func setIfChanged<Value: Equatable>(
+        _ keyPath: ReferenceWritableKeyPath<PermissionService, Value>,
+        _ value: Value
+    ) {
+        guard self[keyPath: keyPath] != value else {
+            return
+        }
+        self[keyPath: keyPath] = value
     }
 
     private var stateSnapshot: PermissionStateSnapshot {

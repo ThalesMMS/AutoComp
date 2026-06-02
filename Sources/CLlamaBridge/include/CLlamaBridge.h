@@ -29,6 +29,19 @@ typedef struct AutoCompLlamaCacheDecision {
     int32_t common_prefix_tokens;
 } AutoCompLlamaCacheDecision;
 
+typedef struct AutoCompLlamaTokenizerProfile {
+    int32_t vocabulary_size;
+    int32_t vocabulary_type;
+    int32_t bos_token;
+    int32_t eos_token;
+    int32_t eot_token;
+    int32_t newline_token;
+    int32_t fim_prefix_token;
+    int32_t fim_suffix_token;
+    int32_t fim_middle_token;
+    bool supports_fill_in_middle;
+} AutoCompLlamaTokenizerProfile;
+
 void autocomp_llama_backend_init(void);
 void autocomp_llama_backend_free(void);
 const char *autocomp_llama_system_info(void);
@@ -61,6 +74,12 @@ AutoCompLlamaCacheDecision autocomp_llama_prompt_cache_decision(
     int32_t prompt_token_count,
     int32_t max_tokens,
     float temperature
+);
+
+bool autocomp_llama_model_tokenizer_profile(
+    const AutoCompLlamaModel *model,
+    AutoCompLlamaTokenizerProfile *profile,
+    AutoCompLlamaError *error
 );
 
 void autocomp_llama_model_free(AutoCompLlamaModel *model);

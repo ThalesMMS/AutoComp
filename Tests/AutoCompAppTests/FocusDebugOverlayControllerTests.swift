@@ -95,7 +95,8 @@ final class FocusDebugOverlayControllerTests: XCTestCase {
             focusedElementID: "field",
             textBeforeCursor: "Hello",
             selectedRange: NSRange(location: 5, length: 0),
-            caretRect: CGRect(x: 100, y: 100, width: 2, height: 20)
+            caretRect: CGRect(x: 100, y: 100, width: 2, height: 20),
+            caretGeometryQuality: .directCaret
         )
     }
 }

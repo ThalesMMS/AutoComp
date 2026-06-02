@@ -4,6 +4,32 @@ import AutoCompCore
 import XCTest
 
 final class KeyboardShortcutServiceTests: XCTestCase {
+    @MainActor
+    func testSuspendedPipelinePassesThroughShortcutsAndInputEvents() async throws {
+        let service = KeyboardShortcutService()
+        var commandCount = 0
+        var capturedEvents: [CapturedInputEvent] = []
+        service.configureHandlers(
+            onCommand: { _ in commandCount += 1 },
+            onInputEvent: { capturedEvents.append($0) }
+        )
+        service.setSuggestionActive(true)
+        service.setInteractionPipelineSuspended(true, reason: "open-panel")
+
+        let tab = try XCTUnwrap(CGEvent(keyboardEventSource: nil, virtualKey: 48, keyDown: true))
+        tab.flags = []
+        XCTAssertNotNil(service.handle(type: .keyDown, event: tab))
+
+        let text = try XCTUnwrap(CGEvent(keyboardEventSource: nil, virtualKey: 50, keyDown: true))
+        text.flags = []
+        XCTAssertNotNil(service.handle(type: .keyDown, event: text))
+
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(commandCount, 0)
+        XCTAssertEqual(capturedEvents, [])
+        XCTAssertFalse(service.isSuggestionActive)
+    }
+
     func testBacktickPassesThroughWhenSuggestionIsActive() throws {
         let service = KeyboardShortcutService()
         service.configureHandlers(onTab: {}, onAcceptAll: {})
@@ -516,6 +542,9 @@ final class KeyboardShortcutServiceTests: XCTestCase {
         XCTAssertFalse(CapturedInputEvent.tab.shouldClearSuggestion)
         XCTAssertFalse(CapturedInputEvent.acceptAll.shouldClearSuggestion)
         XCTAssertFalse(CapturedInputEvent.pointer.shouldSchedulePrediction)
+        XCTAssertFalse(CapturedInputEvent.shortcutMutation(keyCode: 55).mayPublishHostText)
+        XCTAssertFalse(CapturedInputEvent.shortcutMutation(keyCode: 8).mayPublishHostText)
+        XCTAssertTrue(CapturedInputEvent.shortcutMutation(keyCode: 9).mayPublishHostText)
     }
 
     @MainActor
@@ -574,18 +603,15 @@ final class KeyboardShortcutServiceTests: XCTestCase {
     }
 
     @MainActor
-    func testRapidTabIsConsumedDuringShortcutGraceAfterPresenterTemporarilyHides() async throws {
+    func testShortcutGraceDoesNotKeepTabOwnedAfterPresenterHides() async throws {
         let service = KeyboardShortcutService()
         let firstTab = expectation(description: "first tab")
-        let secondTab = expectation(description: "second tab")
         var tabCount = 0
         service.configureHandlers(
             onTab: {
                 tabCount += 1
                 if tabCount == 1 {
                     firstTab.fulfill()
-                } else if tabCount == 2 {
-                    secondTab.fulfill()
                 }
             },
             onAcceptAll: {}
@@ -599,9 +625,37 @@ final class KeyboardShortcutServiceTests: XCTestCase {
 
         let secondEvent = try XCTUnwrap(CGEvent(keyboardEventSource: nil, virtualKey: 48, keyDown: true))
         secondEvent.flags = []
-        XCTAssertNil(service.handle(type: .keyDown, event: secondEvent))
+        XCTAssertNotNil(service.handle(type: .keyDown, event: secondEvent))
 
-        await fulfillment(of: [firstTab, secondTab], timeout: 1)
+        await fulfillment(of: [firstTab], timeout: 1)
+        try await waitForShortcutDispatch()
+        XCTAssertEqual(tabCount, 1)
+    }
+
+    @MainActor
+    func testShortcutOwnershipPassThroughDecisionDoesNotSuppressReleaseOrDispatch() async throws {
+        let service = KeyboardShortcutService()
+        var commands: [KeyboardShortcutCommand] = []
+        service.configureHandlers(
+            onCommand: { command in
+                commands.append(command)
+            },
+            shortcutOwnershipDecision: { command in
+                command == .acceptNextWord
+                    ? .passThrough(reason: "stale-context")
+                    : .consume(reason: "valid-suggestion")
+            }
+        )
+        service.setSuggestionActive(true)
+
+        let press = try ShortcutLeakCase(command: .acceptNextWord, suggestionActive: true).makePressEvent()
+        XCTAssertNotNil(service.handle(type: .keyDown, event: press))
+
+        let release = try ShortcutLeakCase(command: .acceptNextWord, suggestionActive: true).makeReleaseEvent()
+        XCTAssertNotNil(service.handle(type: .keyUp, event: release))
+
+        try await waitForShortcutDispatch()
+        XCTAssertEqual(commands, [])
     }
 
     func testClearingShortcutGraceLetsTabPassThroughAfterSuggestionIsExhausted() throws {

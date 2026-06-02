@@ -1,4 +1,5 @@
 import AutoCompCore
+import Foundation
 
 /// Reports whether the currently-selected completion backend is configured enough to be usable.
 ///
@@ -25,8 +26,8 @@ struct BackendConfigurationHealthCheck {
                     id: Self.id,
                     title: "Backend Configuration",
                     status: .fail,
-                    summary: "Missing \(missingText)",
-                    details: "AutoComp is set to use a remote backend, but required settings are missing (\(missingText)). Open Backend Settings to finish setup. Your prompts are only sent to the configured backend when you request a completion.",
+                    summary: "Completions need \(missingText).",
+                    details: "Technical cause: the remote backend is selected, but required settings are missing (\(missingText)). Open Backend Settings to finish setup. Prompts are sent only when you request a completion.",
                     actions: [
                         HealthRemediationCatalog.openBackendSettings,
                         HealthRemediationCatalog.showBackendConfigurationInstructions
@@ -38,8 +39,8 @@ struct BackendConfigurationHealthCheck {
                 id: Self.id,
                 title: "Backend Configuration",
                 status: .ok,
-                summary: "Remote backend configured",
-                details: "AutoComp will send completion requests to \(baseURL) using model \(model) when you type in supported apps.",
+                summary: "Completions use the remote model.",
+                details: "Technical details: completion requests go to \(baseURL) using model \(model) when you type in supported apps.",
                 actions: [
                     HealthRemediationCatalog.openBackendSettings
                 ]
@@ -52,8 +53,41 @@ struct BackendConfigurationHealthCheck {
                     id: Self.id,
                     title: "Backend Configuration",
                     status: .fail,
-                    summary: "No local model selected",
-                    details: "AutoComp is set to use the local Llama runtime, but no model file path is configured.",
+                    summary: "Choose a local model file.",
+                    details: "Technical cause: the local runtime is selected, but no model file path is configured.",
+                    actions: [
+                        HealthRemediationCatalog.openBackendSettings,
+                        HealthRemediationCatalog.showBackendConfigurationInstructions
+                    ]
+                )
+            }
+
+            let modelURL = URL(fileURLWithPath: modelPath)
+            guard FileManager.default.fileExists(atPath: modelPath) else {
+                return HealthCheck(
+                    id: Self.id,
+                    title: "Backend Configuration",
+                    status: .fail,
+                    summary: "Selected local model is missing.",
+                    details: "Technical cause: \(modelURL.lastPathComponent) is selected, but the file is no longer installed. Import, download, or choose another GGUF model.",
+                    actions: [
+                        HealthRemediationCatalog.openBackendSettings,
+                        HealthRemediationCatalog.showBackendConfigurationInstructions
+                    ]
+                )
+            }
+
+            do {
+                try ModelFileValidator.validateGGUFFile(at: modelURL)
+            } catch {
+                let message = ((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)
+                    .replacingOccurrences(of: modelPath, with: modelURL.lastPathComponent)
+                return HealthCheck(
+                    id: Self.id,
+                    title: "Backend Configuration",
+                    status: .fail,
+                    summary: "Selected local model is not valid.",
+                    details: "Technical cause for \(modelURL.lastPathComponent): \(message)",
                     actions: [
                         HealthRemediationCatalog.openBackendSettings,
                         HealthRemediationCatalog.showBackendConfigurationInstructions
@@ -65,8 +99,8 @@ struct BackendConfigurationHealthCheck {
                 id: Self.id,
                 title: "Backend Configuration",
                 status: .ok,
-                summary: "Local model configured",
-                details: "Local model path: \(modelPath)",
+                summary: "Local completions are configured.",
+                details: "Technical details: local model \(modelURL.lastPathComponent) is installed and readable.",
                 actions: [
                     HealthRemediationCatalog.openBackendSettings
                 ]
@@ -78,8 +112,8 @@ struct BackendConfigurationHealthCheck {
                 id: Self.id,
                 title: "Backend Configuration",
                 status: .ok,
-                summary: "Apple Intelligence selected",
-                details: "Apple Intelligence availability depends on your macOS version and hardware. If unavailable, enable remote fallback or choose another backend.",
+                summary: "Apple Intelligence is selected.",
+                details: "Technical details: availability depends on your macOS version and hardware. If unavailable, enable remote fallback or choose another backend.",
                 actions: [
                     HealthRemediationCatalog.openBackendSettings
                 ]

@@ -1,3 +1,4 @@
+import AutoCompCore
 import Foundation
 
 struct PasteboardInsertionRecoverySnapshot: Codable, Equatable {
@@ -78,8 +79,7 @@ final class PasteboardInsertionRecoveryStore: @unchecked Sendable {
     }
 
     static var defaultDirectory: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("AutoComp", isDirectory: true)
+        AutoCompUserDirectories.appSupportDirectory
             .appendingPathComponent("PasteboardInsertionRecovery", isDirectory: true)
     }
 }

@@ -24,6 +24,35 @@ final class OptionalUIScriptTests: XCTestCase {
         }
     }
 
+    func testSettingsSmokeAutoRunsConnectionProbeWithoutClickingSwiftUIHierarchy() throws {
+        let script = try String(
+            contentsOf: try packageRoot().appendingPathComponent("script/ui_smoke_test.sh"),
+            encoding: .utf8
+        )
+        let modelSettings = try String(
+            contentsOf: try packageRoot().appendingPathComponent("Sources/AutoCompApp/Views/Settings/Sections/ModelSettingsView.swift"),
+            encoding: .utf8
+        )
+        let environment = try String(
+            contentsOf: try packageRoot().appendingPathComponent("Sources/AutoCompApp/App/AutoCompAppEnvironment.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(modelSettings.contains("runSettingsConnectionUITestIfNeeded()"))
+        XCTAssertTrue(modelSettings.contains("controller.shouldRunSettingsConnectionUITest"))
+        XCTAssertTrue(modelSettings.contains("controller.settingsConnectionUITestBackendSettings"))
+        XCTAssertTrue(environment.contains("CompletionBackendSettings(remoteAPIKey: \"apikey\")"))
+        XCTAssertTrue(environment.contains("runsSettingsConnectionUITest = arguments.contains(\"--ui-test-settings\")"))
+        XCTAssertTrue(script.contains("AUTOCOMP_REMOTE_API_KEY=\"apikey\""))
+        XCTAssertTrue(script.contains("AUTOCOMP_REMOTE_MODEL=\"default\""))
+        XCTAssertTrue(script.contains("\"default\", \"Remote backend is reachable.\""))
+        XCTAssertTrue(script.contains("on modelWindowText()"))
+        XCTAssertTrue(script.contains("on waitForModelSmoke()"))
+        XCTAssertFalse(script.contains("Qwen/Qwen3.6-35B-A3B"))
+        XCTAssertFalse(script.contains("clickButtonNamed"))
+        XCTAssertFalse(script.contains("button 1 of group 1 of scroll area"))
+    }
+
     func testAllowSkipWritesStructuredReportForMissingPrerequisites() throws {
         let root = try packageRoot()
         let outputDirectory = FileManager.default.temporaryDirectory

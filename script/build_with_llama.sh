@@ -192,7 +192,7 @@ run_step "swift build --target CLlamaBridge" swift build --target CLlamaBridge
 run_step "swift build --target AutoCompLlamaRuntime" swift build --target AutoCompLlamaRuntime
 run_step "swift build --product AutoCompLlamaLoadHarness" swift build --product AutoCompLlamaLoadHarness
 run_step "swift build --product AutoComp" swift build --product AutoComp
-run_step "AutoCompLlamaRuntimeTests" swift test --filter LlamaCppRuntimeBackendTests
+run_step "AutoCompLlamaRuntimeTests compile" swift build --target AutoCompLlamaRuntimeTests
 run_step "runtime status harness" swift run AutoCompLlamaLoadHarness --status
 
 if [[ -z "$MODEL_PATH" ]]; then

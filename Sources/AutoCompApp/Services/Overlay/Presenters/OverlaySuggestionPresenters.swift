@@ -200,7 +200,7 @@ final class MultiSuggestionPopupPresenter: VisualInlineSuggestionPresenting {
 final class VisualInlineOverlayPresenter: VisualInlineSuggestionPresenting {
     private var panel: NSPanel?
     private var contentView: InlineGhostTextView?
-    private var fontSizeResolver = GhostFontSizeResolver()
+    private var styleResolver = OverlayTextStyleResolver()
     private let maxWidth: CGFloat = 520
     private let shortcutSettingsStore: KeyboardShortcutSettingsStore
     private let hintsProvider: OverlayShortcutHintsProvider
@@ -214,7 +214,8 @@ final class VisualInlineOverlayPresenter: VisualInlineSuggestionPresenting {
     }
 
     func canPresent(_ suggestion: Suggestion, for context: TextContext) -> Bool {
-        layout(for: suggestion, context: context) != nil
+        let style = style(for: context)
+        return layout(for: suggestion, context: context, style: style) != nil
     }
 
     func show(_ suggestion: Suggestion, for context: TextContext) {
@@ -222,7 +223,8 @@ final class VisualInlineOverlayPresenter: VisualInlineSuggestionPresenting {
     }
 
     func update(_ suggestion: Suggestion, for context: TextContext) {
-        let resolution = layoutResolution(for: suggestion, context: context)
+        let style = style(for: context)
+        let resolution = layoutResolution(for: suggestion, context: context, style: style)
         guard let layout = resolution.layout else {
             GeometryDebug.log("tier=visualInlineOverlay rejected app=\(context.app.displayName) bundle=\(context.app.bundleID) reason=\(resolution.rejectionReason ?? "unknown") context=\(context.geometryDebugDescription)")
             hide()
@@ -234,7 +236,7 @@ final class VisualInlineOverlayPresenter: VisualInlineSuggestionPresenting {
         let contentView = contentView ?? makeContentView(for: panel)
         self.contentView = contentView
         let textDirection = TextDirectionDetector.direction(for: context.textBeforeCursor)
-        let font = font(for: context)
+        let font = style.font
         let ghostLayout = layout.ghostTextLayout ?? InlineGhostTextLayout.resolve(
             text: suggestion.visibleText,
             font: font,
@@ -252,26 +254,34 @@ final class VisualInlineOverlayPresenter: VisualInlineSuggestionPresenting {
         contentView.update(
             layout: ghostLayout,
             font: font,
-            textColor: ghostTextColor(),
+            textColor: style.textColor,
             textDirection: textDirection,
             acceptKeycapHint: hints.acceptNextWord
         )
         panel.setFrame(ghostLayout.panelFrame, display: true)
-        GeometryDebug.log("tier=visualInlineOverlay source=\(layout.source.rawValue) placement=\(ghostLayout.placementReason.rawValue) app=\(context.app.displayName) bundle=\(context.app.bundleID) panel=\(ghostLayout.panelFrame) context=\(context.geometryDebugDescription)")
+        GeometryDebug.log("tier=visualInlineOverlay source=\(layout.source.rawValue) styleSource=\(style.source.rawValue) placement=\(ghostLayout.placementReason.rawValue) app=\(context.app.displayName) bundle=\(context.app.bundleID) panel=\(ghostLayout.panelFrame) context=\(context.geometryDebugDescription)")
         panel.orderFrontRegardless()
     }
 
     func hide() {
         GeometryDebug.log("tier=visualInlineOverlay hide hasPanel=\(panel != nil)")
-        fontSizeResolver.reset()
+        styleResolver.reset()
         panel?.orderOut(nil)
     }
 
-    private func layout(for suggestion: Suggestion, context: TextContext) -> InlinePreviewLayout? {
-        layoutResolution(for: suggestion, context: context).layout
+    private func layout(
+        for suggestion: Suggestion,
+        context: TextContext,
+        style: ResolvedOverlayTextStyle
+    ) -> InlinePreviewLayout? {
+        layoutResolution(for: suggestion, context: context, style: style).layout
     }
 
-    private func layoutResolution(for suggestion: Suggestion, context: TextContext) -> InlinePreviewResolution {
+    private func layoutResolution(
+        for suggestion: Suggestion,
+        context: TextContext,
+        style: ResolvedOverlayTextStyle
+    ) -> InlinePreviewResolution {
         // Guardrail: only attempt inline overlay placement when caret geometry is trusted.
         // Otherwise force a safe popup (SimpleCaretPopup) or suppress entirely.
         let usesFocusedElementFallback = context.caretRect == nil
@@ -306,7 +316,7 @@ final class VisualInlineOverlayPresenter: VisualInlineSuggestionPresenting {
 
         let screen = OverlayGeometry.screen(containingAccessibilityRect: anchorRect)
         let mainScreenFrame = NSScreen.screens.first?.frame ?? screen.frame
-        let font = font(for: context)
+        let font = style.font
         let textDirection = TextDirectionDetector.direction(for: context.textBeforeCursor)
         let resolution = InlinePreviewGeometry.resolve(
             context: context,
@@ -339,8 +349,8 @@ final class VisualInlineOverlayPresenter: VisualInlineSuggestionPresenting {
         ).resolution
     }
 
-    private func preferredSize(for text: String, context: TextContext, resolvedFont: NSFont? = nil) -> NSSize {
-        let font = resolvedFont ?? font(for: context)
+    private func preferredSize(for text: String, context: TextContext, resolvedFont: NSFont) -> NSSize {
+        let font = resolvedFont
         let attributes: [NSAttributedString.Key: Any] = [.font: font]
         let measured = (text as NSString).size(withAttributes: attributes)
         let referenceHeight = InlinePreviewGeometry.referenceHeight(for: context)
@@ -350,12 +360,8 @@ final class VisualInlineOverlayPresenter: VisualInlineSuggestionPresenting {
         )
     }
 
-    private func font(for context: TextContext) -> NSFont {
-        fontSizeResolver.font(for: context)
-    }
-
-    private func ghostTextColor() -> NSColor {
-        GhostTextColorResolver.color()
+    private func style(for context: TextContext) -> ResolvedOverlayTextStyle {
+        styleResolver.style(for: context, appearance: NSApp?.effectiveAppearance)
     }
 
     private func makePanel() -> NSPanel {

@@ -94,6 +94,29 @@ private struct ProviderInvocationTimeoutError: Error {}
 
 private extension CompletionProvider {
     func completeSuggestions(request: ProviderInvocation.Request) async throws -> [Suggestion] {
+        if let provider = self as? any MultiplePersonalizationContextAwareCompletionProvider {
+            return try await provider.complete(
+                context: request.context,
+                privacySettings: request.privacySettings,
+                visualContext: request.visualContext,
+                clipboardContext: request.clipboardContext,
+                personalizationSamples: request.personalizationSamples,
+                options: request.options
+            )
+        }
+
+        if let provider = self as? any PersonalizationContextAwareCompletionProvider {
+            return [
+                try await provider.complete(
+                    context: request.context,
+                    privacySettings: request.privacySettings,
+                    visualContext: request.visualContext,
+                    clipboardContext: request.clipboardContext,
+                    personalizationSamples: request.personalizationSamples
+                )
+            ]
+        }
+
         if let provider = self as? any MultipleCompletionProvider {
             return try await provider.complete(
                 context: request.context,

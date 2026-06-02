@@ -11,7 +11,8 @@ final class UIFontPolicyTests: XCTestCase {
 
         for requiredText in [
             "AutoComp does not bundle custom fonts by default",
-            "Inline ghost text should use the system font",
+            "Inline ghost text should first use AX attributed text attributes when available",
+            "falls back to a system font sized from host field geometry",
             "size approximated from the host text field geometry",
             "system monospaced design",
             "license",
@@ -28,17 +29,21 @@ final class UIFontPolicyTests: XCTestCase {
             contentsOf: root.appendingPathComponent("Sources/AutoCompApp/Services/OverlayTextStyleResolvers.swift"),
             encoding: .utf8
         )
+        let axHelperSource = try String(
+            contentsOf: root.appendingPathComponent("Sources/AutoCompApp/Services/AXHelper.swift"),
+            encoding: .utf8
+        )
         let focusDebugSource = try String(
             contentsOf: root.appendingPathComponent("Sources/AutoCompApp/Services/FocusDebugOverlayController.swift"),
             encoding: .utf8
         )
-        let settingsSource = try String(
-            contentsOf: root.appendingPathComponent("Sources/AutoCompApp/Views/SettingsRootView.swift"),
-            encoding: .utf8
-        )
+        let settingsSource = try settingsSourceContents(packageRoot: root)
 
-        XCTAssertTrue(overlayStyleSource.contains(".systemFont(ofSize: fontSize(for: context))"))
-        XCTAssertFalse(overlayStyleSource.contains("NSFont(name:"))
+        XCTAssertTrue(axHelperSource.contains("AXAttributedStringForRange"))
+        XCTAssertTrue(overlayStyleSource.contains("case axAttributedString"))
+        XCTAssertTrue(overlayStyleSource.contains("case caretHeightFallback"))
+        XCTAssertTrue(overlayStyleSource.contains("case appProfileFallback"))
+        XCTAssertTrue(overlayStyleSource.contains("case systemDefault"))
         XCTAssertTrue(focusDebugSource.contains("design: .monospaced"))
         XCTAssertTrue(settingsSource.contains(".font(.system(.caption, design: .monospaced))"))
     }

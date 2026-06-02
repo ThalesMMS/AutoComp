@@ -433,6 +433,16 @@ struct SuggestionDiagnostics: Equatable {
                 reason: .poorGeometry,
                 action: "Focused field did not expose readable text."
             )
+        case .interactionPipelineSuspended:
+            focusFailure = FocusFailure(
+                status: .unsupported,
+                action: "Wait for the current panel to close."
+            )
+            recordLastDecision(
+                state: .paused,
+                reason: .poorGeometry,
+                action: "Wait for the current panel to close."
+            )
         }
     }
 

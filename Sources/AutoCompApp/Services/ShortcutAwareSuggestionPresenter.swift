@@ -15,16 +15,35 @@ final class ShortcutAwareSuggestionPresenter: SuggestionPresenter {
 
     func show(_ suggestion: Suggestion, for context: TextContext, mode: SuggestionDisplayMode) {
         previewCoordinator.show(suggestion, for: context, mode: mode)
-        setSuggestionActive(previewCoordinator.activeTier != .disabled)
+        let active = previewCoordinator.activeTier != .disabled
+        SuggestionPipelineLog.log("presenter-show", fields: [
+            "mode=\(mode.rawValue)",
+            "tier=\(previewCoordinator.activeTier)",
+            "active=\(active)",
+            "context=\(SuggestionPipelineLog.contextDescription(context))",
+            "suggestion=\(SuggestionPipelineLog.suggestionDescription(suggestion))"
+        ])
+        setSuggestionActive(active)
     }
 
     func update(_ suggestion: Suggestion, for context: TextContext, mode: SuggestionDisplayMode) {
         previewCoordinator.update(suggestion, for: context, mode: mode)
-        setSuggestionActive(previewCoordinator.activeTier != .disabled)
+        let active = previewCoordinator.activeTier != .disabled
+        SuggestionPipelineLog.log("presenter-update", fields: [
+            "mode=\(mode.rawValue)",
+            "tier=\(previewCoordinator.activeTier)",
+            "active=\(active)",
+            "context=\(SuggestionPipelineLog.contextDescription(context))",
+            "suggestion=\(SuggestionPipelineLog.suggestionDescription(suggestion))"
+        ])
+        setSuggestionActive(active)
     }
 
     func hide() {
         previewCoordinator.hide()
+        SuggestionPipelineLog.log("presenter-hide", fields: [
+            "tier=\(previewCoordinator.activeTier)"
+        ])
         setSuggestionActive(false)
     }
 }

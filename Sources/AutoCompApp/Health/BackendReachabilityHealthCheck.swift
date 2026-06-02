@@ -31,8 +31,8 @@ struct BackendReachabilityHealthCheck {
                 id: Self.id,
                 title: "Backend Reachability",
                 status: .unknown,
-                summary: "Not configured yet",
-                details: "Configure a remote Base URL and Model, then test the connection.",
+                summary: "Test after backend setup.",
+                details: "Technical cause: a remote Base URL and Model are required before the connection can be tested.",
                 actions: [
                     HealthRemediationCatalog.openBackendSettings,
                     HealthRemediationCatalog.retryBackendConnection
@@ -47,8 +47,8 @@ struct BackendReachabilityHealthCheck {
                 id: Self.id,
                 title: "Backend Reachability",
                 status: .ok,
-                summary: "Connected",
-                details: "Remote backend appears reachable. AutoComp will only contact it when generating completions.",
+                summary: "Completions can reach the backend.",
+                details: "Technical details: the remote backend appears reachable. AutoComp contacts it only when generating completions.",
                 actions: [
                     HealthRemediationCatalog.retryBackendConnection
                 ]
@@ -62,8 +62,8 @@ struct BackendReachabilityHealthCheck {
                 id: Self.id,
                 title: "Backend Reachability",
                 status: .fail,
-                summary: "Disconnected (\(reason))",
-                details: details,
+                summary: "Completions may fail until it responds.",
+                details: "Technical cause (\(reason)): \(details)",
                 actions: [
                     HealthRemediationCatalog.openBackendSettings,
                     HealthRemediationCatalog.retryBackendConnection
@@ -78,8 +78,8 @@ struct BackendReachabilityHealthCheck {
                 id: Self.id,
                 title: "Backend Reachability",
                 status: .warn,
-                summary: "Paused (\(reason))",
-                details: "AutoComp temporarily paused remote calls after repeated failures.\(countdown)",
+                summary: "Remote completions are paused.",
+                details: "Technical cause (\(reason)): AutoComp temporarily paused remote calls after repeated failures.\(countdown)",
                 actions: [
                     HealthRemediationCatalog.retryBackendConnection
                 ]
@@ -93,8 +93,8 @@ struct BackendReachabilityHealthCheck {
                 id: Self.id,
                 title: "Backend Reachability",
                 status: .ok,
-                summary: "Local backend ready",
-                details: "Local generation is enabled.",
+                summary: "Local completions are ready.",
+                details: "Technical details: local generation is enabled.",
                 actions: []
             )
         }
@@ -106,8 +106,8 @@ struct BackendReachabilityHealthCheck {
             id: Self.id,
             title: "Backend Reachability",
             status: .warn,
-            summary: "Not ready (\(reason))",
-            details: details,
+            summary: "Local completions may fail.",
+            details: "Technical cause (\(reason)): \(details)",
             actions: [
                 HealthRemediationCatalog.openBackendSettings
             ]
@@ -120,8 +120,8 @@ struct BackendReachabilityHealthCheck {
                 id: Self.id,
                 title: "Backend Reachability",
                 status: .ok,
-                summary: "Available",
-                details: "Apple Intelligence backend appears available.",
+                summary: "Apple Intelligence is ready.",
+                details: "Technical details: the Apple Intelligence backend appears available.",
                 actions: []
             )
         }
@@ -132,8 +132,8 @@ struct BackendReachabilityHealthCheck {
             id: Self.id,
             title: "Backend Reachability",
             status: .warn,
-            summary: "Unavailable (\(reason))",
-            details: details,
+            summary: "Apple Intelligence may not respond.",
+            details: "Technical cause (\(reason)): \(details)",
             actions: [
                 HealthRemediationCatalog.openBackendSettings
             ]

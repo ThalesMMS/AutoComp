@@ -18,43 +18,35 @@ struct MenuBarContentView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                Label("AutoComp", systemImage: "text.cursor")
-                    .font(.headline)
-
-                Spacer()
-
-                StatusDot(isEnabled: permissions.accessibilityTrusted && engine.isAutocompleteEnabled)
-            }
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text(engine.statusMessage)
-                    .font(.callout)
-                    .lineLimit(2)
-
-                if let latency = engine.lastLatencyMs {
-                    Text("\(latency) ms completion")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } else {
-                    Text("Local autocomplete is ready when Accessibility is enabled.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                Text(controller.completionBackendSummary)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-
-                LabeledContent("Backend", value: engine.backendStatusSummary.menuTitle)
-                    .font(.caption)
-            }
+        VStack(alignment: .leading, spacing: 12) {
+            MenuHeader(
+                title: menuStatusTitle,
+                subtitle: menuStatusSubtitle,
+                state: menuStatusState,
+                accessibilityLabel: menuStatusAccessibilityLabel
+            )
 
             Divider()
 
+            MenuPrimaryActions(
+                autocompleteEnabled: engine.isAutocompleteEnabled,
+                canCheckForUpdates: canCheckForUpdates,
+                toggleAutocomplete: {
+                    controller.toggleAutocompleteEnabled()
+                },
+                openSettings: {
+                    controller.showSettingsWindow()
+                },
+                runSetup: {
+                    controller.showOnboardingWindow()
+                },
+                openHealth: openHealthDashboard,
+                checkForUpdates: checkForUpdates
+            )
+
             if installationLocation.status.shouldWarn {
+                Divider()
+
                 InstallationLocationWarning(
                     status: installationLocation.status,
                     openApplications: {
@@ -68,56 +60,14 @@ struct MenuBarContentView: View {
                 Divider()
             }
 
-            MenuStatusSection(snapshot: menuStatusSnapshot)
+            MenuCompactSummarySection(
+                backend: backendSummaryTitle,
+                permissions: permissionSummaryTitle,
+                focusedApp: focusedAppTitle,
+                openDetails: openHealthDashboard
+            )
 
             Divider()
-
-            VStack(alignment: .leading, spacing: 5) {
-                Label("Diagnostics", systemImage: "stethoscope")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                ForEach(engine.diagnostics.menuRows) { row in
-                    HStack(alignment: .firstTextBaseline) {
-                        Text(row.title)
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                        Text(row.value)
-                            .font(.caption2)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    }
-                }
-            }
-
-            Divider()
-
-            Button {
-                controller.showOnboardingWindow()
-            } label: {
-                Label("Open Onboarding", systemImage: "sparkles")
-            }
-
-            Button {
-                controller.showSettingsWindow()
-            } label: {
-                Label("Settings", systemImage: "gearshape")
-            }
-
-            Button {
-                controller.showSettingsWindow()
-                controller.selectedSettingsSection = .health
-            } label: {
-                Label("Health", systemImage: SettingsSection.health.systemImage)
-            }
-
-            Button {
-                checkForUpdates()
-            } label: {
-                Label("Check for Updates...", systemImage: "arrow.down.circle")
-            }
-            .disabled(!canCheckForUpdates)
 
             Button {
                 engine.hideSuggestion()
@@ -126,48 +76,165 @@ struct MenuBarContentView: View {
             }
 
             Button {
-                controller.toggleAutocompleteEnabled()
-            } label: {
-                Label(
-                    engine.isAutocompleteEnabled ? "Disable AutoComp" : "Enable AutoComp",
-                    systemImage: engine.isAutocompleteEnabled ? "pause.circle" : "play.circle"
-                )
-            }
-
-            Divider()
-
-            Button {
                 NSApp.terminate(nil)
             } label: {
                 Label("Quit AutoComp", systemImage: "power")
             }
         }
         .padding()
-        .frame(width: 320)
+        .frame(width: 300)
     }
 
-    private var menuStatusSnapshot: MenuStatusSnapshot {
-        let focus = engine.diagnostics.focus
-        let decision = focus.map {
-            controller.compatibilityCatalog.decision(
-                bundleID: $0.bundleID,
-                domain: $0.domain,
-                userModeOverrides: controller.compatibilitySettings.loadModeOverrides()
-            )
+    private var menuStatusTitle: String {
+        if !engine.isAutocompleteEnabled {
+            return "Autocomplete off"
         }
+        if !permissions.accessibilityTrusted || !permissions.inputMonitoringAllowed {
+            return "Setup needed"
+        }
+        switch engine.backendStatusSummary.state {
+        case .connected:
+            return engine.diagnostics.focus == nil ? "Waiting for text" : "Ready"
+        case .paused:
+            return "Backend paused"
+        case .disconnected:
+            return "Backend issue"
+        }
+    }
 
-        return MenuStatusSnapshot.make(
-            accessibilityTrusted: permissions.accessibilityTrusted,
-            inputMonitoringAllowed: permissions.inputMonitoringAllowed,
-            backendStatusSummary: engine.backendStatusSummary,
-            inputMethod: engine.diagnostics.inputMethod,
-            focus: focus,
-            focusFailure: engine.diagnostics.focusFailure,
-            lastDecision: engine.diagnostics.lastDecision,
-            compatibilityDecision: decision,
-            autocompleteEnabled: engine.isAutocompleteEnabled,
-            productivityMetrics: controller.productivityMetricsStore.snapshot
-        )
+    private var menuStatusSubtitle: String {
+        if !engine.isAutocompleteEnabled {
+            return "Use the menu toggle when you need suggestions again."
+        }
+        if !permissions.accessibilityTrusted || !permissions.inputMonitoringAllowed {
+            return "Run setup to finish required permissions."
+        }
+        if let latency = engine.lastLatencyMs {
+            return "\(latency) ms last completion"
+        }
+        return engine.backendStatusSummary.menuTitle
+    }
+
+    private var menuStatusState: SettingsVisualState {
+        if !engine.isAutocompleteEnabled {
+            return .disabled
+        }
+        if !permissions.accessibilityTrusted || !permissions.inputMonitoringAllowed {
+            return .warning
+        }
+        return SettingsVisualState.backend(engine.backendStatusSummary.state)
+    }
+
+    private var menuStatusAccessibilityLabel: String {
+        "\(menuStatusTitle). \(menuStatusSubtitle)"
+    }
+
+    private var backendSummaryTitle: String {
+        engine.backendStatusSummary.menuTitle
+    }
+
+    private var permissionSummaryTitle: String {
+        let missingCount = [
+            permissions.accessibilityTrusted,
+            permissions.inputMonitoringAllowed
+        ].filter { !$0 }.count
+
+        switch missingCount {
+        case 0:
+            return "Ready"
+        case 1 where !permissions.accessibilityTrusted:
+            return "Accessibility needed"
+        case 1:
+            return "Input Monitoring needed"
+        default:
+            return "\(missingCount) required permissions missing"
+        }
+    }
+
+    private var focusedAppTitle: String {
+        if let focus = engine.diagnostics.focus {
+            return focus.appDisplayName
+        }
+        if let focusFailure = engine.diagnostics.focusFailure {
+            return focusFailure.status.rawValue.capitalized
+        }
+        return "No focused text field"
+    }
+
+    private func openHealthDashboard() {
+        controller.showSettingsWindow()
+        controller.selectedSettingsSection = .health
+    }
+}
+
+private struct MenuHeader: View {
+    let title: String
+    let subtitle: String
+    let state: SettingsVisualState
+    let accessibilityLabel: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "text.cursor")
+                .font(.title3)
+                .foregroundStyle(Color.accentColor)
+                .frame(width: 22)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("AutoComp")
+                    .font(.headline)
+                Text(title)
+                    .font(.callout.weight(.semibold))
+                    .lineLimit(1)
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+
+            Spacer(minLength: 0)
+
+            StatusDot(state: state, label: accessibilityLabel)
+        }
+    }
+}
+
+private struct MenuPrimaryActions: View {
+    let autocompleteEnabled: Bool
+    let canCheckForUpdates: Bool
+    let toggleAutocomplete: () -> Void
+    let openSettings: () -> Void
+    let runSetup: () -> Void
+    let openHealth: () -> Void
+    let checkForUpdates: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Button(action: toggleAutocomplete) {
+                Label(
+                    autocompleteEnabled ? "Disable Autocomplete" : "Enable Autocomplete",
+                    systemImage: autocompleteEnabled ? "pause.circle" : "play.circle"
+                )
+            }
+
+            Button(action: openSettings) {
+                Label("Open Settings...", systemImage: "gearshape")
+            }
+
+            Button(action: runSetup) {
+                Label("Run Setup...", systemImage: "sparkles")
+            }
+
+            Button(action: openHealth) {
+                Label("Health Dashboard", systemImage: SettingsSection.health.systemImage)
+            }
+
+            Button(action: checkForUpdates) {
+                Label("Check for Updates...", systemImage: "arrow.down.circle")
+            }
+            .disabled(!canCheckForUpdates)
+        }
     }
 }
 
@@ -210,46 +277,47 @@ private struct InstallationLocationWarning: View {
     }
 }
 
-private struct MenuStatusSection: View {
-    let snapshot: MenuStatusSnapshot
+private struct MenuCompactSummarySection: View {
+    let backend: String
+    let permissions: String
+    let focusedApp: String
+    let openDetails: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Label("Status", systemImage: "gauge")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Label("Summary", systemImage: "gauge")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
 
-            ForEach(snapshot.items) { item in
-                VStack(alignment: .leading, spacing: 1) {
-                    HStack(alignment: .firstTextBaseline) {
-                        Text(item.title)
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                        Text(item.value)
-                            .font(.caption2)
-                            .fontWeight(.semibold)
-                            .lineLimit(1)
-                    }
+                Spacer()
 
-                    Text(item.action)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                }
-                .help(item.action)
+                Button("View details...", action: openDetails)
+                    .font(.caption)
             }
+
+            MenuSummaryRow(title: "Backend", value: backend)
+            MenuSummaryRow(title: "Permissions", value: permissions)
+            MenuSummaryRow(title: "Focused app", value: focusedApp)
         }
     }
 }
 
-private struct StatusDot: View {
-    let isEnabled: Bool
+private struct MenuSummaryRow: View {
+    let title: String
+    let value: String
 
     var body: some View {
-        Circle()
-            .fill(isEnabled ? .green : .orange)
-            .frame(width: 9, height: 9)
-            .accessibilityLabel(isEnabled ? "Enabled" : "Needs Accessibility permission")
+        HStack(alignment: .firstTextBaseline) {
+            Text(title)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 10)
+            Text(value)
+                .font(.caption2.weight(.semibold))
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .multilineTextAlignment(.trailing)
+        }
     }
 }

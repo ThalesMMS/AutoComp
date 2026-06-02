@@ -39,6 +39,19 @@ final class LlamaCppRuntimeBackendTests: XCTestCase {
         }
     }
 
+    func testTokenizerProfileWithoutLoadedModelFailsClearly() async {
+        let backend = LlamaCppRuntimeBackend(loadVocabularyOnly: true)
+
+        do {
+            _ = try await backend.tokenizerProfile()
+            XCTFail("Expected tokenizer profile error")
+        } catch let error as LocalLlamaError {
+            XCTAssertEqual(error, .runtimeUnavailable)
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
     func testModelAboveConfiguredMemoryLimitFailsBeforeLoading() async throws {
         let modelURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("oversized-\(UUID().uuidString).gguf")

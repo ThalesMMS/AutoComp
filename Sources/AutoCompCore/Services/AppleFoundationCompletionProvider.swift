@@ -48,7 +48,7 @@ public struct AppleFoundationModelAvailability: Equatable, Sendable {
     )
 }
 
-public struct AppleFoundationCompletionProvider: ClipboardContextAwareCompletionProvider {
+public struct AppleFoundationCompletionProvider: PersonalizationContextAwareCompletionProvider {
     public let requestFactory: CompletionRequestFactory
     public let maxTokens: Int
     public let stopSequences: CompletionStopSequences
@@ -89,6 +89,22 @@ public struct AppleFoundationCompletionProvider: ClipboardContextAwareCompletion
         visualContext: VisualContextSnapshot?,
         clipboardContext: ClipboardContextSnapshot?
     ) async throws -> Suggestion {
+        try await complete(
+            context: context,
+            privacySettings: privacySettings,
+            visualContext: visualContext,
+            clipboardContext: clipboardContext,
+            personalizationSamples: []
+        )
+    }
+
+    public func complete(
+        context: TextContext,
+        privacySettings: PrivacySettings,
+        visualContext: VisualContextSnapshot?,
+        clipboardContext: ClipboardContextSnapshot?,
+        personalizationSamples: [PersonalizationSample]
+    ) async throws -> Suggestion {
         let startedAt = ContinuousClock.now
         let completionRequest = requestFactory.makeRequest(
             for: context,
@@ -101,7 +117,8 @@ public struct AppleFoundationCompletionProvider: ClipboardContextAwareCompletion
             ),
             privacySettings: privacySettings,
             visualContext: visualContext,
-            clipboardContext: clipboardContext
+            clipboardContext: clipboardContext,
+            personalizationSamples: personalizationSamples
         )
 
         let rawText: String

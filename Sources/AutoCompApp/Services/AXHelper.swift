@@ -425,6 +425,36 @@ struct AXHelper {
         return nil
     }
 
+    func attributedStringForRange(from element: AXUIElement, range: CFRange) -> NSAttributedString? {
+        guard range.location >= 0, range.length > 0 else {
+            return nil
+        }
+
+        var cfRange = range
+        guard let axRange = AXValueCreate(.cfRange, &cfRange) else {
+            return nil
+        }
+
+        var value: CFTypeRef?
+        let status = AXUIElementCopyParameterizedAttributeValue(
+            element,
+            "AXAttributedStringForRange" as CFString,
+            axRange,
+            &value
+        )
+
+        guard status == .success, let value else {
+            return nil
+        }
+        if let attributedString = value as? NSAttributedString {
+            return attributedString
+        }
+        if let string = value as? String, !string.isEmpty {
+            return NSAttributedString(string: string)
+        }
+        return nil
+    }
+
     private func supportsAttribute(_ attribute: String, from element: AXUIElement) -> Bool {
         var namesRef: CFArray?
         let status = AXUIElementCopyAttributeNames(element, &namesRef)

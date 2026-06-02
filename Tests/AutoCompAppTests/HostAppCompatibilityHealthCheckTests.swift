@@ -9,7 +9,7 @@ final class HostAppCompatibilityHealthCheckTests: XCTestCase {
 
         XCTAssertEqual(result.id, HostAppCompatibilityHealthCheck.id)
         XCTAssertEqual(result.status, .unknown)
-        XCTAssertEqual(result.summary, "No focused app")
+        XCTAssertEqual(result.summary, "Focus an app to check support.")
         XCTAssertTrue(result.actions.isEmpty)
     }
 
@@ -35,7 +35,7 @@ final class HostAppCompatibilityHealthCheckTests: XCTestCase {
         let result = check.evaluate()
 
         XCTAssertEqual(result.status, .fail)
-        XCTAssertEqual(result.summary, "Disabled")
+        XCTAssertEqual(result.summary, "Suggestions are off here.")
         XCTAssertTrue((result.details ?? "").contains("Thunderbird"))
         XCTAssertTrue((result.details ?? "").contains("org.mozilla.thunderbird"))
         XCTAssertTrue(result.actions.contains(HealthRemediationCatalog.openCompatibilitySettings))
@@ -68,7 +68,7 @@ final class HostAppCompatibilityHealthCheckTests: XCTestCase {
         let result = check.evaluate()
 
         XCTAssertEqual(result.status, .warn)
-        XCTAssertEqual(result.summary, "Manual only")
+        XCTAssertEqual(result.summary, "Use the manual trigger here.")
         XCTAssertTrue((result.details ?? "").contains("manual trigger"))
         XCTAssertTrue(result.actions.contains(HealthRemediationCatalog.openCompatibilitySettings))
     }
@@ -100,7 +100,7 @@ final class HostAppCompatibilityHealthCheckTests: XCTestCase {
         let result = check.evaluate()
 
         XCTAssertEqual(result.status, .fail)
-        XCTAssertEqual(result.summary, "Disabled")
+        XCTAssertEqual(result.summary, "Suggestions are off here.")
         XCTAssertTrue(result.actions.contains(HealthRemediationCatalog.openCompatibilitySettings))
     }
 
@@ -126,7 +126,7 @@ final class HostAppCompatibilityHealthCheckTests: XCTestCase {
         let result = check.evaluate()
 
         XCTAssertEqual(result.status, .ok)
-        XCTAssertEqual(result.summary, "Enabled")
+        XCTAssertEqual(result.summary, "Automatic suggestions are on here.")
         XCTAssertTrue(result.actions.contains(HealthRemediationCatalog.openCompatibilitySettings))
     }
 }
