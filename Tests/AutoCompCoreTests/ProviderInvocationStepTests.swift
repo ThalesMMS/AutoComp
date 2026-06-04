@@ -4,19 +4,38 @@ import XCTest
 
 final class ProviderInvocationStepTests: XCTestCase {
     func testPublishesSuggestion() async {
-        let provider = FakeProvider(result: .success(.init(baseContextID: UUID(), visibleText: "hello", latencyMs: 0)))
-        let step = ProviderInvocationStep(provider: provider) { _ in
-            ProviderInvocation.Request(context: .init(app: .init(bundleID: "com.test", displayName: "Test", processID: 1), focusedElementID: "field", textBeforeCursor: "a", textAfterCursor: ""))
-        }
+        let textContext = Self.textContext()
+        let provider = FakeProvider(result: .success(.init(baseContextID: textContext.id, visibleText: "hello", latencyMs: 0)))
+        let step = ProviderInvocationStep(provider: provider)
 
-        var context = SuggestionPipeline.RequestContext()
+        var context = SuggestionPipeline.RequestContext(
+            textContext: textContext,
+            privacySettings: PrivacySettings()
+        )
         let outcome = await step.handle(context: &context)
 
         switch outcome {
         case .publish(let suggestion):
             XCTAssertEqual(suggestion.visibleText, "hello")
+            XCTAssertEqual(context.suggestion, suggestion)
         default:
             XCTFail("Expected publish, got: \(outcome)")
+        }
+    }
+
+    func testDiscardsWhenTypedProviderRequestIsMissing() async {
+        let provider = FakeProvider(result: .success(.init(baseContextID: UUID(), visibleText: "hello", latencyMs: 0)))
+        let step = ProviderInvocationStep(provider: provider)
+
+        var context = SuggestionPipeline.RequestContext()
+        let outcome = await step.handle(context: &context)
+
+        switch outcome {
+        case .discard(let reason):
+            XCTAssertEqual(reason.kind, SuggestionPipeline.DiscardReason.Kind.ineligible)
+            XCTAssertEqual(reason.message, "Missing provider request")
+        default:
+            XCTFail("Expected discard, got: \(outcome)")
         }
     }
 
@@ -82,18 +101,13 @@ switch outcome {
             languageHint: nil,
             createdAt: Date(timeIntervalSince1970: 1)
         )
-        let step = ProviderInvocationStep(provider: provider) { _ in
-            ProviderInvocation.Request(
-                context: .init(
-                    app: .init(bundleID: "com.test", displayName: "Test", processID: 1),
-                    focusedElementID: "field",
-                    textBeforeCursor: "a"
-                ),
-                personalizationSamples: [sample]
-            )
-        }
+        let step = ProviderInvocationStep(provider: provider)
 
-        var context = SuggestionPipeline.RequestContext()
+        var context = SuggestionPipeline.RequestContext(
+            textContext: Self.textContext(),
+            privacySettings: PrivacySettings(),
+            personalizationSamples: [sample]
+        )
         let outcome = await step.handle(context: &context)
 
         switch outcome {
@@ -124,6 +138,15 @@ switch outcome {
         default:
             XCTFail("Expected cancelled discard, got: \(outcome)")
         }
+    }
+
+    private static func textContext() -> TextContext {
+        TextContext(
+            app: .init(bundleID: "com.test", displayName: "Test", processID: 1),
+            focusedElementID: "field",
+            textBeforeCursor: "a",
+            textAfterCursor: ""
+        )
     }
 }
 

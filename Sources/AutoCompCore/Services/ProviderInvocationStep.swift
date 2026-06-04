@@ -16,7 +16,7 @@ public struct ProviderInvocationStep: SuggestionPipeline.Step {
         provider: any CompletionProvider,
         timeout: Duration? = nil,
         errorMapper: ProviderInvocationErrorMapper = ProviderInvocationErrorMapper(),
-        requestProvider: @escaping @Sendable (SuggestionPipeline.RequestContext) -> ProviderInvocation.Request?
+        requestProvider: @escaping @Sendable (SuggestionPipeline.RequestContext) -> ProviderInvocation.Request? = { $0.providerInvocationRequest }
     ) {
         self.provider = provider
         self.timeout = timeout
@@ -56,6 +56,7 @@ public struct ProviderInvocationStep: SuggestionPipeline.Step {
                 return .discard(.init(kind: .emptyResponse, message: "Empty completion"))
             }
 
+            context.suggestion = suggestion
             return .publish(suggestion)
         } catch is CancellationError {
             return .discard(.cancelled)

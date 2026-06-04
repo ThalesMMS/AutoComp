@@ -2,14 +2,36 @@ import AppKit
 import AutoCompCore
 
 @MainActor
-final class UnavailableNativeInlinePresenter: NativeInlineSuggestionPresenting {
+final class SystemNativeInlineFallbackPresenter: NativeInlineSuggestionPresenting {
+    static let unsupportedReason = "cross-app-native-inline-unavailable"
+    static let fallbackDiagnostic = FallbackDiagnostic(
+        symbol: "SystemNativeInlineFallbackPresenter",
+        classification: .platformUnavailable,
+        reason: unsupportedReason,
+        userMessage: "Native inline presentation is unavailable for cross-app text fields; AutoComp uses overlay tiers instead.",
+        remediation: "Use visual inline, caret popup, or mirror overlay presentation until a host-specific native inline integration is available."
+    )
+
     func canPresent(_ suggestion: Suggestion, for context: TextContext) -> Bool {
-        false
+        availability(for: suggestion, context: context).canPresent
     }
 
-    func show(_ suggestion: Suggestion, for context: TextContext) {}
-    func update(_ suggestion: Suggestion, for context: TextContext) {}
-    func hide() {}
+    func availability(for suggestion: Suggestion, context: TextContext) -> NativeInlinePresentationAvailability {
+        GeometryDebug.log("tier=nativeInline unavailable reason=\(Self.unsupportedReason) app=\(context.app.displayName) bundle=\(context.app.bundleID) context=\(context.geometryDebugDescription)")
+        return .unsupported(reason: Self.unsupportedReason)
+    }
+
+    func show(_ suggestion: Suggestion, for context: TextContext) {
+        GeometryDebug.log("tier=nativeInline ignored action=show reason=\(Self.unsupportedReason) app=\(context.app.displayName) bundle=\(context.app.bundleID)")
+    }
+
+    func update(_ suggestion: Suggestion, for context: TextContext) {
+        GeometryDebug.log("tier=nativeInline ignored action=update reason=\(Self.unsupportedReason) app=\(context.app.displayName) bundle=\(context.app.bundleID)")
+    }
+
+    func hide() {
+        GeometryDebug.log("tier=nativeInline hide reason=\(Self.unsupportedReason)")
+    }
 }
 
 @MainActor

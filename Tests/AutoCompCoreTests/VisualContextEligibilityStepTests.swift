@@ -14,7 +14,7 @@ final class VisualContextEligibilityStepTests: XCTestCase {
         let outcome = await step.handle(context: &context)
 
         XCTAssertEqual(outcome, .continue)
-        let decision = context.userInfo[VisualContextEligibilityStep<String>.decisionUserInfoKey] as? VisualContextEligibilityStep<String>.Decision
+        let decision = context.visualContextEligibilityDecision
         XCTAssertEqual(decision, .ineligible(reason: "disabled"))
     }
 
@@ -30,7 +30,7 @@ final class VisualContextEligibilityStepTests: XCTestCase {
         let outcome = await step.handle(context: &context)
 
         XCTAssertEqual(outcome, .continue)
-        let decision = context.userInfo[VisualContextEligibilityStep<String>.decisionUserInfoKey] as? VisualContextEligibilityStep<String>.Decision
+        let decision = context.visualContextEligibilityDecision
         XCTAssertEqual(decision, .ineligible(reason: "unavailable"))
     }
 
@@ -46,7 +46,7 @@ final class VisualContextEligibilityStepTests: XCTestCase {
         let outcome = await step.handle(context: &context)
 
         XCTAssertEqual(outcome, .continue)
-        let decision = context.userInfo[VisualContextEligibilityStep<String>.decisionUserInfoKey] as? VisualContextEligibilityStep<String>.Decision
+        let decision = context.visualContextEligibilityDecision
         XCTAssertEqual(decision, .eligible)
     }
 
@@ -62,7 +62,7 @@ final class VisualContextEligibilityStepTests: XCTestCase {
         var context = SuggestionPipeline.RequestContext()
         _ = await step.handle(context: &context)
 
-        let decision = context.userInfo[VisualContextEligibilityStep<String>.decisionUserInfoKey] as? VisualContextEligibilityStep<String>.Decision
+        let decision = context.visualContextEligibilityDecision
         XCTAssertEqual(decision, .ineligible(reason: "screen-recording-off"))
     }
 
@@ -78,7 +78,7 @@ final class VisualContextEligibilityStepTests: XCTestCase {
         var context = SuggestionPipeline.RequestContext()
         _ = await step.handle(context: &context)
 
-        let decision = context.userInfo[VisualContextEligibilityStep<String>.decisionUserInfoKey] as? VisualContextEligibilityStep<String>.Decision
+        let decision = context.visualContextEligibilityDecision
         XCTAssertEqual(decision, .ineligible(reason: "app-domain-disabled"))
     }
 
@@ -94,7 +94,7 @@ final class VisualContextEligibilityStepTests: XCTestCase {
         var context = SuggestionPipeline.RequestContext()
         _ = await step.handle(context: &context)
 
-        let decision = context.userInfo[VisualContextEligibilityStep<String>.decisionUserInfoKey] as? VisualContextEligibilityStep<String>.Decision
+        let decision = context.visualContextEligibilityDecision
         XCTAssertEqual(decision, .ineligible(reason: "secure-field"))
     }
 
@@ -110,7 +110,7 @@ final class VisualContextEligibilityStepTests: XCTestCase {
         var context = SuggestionPipeline.RequestContext()
         _ = await step.handle(context: &context)
 
-        let decision = context.userInfo[VisualContextEligibilityStep<String>.decisionUserInfoKey] as? VisualContextEligibilityStep<String>.Decision
+        let decision = context.visualContextEligibilityDecision
         XCTAssertEqual(decision, .ineligible(reason: "autocomplete-ineligible"))
     }
 }

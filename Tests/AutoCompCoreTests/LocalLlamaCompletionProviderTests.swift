@@ -2,6 +2,35 @@ import AutoCompCore
 import XCTest
 
 final class LocalLlamaCompletionProviderTests: XCTestCase {
+    func testUnavailableRuntimeBackendExposesOptionalBuildDiagnostic() async throws {
+        let modelURL = try makeTemporaryModelFile()
+        let backend = UnavailableLocalLlamaRuntimeBackend()
+        let runtime = LocalLlamaRuntimeCore(backend: backend)
+
+        XCTAssertEqual(backend.fallbackDiagnostic.classification, .optionalBuildFeature)
+        XCTAssertEqual(backend.fallbackDiagnostic.reason, "llama-runtime-not-linked")
+        XCTAssertEqual(backend.fallbackDiagnostic.userMessage, "Local Llama runtime is unavailable in this build.")
+
+        do {
+            try await runtime.load(configuration: LocalLlamaConfiguration(modelPath: modelURL.path))
+            XCTFail("Expected runtime unavailable")
+        } catch let error as LocalLlamaError {
+            XCTAssertEqual(error, .runtimeUnavailable)
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        let failedStatus = await runtime.status()
+        XCTAssertEqual(
+            failedStatus,
+            LocalLlamaRuntimeStatus(
+                state: .failed,
+                modelPath: modelURL.path,
+                message: backend.fallbackDiagnostic.userMessage
+            )
+        )
+    }
+
     func testLoadedModelIsReusedWhenModelFileDisappears() async throws {
         let modelURL = try makeTemporaryModelFile()
         let backend = FakeLocalLlamaRuntimeBackend(rawText: "Completion:\n still works")

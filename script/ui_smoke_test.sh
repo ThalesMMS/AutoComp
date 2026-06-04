@@ -21,21 +21,25 @@ on appendAttribute(e, attributeName, currentText)
   end tell
 end appendAttribute
 
+on collectElementText(e, currentText)
+  tell application "System Events"
+    set found to my appendAttribute(e, "name", currentText)
+    set found to my appendAttribute(e, "value", found)
+    try
+      repeat with child in UI elements of e
+        set found to my collectElementText(child, found)
+      end repeat
+    end try
+    return found
+  end tell
+end collectElementText
+
 on modelWindowText()
   tell application "System Events"
     try
       tell process "AutoComp"
-        if not (exists window "Model") then return ""
-        set found to ""
-        tell scroll area 1 of group 2 of splitter group 1 of group 1 of window "Model"
-          repeat with sectionGroup in groups
-            repeat with e in UI elements of sectionGroup
-              set found to my appendAttribute(e, "name", found)
-              set found to my appendAttribute(e, "value", found)
-            end repeat
-          end repeat
-        end tell
-        return found
+        if not (exists window 1) then return ""
+        return my collectElementText(window 1, "")
       end tell
     on error
       return ""
@@ -53,7 +57,7 @@ end hasAllRequiredText
 
 on waitForModelSmoke()
   tell application "System Events"
-    repeat 60 times
+    repeat 180 times
       if exists process "AutoComp" then
         set foundText to my modelWindowText()
         if my hasAllRequiredText(foundText) then return "Model smoke ready"

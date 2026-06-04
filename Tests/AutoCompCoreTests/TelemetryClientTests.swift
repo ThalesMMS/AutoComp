@@ -58,6 +58,16 @@ final class TelemetryClientTests: XCTestCase {
         client.deleteAll()
     }
 
+    func testNoopAndDisabledTelemetryExposePrivacyDiagnostics() {
+        XCTAssertEqual(NoopTelemetryEventSink.fallbackDiagnostic.classification, .privacyDisabled)
+        XCTAssertEqual(NoopTelemetryEventSink.fallbackDiagnostic.reason, "telemetry-sink-not-configured")
+        XCTAssertTrue(NoopTelemetryEventSink.fallbackDiagnostic.userMessage.contains("Telemetry events are discarded"))
+
+        XCTAssertEqual(DisabledTelemetryClient.fallbackDiagnostic.classification, .privacyDisabled)
+        XCTAssertEqual(DisabledTelemetryClient.fallbackDiagnostic.reason, "telemetry-disabled-by-policy")
+        XCTAssertTrue(DisabledTelemetryClient.fallbackDiagnostic.userMessage.contains("Telemetry is disabled"))
+    }
+
     private func sampleInput(name: String = "remote-backend-probe-failed") -> TelemetryEventInput {
         TelemetryEventInput(
             name: name,

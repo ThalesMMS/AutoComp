@@ -24,16 +24,37 @@ done
 
 LOG_FILE="/tmp/autocomp_inline_preview_geometry.log"
 rm -f "$LOG_FILE"
+defaults write com.autocomp.AutoComp advancedOverlayFailureCount -int 0
 
 if [[ "$SAFE_OVERLAY_MODE" == "1" ]]; then
-  AUTOCOMP_SAFE_OVERLAY_MODE=1 ./script/build_and_run.sh --ui-test-inline-preview >/tmp/autocomp_inline_preview_launch.log
+  AUTOCOMP_SAFE_OVERLAY_MODE=1 \
+  AUTOCOMP_GEOMETRY_DEBUG_LOG_FILE="$LOG_FILE" \
+    ./script/build_and_run.sh --ui-test-inline-preview >/tmp/autocomp_inline_preview_launch.log
 else
-  ./script/build_and_run.sh --ui-test-inline-preview >/tmp/autocomp_inline_preview_launch.log
+  AUTOCOMP_GEOMETRY_DEBUG_LOG_FILE="$LOG_FILE" \
+    ./script/build_and_run.sh --ui-test-inline-preview >/tmp/autocomp_inline_preview_launch.log
 fi
 
 printf '' >/tmp/autocomp-inline-preview-smoke.txt
 /usr/bin/open -a TextEdit /tmp/autocomp-inline-preview-smoke.txt
-sleep 1
+osascript <<'OSA'
+on waitForTextEditFocus()
+  tell application "TextEdit" to activate
+  tell application "System Events"
+    repeat 80 times
+      if exists process "TextEdit" then
+        tell process "TextEdit"
+          if frontmost and (count of windows) > 0 then return "TextEdit ready"
+        end tell
+      end if
+      delay 0.25
+    end repeat
+    error "TextEdit did not become frontmost with an editable window."
+  end tell
+end waitForTextEditFocus
+
+my waitForTextEditFocus()
+OSA
 osascript -e 'tell application "System Events" to keystroke "Vamos tentar ver se"'
 osascript -e 'tell application "System Events" to key code 49'
 sleep 2
@@ -57,11 +78,6 @@ OSA
 sleep 2
 pkill -x TextEdit >/dev/null 2>&1 || true
 rm -f /tmp/autocomp-inline-preview-smoke.txt
-
-/usr/bin/log show --last 30s \
-  --info \
-  --predicate 'process == "AutoComp" AND eventMessage CONTAINS "AutoCompGeometry"' \
-  --style compact >"$LOG_FILE"
 
 if grep -q 'Accessibility permission is required' "$LOG_FILE"; then
   cat "$LOG_FILE" >&2
@@ -97,9 +113,17 @@ elif grep -q 'resolvedTier=mirrorWindow' "$LOG_FILE"; then
   cat "$LOG_FILE" >&2
   echo "inline preview unexpectedly resolved to mirrorWindow" >&2
   exit 1
-elif ! grep -q 'tier=visualInlineOverlay .* panel=' "$LOG_FILE"; then
+elif ! grep -Eq 'resolvedTier=(visualInlineOverlay|simpleCaretPopup)' "$LOG_FILE"; then
   cat "$LOG_FILE" >&2
-  echo "inline preview did not produce a visual inline overlay" >&2
+  echo "inline preview did not resolve to an inline overlay tier" >&2
+  exit 1
+elif ! grep -Eq 'tier=(visualInlineOverlay|simpleCaretPopup).*panel=' "$LOG_FILE"; then
+  cat "$LOG_FILE" >&2
+  echo "inline preview did not place an overlay panel" >&2
+  exit 1
+elif ! grep -q 'suggestion-publication result=published app=TextEdit' "$LOG_FILE"; then
+  cat "$LOG_FILE" >&2
+  echo "inline preview did not publish a TextEdit suggestion" >&2
   exit 1
 fi
 

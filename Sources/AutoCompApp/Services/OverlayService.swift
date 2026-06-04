@@ -31,7 +31,7 @@ final class PreviewCoordinator: SuggestionPresenter {
         let shortcutSettingsStore = KeyboardShortcutSettingsStore()
         let hintsProvider = OverlayShortcutHintsProvider()
 
-        self.nativeInlinePresenter = UnavailableNativeInlinePresenter()
+        self.nativeInlinePresenter = SystemNativeInlineFallbackPresenter()
         self.multiSuggestionPopupPresenter = MultiSuggestionPopupPresenter(
             shortcutSettingsStore: shortcutSettingsStore,
             hintsProvider: hintsProvider
@@ -195,18 +195,27 @@ final class PreviewCoordinator: SuggestionPresenter {
         context: TextContext,
         mode: SuggestionDisplayMode
     ) -> SuggestionPresentationPolicy.Decision {
-        presentationPolicy.decision(
+        let nativeInlineAvailability = nativeInlinePresenter.availability(
+            for: suggestion,
+            context: context
+        )
+        let decision = presentationPolicy.decision(
             for: suggestion,
             context: context,
             requestedDisplayMode: mode,
             safeOverlayModeEnabled: safeOverlayModeEnabled,
             capabilities: SuggestionPresentationPolicy.Capabilities(
-                canUseNativeInline: nativeInlinePresenter.canPresent(suggestion, for: context),
+                canUseNativeInline: nativeInlineAvailability.canPresent,
                 canUseVisualInline: visualInlinePresenter.canPresent(suggestion, for: context),
                 canUseCaretPopup: simpleCaretPopupPresenter.canPresent(suggestion, for: context),
                 canUseMultiSuggestionPopup: multiSuggestionPopupPresenter.canPresent(suggestion, for: context)
             )
         )
+        if mode == .inline,
+           !nativeInlineAvailability.canPresent {
+            GeometryDebug.log("native-inline fallback reason=\(nativeInlineAvailability.diagnosticReason ?? "unreported") resolvedTier=\(decision.tier)")
+        }
+        return decision
     }
 
     private func recordPresentedSnapshot(

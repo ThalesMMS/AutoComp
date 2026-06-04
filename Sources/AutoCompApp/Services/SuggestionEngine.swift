@@ -2099,15 +2099,6 @@ final class SuggestionEngine: ObservableObject {
                     ])
                 }
 
-                // Provider invocation is delegated to the pipeline runner, with cancellation/stale-work
-                // checks extracted into reusable steps.
-                var pipelineContext = SuggestionPipeline.RequestContext()
-                pipelineContext.userInfo["context"] = context
-                pipelineContext.userInfo["privacySettings"] = privacySettings
-                pipelineContext.userInfo["visualContext"] = visualContext
-                pipelineContext.userInfo["clipboardContext"] = clipboardContext
-                pipelineContext.userInfo["personalizationSamples"] = personalizationSamples
-
                 let (isCurrentAfterVisual, provider, completionOptions) = await MainActor.run {
                     (
                         engine.predictionController.isCurrent(workID),
@@ -2126,27 +2117,23 @@ final class SuggestionEngine: ObservableObject {
                         "context=\(SuggestionPipelineLog.contextDescription(context))"
                     ])
                 }
+                // Provider invocation is delegated to the pipeline runner, with cancellation/stale-work
+                // checks extracted into reusable steps.
+                var pipelineContext = SuggestionPipeline.RequestContext(
+                    textContext: context,
+                    privacySettings: privacySettings,
+                    visualContext: visualContext,
+                    clipboardContext: clipboardContext,
+                    personalizationSamples: personalizationSamples,
+                    completionOptions: completionOptions
+                )
                 let runner = SuggestionPipeline.Runner<Suggestion>(steps: [
                     SuggestionPipeline.StaleWorkStep<Suggestion>(isCurrent: { _ in
                         isCurrentAfterVisual
                     }),
                     ProviderInvocationStep(
                         provider: provider,
-                        timeout: nil,
-                        requestProvider: { ctx in
-                            guard let context = ctx.userInfo["context"] as? TextContext,
-                                  let privacySettings = ctx.userInfo["privacySettings"] as? PrivacySettings else {
-                                return nil
-                            }
-                            return ProviderInvocation.Request(
-                                context: context,
-                                privacySettings: privacySettings,
-                                visualContext: ctx.userInfo["visualContext"] as? VisualContextSnapshot,
-                                clipboardContext: ctx.userInfo["clipboardContext"] as? ClipboardContextSnapshot,
-                                personalizationSamples: ctx.userInfo["personalizationSamples"] as? [PersonalizationSample] ?? [],
-                                options: completionOptions
-                            )
-                        }
+                        timeout: nil
                     )
                 ])
 

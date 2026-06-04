@@ -148,6 +148,14 @@ public protocol TelemetryEventSink: Sendable {
 }
 
 public struct NoopTelemetryEventSink: TelemetryEventSink {
+    public static let fallbackDiagnostic = FallbackDiagnostic(
+        symbol: "NoopTelemetryEventSink",
+        classification: .privacyDisabled,
+        reason: "telemetry-sink-not-configured",
+        userMessage: "Telemetry events are discarded because no telemetry sink is configured.",
+        remediation: "Inject a telemetry sink only in builds where telemetry is explicitly enabled."
+    )
+
     public init() {}
 
     public func send(_ event: TelemetryEvent) {}
@@ -162,6 +170,14 @@ public protocol TelemetryClient: Sendable {
 }
 
 public struct DisabledTelemetryClient: TelemetryClient {
+    public static let fallbackDiagnostic = FallbackDiagnostic(
+        symbol: "DisabledTelemetryClient",
+        classification: .privacyDisabled,
+        reason: "telemetry-disabled-by-policy",
+        userMessage: "Telemetry is disabled by policy; capture, enable, and deletion calls do not send data.",
+        remediation: "Use RedactingTelemetryClient only for an explicit opt-in telemetry configuration."
+    )
+
     public init() {}
 
     public func setEnabled(_ isEnabled: Bool) {}

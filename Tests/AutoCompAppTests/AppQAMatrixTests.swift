@@ -93,6 +93,37 @@ final class AppQAMatrixTests: XCTestCase {
         XCTAssertTrue(document.contains("Sensitive prompt content appears only after local debug opt-in"))
     }
 
+    func testMatrixLinksLatestRealAppEvidenceReport() throws {
+        let root = try packageRoot()
+        let matrix = try String(
+            contentsOf: root.appendingPathComponent("Docs/AppQAMatrix.md"),
+            encoding: .utf8
+        )
+        let evidence = try String(
+            contentsOf: root.appendingPathComponent("Docs/RealAppQAEvidence-2026-06-04.md"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(matrix.contains("RealAppQAEvidence-2026-06-04.md"))
+        for surface in [
+            "TextEdit inline preview",
+            "TextEdit FIM controlled field",
+            "Settings > Model backend flow",
+            "Settings > Model Playground",
+            "Notes continuation and FIM",
+            "Mail manual-only FIM",
+            "Safari browser text field",
+            "Chrome generic text field",
+            "Google Docs OCR and geometry",
+            "Messages communication composer"
+        ] {
+            XCTAssertTrue(evidence.contains(surface), "Missing evidence surface: \(surface)")
+        }
+        XCTAssertTrue(evidence.contains("capture | overlay | staleness | insertion"))
+        XCTAssertTrue(evidence.contains("dist/qa/issue-184/qa-run-20260604T041726Z.md"))
+        XCTAssertTrue(evidence.contains("dist/ui-optional/issue-184-final/ci-ui-optional-20260604T041633Z.md"))
+    }
+
     func testInlinePreviewSmokeCoversControlledFIMField() throws {
         let script = try String(
             contentsOf: try packageRoot().appendingPathComponent("script/ui_inline_preview_smoke_test.sh"),
@@ -109,6 +140,9 @@ final class AppQAMatrixTests: XCTestCase {
         XCTAssertTrue(script.contains("safe-overlay-mode active feature=preview-tier"))
         XCTAssertTrue(script.contains("resolvedTier=visualInlineOverlay"))
         XCTAssertTrue(script.contains("tier=visualInlineOverlay .* panel="))
+        XCTAssertTrue(script.contains("resolvedTier=(visualInlineOverlay|simpleCaretPopup)"))
+        XCTAssertTrue(script.contains("tier=(visualInlineOverlay|simpleCaretPopup).*panel="))
+        XCTAssertTrue(script.contains("suggestion-publication result=published app=TextEdit"))
         XCTAssertTrue(script.contains("key code 48"))
         XCTAssertTrue(script.contains("acceptance accepted action=next-word"))
         XCTAssertTrue(script.contains("key code 49 using option down"))

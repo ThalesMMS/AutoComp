@@ -106,6 +106,34 @@ final class SuggestionPresentationPolicyTests: XCTestCase {
         XCTAssertEqual(decision.reason, .trustedCaret)
     }
 
+    func testInlineUnavailableUsesCaretPopupBeforeMirror() {
+        let decision = policy.decision(
+            for: suggestion(),
+            context: context(caretGeometryQuality: .directCaret),
+            requestedDisplayMode: .inline,
+            safeOverlayModeEnabled: false,
+            capabilities: capabilities(canUseCaretPopup: true)
+        )
+
+        XCTAssertEqual(decision.mode, .caretPopup)
+        XCTAssertEqual(decision.tier, .simpleCaretPopup)
+        XCTAssertEqual(decision.reason, .inlineUnavailable)
+    }
+
+    func testInlineUnavailableUsesMirrorWhenPopupCannotPresent() {
+        let decision = policy.decision(
+            for: suggestion(),
+            context: context(caretGeometryQuality: .directCaret),
+            requestedDisplayMode: .inline,
+            safeOverlayModeEnabled: false,
+            capabilities: capabilities()
+        )
+
+        XCTAssertEqual(decision.mode, .fieldMirror)
+        XCTAssertEqual(decision.tier, .mirrorWindow)
+        XCTAssertEqual(decision.reason, .inlineUnavailable)
+    }
+
     func testCompatibilityMirrorModeForcesFieldMirror() {
         let decision = policy.decision(
             for: suggestion(),

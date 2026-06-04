@@ -16,7 +16,7 @@ SELF_NAME="$(basename "$0")"
 usage() {
     cat <<EOF
 Usage:
-  $SELF_NAME --archive <path.dmg|path.zip> --out-dir <dir> [--channel beta]
+  $SELF_NAME --archive <path.dmg|path.zip> --out-dir <dir> [--channel beta] [--release-notes-url URL]
 
 Generates a local Sparkle appcast and failure-case variants.
 
@@ -24,6 +24,8 @@ Inputs:
   --archive    Path to DMG or ZIP release artifact.
   --out-dir    Output directory for appcast and any copied artifacts.
   --channel    Optional: stable|beta (default: beta)
+  --release-notes-url
+               Optional release notes URL. Defaults to a non-fetchable example URL.
 
 Environment (optional):
   AUTOCOMP_APPCAST_BASE_URL
@@ -38,6 +40,7 @@ Output files:
   - appcast.xml                      : valid appcast
   - appcast_invalid_signature.xml    : same as above but with broken sparkle signature attribute
   - appcast_missing_file.xml         : points enclosure to a non-existent file
+  - appcast_downgrade.xml            : advertises version/build 0 to validate downgrade prevention
   - <copied archive>                 : copy of input archive placed in out-dir
 
 Exit codes:
@@ -55,6 +58,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ARCHIVE=""
 OUT_DIR=""
 CHANNEL="beta"
+RELEASE_NOTES_URL="https://example.invalid/autocomp-test-channel"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -64,6 +68,8 @@ while [[ $# -gt 0 ]]; do
             OUT_DIR="${2:-}"; shift 2 ;;
         --channel)
             CHANNEL="${2:-}"; shift 2 ;;
+        --release-notes-url)
+            RELEASE_NOTES_URL="${2:-}"; shift 2 ;;
         -h|--help)
             usage; exit 0 ;;
         *)
@@ -87,6 +93,7 @@ cp -f "$ARCHIVE" "$STAGED_ARCHIVE"
 APPCAST_XML="$OUT_DIR/appcast.xml"
 APPCAST_INVALID_SIG_XML="$OUT_DIR/appcast_invalid_signature.xml"
 APPCAST_MISSING_FILE_XML="$OUT_DIR/appcast_missing_file.xml"
+APPCAST_DOWNGRADE_XML="$OUT_DIR/appcast_downgrade.xml"
 
 BASE_URL="${AUTOCOMP_APPCAST_BASE_URL:-}"
 ENCLOSURE_URL="$ARCHIVE_BASENAME"
@@ -94,6 +101,11 @@ if [[ -n "$BASE_URL" ]]; then
     # Trim trailing slash
     BASE_URL="${BASE_URL%/}"
     ENCLOSURE_URL="$BASE_URL/$ARCHIVE_BASENAME"
+fi
+PUBLIC_BASE_URL="${BASE_URL:-http://127.0.0.1:8000}"
+PUBLIC_PORT="8000"
+if [[ "$PUBLIC_BASE_URL" =~ :([0-9]+)($|/) ]]; then
+    PUBLIC_PORT="${BASH_REMATCH[1]}"
 fi
 
 SIGN_UPDATE_TOOL="${AUTOCOMP_SPARKLE_SIGN_UPDATE:-}"
@@ -111,7 +123,7 @@ python3 "$SCRIPT_DIR/release_appcast.py" \
     --build "999000" \
     --archive "$STAGED_ARCHIVE" \
     --download-url "$ENCLOSURE_URL" \
-    --release-notes-url "https://example.invalid/autocomp-test-channel" \
+    --release-notes-url "$RELEASE_NOTES_URL" \
     --output "$APPCAST_XML" \
     "${APPCAST_ARGS[@]}" >/dev/null
 
@@ -129,7 +141,7 @@ path.write_text(text, encoding="utf-8")
 PY
 fi
 
-/usr/bin/python3 - "$APPCAST_XML" "$APPCAST_INVALID_SIG_XML" "$APPCAST_MISSING_FILE_XML" <<'PY'
+/usr/bin/python3 - "$APPCAST_XML" "$APPCAST_INVALID_SIG_XML" "$APPCAST_MISSING_FILE_XML" "$APPCAST_DOWNGRADE_XML" <<'PY'
 import pathlib
 import re
 import sys
@@ -137,8 +149,13 @@ import sys
 source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 invalid = re.sub(r'(sparkle:(?:edSignature|dsaSignature))="[^"]+"', r'\1="INVALID"', source)
 missing = re.sub(r'url="[^"]+"', 'url="missing-file-does-not-exist.dmg"', source, count=1)
+downgrade = source
+downgrade = re.sub(r'<title>AutoComp [^<]+</title>', '<title>AutoComp 0.0.0</title>', downgrade, count=1)
+downgrade = re.sub(r'sparkle:shortVersionString="[^"]+"', 'sparkle:shortVersionString="0.0.0"', downgrade, count=1)
+downgrade = re.sub(r'sparkle:version="[^"]+"', 'sparkle:version="0"', downgrade, count=1)
 pathlib.Path(sys.argv[2]).write_text(invalid, encoding="utf-8")
 pathlib.Path(sys.argv[3]).write_text(missing, encoding="utf-8")
+pathlib.Path(sys.argv[4]).write_text(downgrade, encoding="utf-8")
 PY
 
 cat >&2 <<EOF
@@ -146,18 +163,22 @@ cat >&2 <<EOF
 
 Next steps (manual):
   1) Serve the directory:
-       cd '$OUT_DIR' && python3 -m http.server 8000
+       cd '$OUT_DIR' && python3 -m http.server $PUBLIC_PORT
+
+     The appcast URLs below assume the directory is served at:
+       $PUBLIC_BASE_URL
 
 
   2) Point AutoComp at the test appcast.
      AutoComp requires SUFeedURL and SUPublicEDKey in its Info.plist.
 
      - If you have a local build where you can edit Info.plist:
-         SUFeedURL = http://127.0.0.1:8000/appcast.xml
+         SUFeedURL = $PUBLIC_BASE_URL/appcast.xml
 
      - For negative tests:
-         http://127.0.0.1:8000/appcast_invalid_signature.xml
-         http://127.0.0.1:8000/appcast_missing_file.xml
+         $PUBLIC_BASE_URL/appcast_invalid_signature.xml
+         $PUBLIC_BASE_URL/appcast_missing_file.xml
+         $PUBLIC_BASE_URL/appcast_downgrade.xml
 
   3) In AutoComp menu: Check for Updates…
 
@@ -170,6 +191,5 @@ Expected behaviors:
       Sparkle fails download (404); app remains installed and functional.
 
 Rollback / downgrade check:
-  - Ensure the appcast item has sparkle:shortVersionString and sparkle:version greater than the installed app.
-  - Then try an appcast where those are LOWER than installed; Sparkle should not offer a downgrade.
+  - Serve appcast_downgrade.xml; Sparkle should not offer a downgrade.
 EOF

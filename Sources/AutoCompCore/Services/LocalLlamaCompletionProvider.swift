@@ -217,6 +217,18 @@ public actor LocalLlamaRuntimeCore {
 }
 
 public struct UnavailableLocalLlamaRuntimeBackend: LocalLlamaRuntimeBackend {
+    public static let fallbackDiagnostic = FallbackDiagnostic(
+        symbol: "UnavailableLocalLlamaRuntimeBackend",
+        classification: .optionalBuildFeature,
+        reason: "llama-runtime-not-linked",
+        userMessage: "Local Llama runtime is unavailable in this build.",
+        remediation: "Use an app build linked with the in-process Local Llama runtime or select another backend."
+    )
+
+    public var fallbackDiagnostic: FallbackDiagnostic {
+        Self.fallbackDiagnostic
+    }
+
     public init() {}
 
     public func loadModel(configuration: LocalLlamaConfiguration) async throws {

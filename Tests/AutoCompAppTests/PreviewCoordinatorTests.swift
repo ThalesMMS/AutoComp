@@ -46,6 +46,43 @@ final class PreviewCoordinatorTests: XCTestCase {
         XCTAssertEqual(mirror.showCount, 0)
     }
 
+    func testNativeInlinePresenterHandlesShowUpdateAndHideWhenSupported() {
+        let native = RecordingPreviewPresenter(canPresentResult: true)
+        let visual = RecordingPreviewPresenter(canPresentResult: true)
+        let simple = RecordingPreviewPresenter(canPresentResult: true)
+        let mirror = RecordingPreviewPresenter(canPresentResult: true)
+        let coordinator = PreviewCoordinator(
+            nativeInlinePresenter: native,
+            visualInlinePresenter: visual,
+            mirrorWindowPresenter: mirror,
+            simpleCaretPopupPresenter: simple
+        )
+
+        coordinator.show(suggestion(), for: context(), mode: .inline)
+        coordinator.update(suggestion(visibleText: " updated"), for: context(), mode: .inline)
+        coordinator.hide()
+
+        XCTAssertEqual(coordinator.activeTier, .disabled)
+        XCTAssertEqual(native.showCount, 1)
+        XCTAssertEqual(native.updateCount, 1)
+        XCTAssertEqual(native.hideCount, 1)
+        XCTAssertEqual(visual.showCount, 0)
+        XCTAssertEqual(simple.showCount, 0)
+        XCTAssertEqual(mirror.showCount, 0)
+    }
+
+    func testSystemNativeInlineFallbackReportsExplicitUnsupportedReason() {
+        let presenter = SystemNativeInlineFallbackPresenter()
+        let availability = presenter.availability(for: suggestion(), context: context())
+
+        XCTAssertEqual(SystemNativeInlineFallbackPresenter.fallbackDiagnostic.classification, .platformUnavailable)
+        XCTAssertEqual(SystemNativeInlineFallbackPresenter.fallbackDiagnostic.reason, "cross-app-native-inline-unavailable")
+        XCTAssertTrue(SystemNativeInlineFallbackPresenter.fallbackDiagnostic.userMessage.contains("Native inline presentation"))
+        XCTAssertFalse(availability.canPresent)
+        XCTAssertEqual(availability.diagnosticReason, "cross-app-native-inline-unavailable")
+        XCTAssertFalse(presenter.canPresent(suggestion(), for: context()))
+    }
+
     func testInlineFallsBackToMirrorWindowWhenNoInlineTierCanPresent() {
         let native = RecordingPreviewPresenter(canPresentResult: false)
         let visual = RecordingPreviewPresenter(canPresentResult: false)

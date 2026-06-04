@@ -46,11 +46,48 @@ final class OptionalUIScriptTests: XCTestCase {
         XCTAssertTrue(script.contains("AUTOCOMP_REMOTE_API_KEY=\"apikey\""))
         XCTAssertTrue(script.contains("AUTOCOMP_REMOTE_MODEL=\"default\""))
         XCTAssertTrue(script.contains("\"default\", \"Remote backend is reachable.\""))
-        XCTAssertTrue(script.contains("on modelWindowText()"))
+        XCTAssertTrue(script.contains("on collectElementText(e, currentText)"))
         XCTAssertTrue(script.contains("on waitForModelSmoke()"))
+        XCTAssertTrue(script.contains("repeat 180 times"))
         XCTAssertFalse(script.contains("Qwen/Qwen3.6-35B-A3B"))
         XCTAssertFalse(script.contains("clickButtonNamed"))
         XCTAssertFalse(script.contains("button 1 of group 1 of scroll area"))
+        XCTAssertFalse(script.contains("exists window \"Model\""))
+    }
+
+    func testPlaygroundSmokeReadsSettingsWindowWithoutFragileModelTitle() throws {
+        let script = try String(
+            contentsOf: try packageRoot().appendingPathComponent("script/ui_playground_smoke_test.sh"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(script.contains("on collectElementText(e, currentText)"))
+        XCTAssertTrue(script.contains("on waitForPlaygroundSmoke()"))
+        XCTAssertTrue(script.contains("repeat 180 times"))
+        XCTAssertFalse(script.contains("exists window \"Model\""))
+        XCTAssertFalse(script.contains("scroll area 1 of group 2 of splitter group 1"))
+    }
+
+    func testInlinePreviewSmokeUsesOptInGeometryDebugArtifact() throws {
+        let root = try packageRoot()
+        let script = try String(
+            contentsOf: root.appendingPathComponent("script/ui_inline_preview_smoke_test.sh"),
+            encoding: .utf8
+        )
+        let geometryDebugSource = try String(
+            contentsOf: root.appendingPathComponent("Sources/AutoCompApp/Services/Overlay/OverlaySupportTypes.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(script.contains("AUTOCOMP_GEOMETRY_DEBUG_LOG_FILE=\"$LOG_FILE\""))
+        XCTAssertTrue(script.contains("tell application \"TextEdit\" to activate"))
+        XCTAssertTrue(script.contains("on waitForTextEditFocus()"))
+        XCTAssertTrue(script.contains("defaults write com.autocomp.AutoComp advancedOverlayFailureCount -int 0"))
+        XCTAssertFalse(script.contains("/usr/bin/log show --last 30s"))
+        XCTAssertTrue(geometryDebugSource.contains("AUTOCOMP_GEOMETRY_DEBUG_LOG_FILE"))
+        XCTAssertTrue(geometryDebugSource.contains("writeUnredactedDebugArtifact"))
+        XCTAssertTrue(geometryDebugSource.contains("intentionally unredacted"))
+        XCTAssertTrue(geometryDebugSource.contains("AutoCompGeometry \\(resolvedMessage)"))
     }
 
     func testAllowSkipWritesStructuredReportForMissingPrerequisites() throws {

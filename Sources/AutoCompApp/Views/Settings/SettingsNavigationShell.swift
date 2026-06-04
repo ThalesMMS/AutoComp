@@ -53,12 +53,11 @@ struct SettingsNavigationShell: View {
 private struct SettingsSidebarToolbarSuppressor: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView {
         let view = SettingsSidebarToolbarSuppressorView()
-        view.scheduleToolbarCleanup()
         return view
     }
 
     func updateNSView(_ nsView: NSView, context: Context) {
-        (nsView as? SettingsSidebarToolbarSuppressorView)?.scheduleToolbarCleanup()
+        // Cleanup runs from viewDidMoveToWindow once the representable enters a window.
     }
 }
 

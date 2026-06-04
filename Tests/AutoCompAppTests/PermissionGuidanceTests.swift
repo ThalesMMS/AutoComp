@@ -204,7 +204,7 @@ final class PermissionGuidanceTests: XCTestCase {
             .appendingPathComponent("Products", isDirectory: true)
             .appendingPathComponent("Debug", isDirectory: true)
         let checkoutRoot = root
-            .appendingPathComponent("AutoComp-dev", isDirectory: true)
+            .appendingPathComponent("AutoComp", isDirectory: true)
         let stagedApp = checkoutRoot
             .appendingPathComponent("AutoComp", isDirectory: true)
             .appendingPathComponent("dist", isDirectory: true)

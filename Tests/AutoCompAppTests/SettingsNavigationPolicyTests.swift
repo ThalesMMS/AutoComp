@@ -77,6 +77,22 @@ final class SettingsNavigationPolicyTests: XCTestCase {
         XCTAssertFalse(settingsSource.contains("case permissions = \"Permissions\""))
     }
 
+    func testSettingsToolbarCleanupIsNotScheduledWhenRepresentableViewIsCreated() throws {
+        let shellSource = try settingsNavigationShellSource()
+        let makeNSViewBody = try functionBody(named: "makeNSView", in: shellSource)
+
+        XCTAssertFalse(makeNSViewBody.contains("scheduleToolbarCleanup()"))
+        XCTAssertTrue(shellSource.contains("override func viewDidMoveToWindow()"))
+    }
+
+    func testSettingsToolbarCleanupIsNotScheduledOnSwiftUIUpdates() throws {
+        let shellSource = try settingsNavigationShellSource()
+        let updateNSViewBody = try functionBody(named: "updateNSView", in: shellSource)
+
+        XCTAssertFalse(updateNSViewBody.contains("scheduleToolbarCleanup()"))
+        XCTAssertTrue(shellSource.contains("override func viewDidMoveToWindow()"))
+    }
+
     func testSettingsWindowHasMinimumSize() throws {
         let source = try String(
             contentsOf: try packageRoot().appendingPathComponent("Sources/AutoCompApp/App/AppController.swift"),
@@ -90,6 +106,41 @@ final class SettingsNavigationPolicyTests: XCTestCase {
         XCTAssertTrue(source.contains("window.contentMinSize = minSize"))
         XCTAssertTrue(source.contains("MinimumContentSizeWindowDelegate"))
         XCTAssertTrue(source.contains("window.delegate = settingsWindowResizeDelegate"))
+    }
+
+    private func settingsNavigationShellSource() throws -> String {
+        try String(
+            contentsOf: try packageRoot().appendingPathComponent("Sources/AutoCompApp/Views/Settings/SettingsNavigationShell.swift"),
+            encoding: .utf8
+        )
+    }
+
+    private func functionBody(named functionName: String, in source: String) throws -> Substring {
+        guard let functionRange = source.range(of: "func \(functionName)") else {
+            XCTFail("Missing function \(functionName)")
+            return ""
+        }
+        guard let openBrace = source[functionRange.upperBound...].firstIndex(of: "{") else {
+            XCTFail("Missing body for \(functionName)")
+            return ""
+        }
+
+        var depth = 0
+        var current = openBrace
+        while current < source.endIndex {
+            if source[current] == "{" {
+                depth += 1
+            } else if source[current] == "}" {
+                depth -= 1
+                if depth == 0 {
+                    return source[source.index(after: openBrace)..<current]
+                }
+            }
+            current = source.index(after: current)
+        }
+
+        XCTFail("Unterminated body for \(functionName)")
+        return ""
     }
 
     private func packageRoot() throws -> URL {

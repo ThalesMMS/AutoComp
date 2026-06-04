@@ -3,9 +3,10 @@ import Foundation
 /// Pipeline step that decides whether visual context should be considered for the current request.
 ///
 /// This step is intentionally limited to *eligibility* checks; it does not perform any screenshot
-/// capture or OCR. The orchestration layer may use the stored decision to trigger capture.
+/// capture or OCR. The orchestration layer may use the typed decision to trigger capture.
 public struct VisualContextEligibilityStep<Payload: Sendable & Equatable>: SuggestionPipeline.Step {
     public typealias Context = SuggestionPipeline.RequestContext
+    public typealias Decision = SuggestionPipeline.VisualContextEligibilityDecision
 
     public struct Inputs: Sendable {
         public var visualContextEnabled: @Sendable () -> Bool
@@ -30,13 +31,6 @@ public struct VisualContextEligibilityStep<Payload: Sendable & Equatable>: Sugge
             self.fieldSecure = fieldSecure
             self.autocompleteEligible = autocompleteEligible
         }
-    }
-
-    public static var decisionUserInfoKey: String { "visualContext.eligibility" }
-
-    public enum Decision: Sendable, Equatable {
-        case eligible
-        case ineligible(reason: String)
     }
 
     private let inputs: Inputs
@@ -70,7 +64,7 @@ public struct VisualContextEligibilityStep<Payload: Sendable & Equatable>: Sugge
             decision = .eligible
         }
 
-        context.userInfo[Self.decisionUserInfoKey] = decision
+        context.visualContextEligibilityDecision = decision
         return .continue
     }
 }

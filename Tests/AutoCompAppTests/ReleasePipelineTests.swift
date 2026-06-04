@@ -426,6 +426,93 @@ final class ReleasePipelineTests: XCTestCase {
         XCTAssertTrue(commandOutput.contains("lib{llama,ggml}*.dylib"))
     }
 
+    func testReleaseEvidenceForIssue185HasNoTBDAndRecordsExecutedArtifacts() throws {
+        let evidence = try String(
+            contentsOf: try packageRoot().appendingPathComponent("Docs/QA_EndToEnd_Release_Evidence.md"),
+            encoding: .utf8
+        )
+
+        XCTAssertFalse(evidence.contains("_TBD_"))
+        for requiredText in [
+            "Issue #185",
+            "dist/release/issue-185-dry-run.log",
+            "dist/release/release-checklist.md",
+            "dist/release/appcast.xml",
+            "dist/appcast-test/issue-185/appcast.xml",
+            "dist/appcast-test/issue-185/appcast_invalid_signature.xml",
+            "dist/appcast-test/issue-185/appcast_missing_file.xml",
+            "dist/appcast-test/issue-185/appcast_downgrade.xml",
+            "Developer ID Application identity",
+            "clean_install_verify.sh --dmg ./dist/release/AutoComp.dmg"
+        ] {
+            XCTAssertTrue(evidence.contains(requiredText), "Missing issue #185 evidence text: \(requiredText)")
+        }
+    }
+
+    func testSparkleTestChannelGeneratesDowngradeAppcastAndLocalReleaseNotesURL() throws {
+        let root = try packageRoot()
+        let outputDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("autocomp-appcast-test-\(UUID().uuidString)")
+        defer {
+            try? FileManager.default.removeItem(at: outputDirectory)
+        }
+        let fixtureDirectory = outputDirectory.appendingPathComponent("fixture")
+        let appcastDirectory = outputDirectory.appendingPathComponent("appcasts")
+        try FileManager.default.createDirectory(at: fixtureDirectory, withIntermediateDirectories: true)
+
+        let archive = fixtureDirectory.appendingPathComponent("AutoComp.dmg")
+        try Data("placeholder archive".utf8).write(to: archive)
+
+        let process = Process()
+        process.currentDirectoryURL = root
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")
+        process.arguments = [
+            "script/sparkle_test_channel_setup.sh",
+            "--archive",
+            archive.path,
+            "--out-dir",
+            appcastDirectory.path,
+            "--channel",
+            "beta",
+            "--release-notes-url",
+            "http://127.0.0.1:8765/release-notes.html"
+        ]
+
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = output
+        try process.run()
+        process.waitUntilExit()
+
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        let commandOutput = String(data: data, encoding: .utf8) ?? ""
+        XCTAssertEqual(process.terminationStatus, 0, commandOutput)
+
+        let valid = try String(
+            contentsOf: appcastDirectory.appendingPathComponent("appcast.xml"),
+            encoding: .utf8
+        )
+        let invalidSignature = try String(
+            contentsOf: appcastDirectory.appendingPathComponent("appcast_invalid_signature.xml"),
+            encoding: .utf8
+        )
+        let missingFile = try String(
+            contentsOf: appcastDirectory.appendingPathComponent("appcast_missing_file.xml"),
+            encoding: .utf8
+        )
+        let downgrade = try String(
+            contentsOf: appcastDirectory.appendingPathComponent("appcast_downgrade.xml"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(valid.contains("http://127.0.0.1:8765/release-notes.html"))
+        XCTAssertFalse(valid.contains("https://example.invalid/autocomp-test-channel"))
+        XCTAssertTrue(invalidSignature.contains("sparkle:edSignature=\"INVALID\""))
+        XCTAssertTrue(missingFile.contains("missing-file-does-not-exist.dmg"))
+        XCTAssertTrue(downgrade.contains("sparkle:shortVersionString=\"0.0.0\""))
+        XCTAssertTrue(downgrade.contains("sparkle:version=\"0\""))
+    }
+
     private func packageRoot() throws -> URL {
         var url = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
         while url.path != "/" {

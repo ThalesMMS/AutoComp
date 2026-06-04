@@ -1,37 +1,71 @@
 import Foundation
 
-/// Shared types used to model SuggestionEngine request orchestration as a pipeline.
-///
-/// These types are intentionally minimal and live in AutoCompCore so they can be
-/// unit-tested without pulling in AppKit or any UI-specific concerns.
+/// Shared types used to model suggestion request orchestration as a pipeline.
 public enum SuggestionPipeline {
-    /// Immutable inputs that are expected to be stable throughout a single pipeline run.
-    ///
-    /// This is an initial contract; additional fields can be added incrementally as the
-    /// pipeline is extracted from `SuggestionEngine`.
+    /// Request-scoped data shared between deterministic pipeline steps.
     public struct RequestContext: Sendable {
         public let requestId: UUID
         public let createdAt: Date
+        public var textContext: TextContext?
+        public var privacySettings: PrivacySettings?
+        public var isSecureField: Bool
+        public var visualContext: VisualContextSnapshot?
+        public var clipboardContext: ClipboardContextSnapshot?
+        public var personalizationSamples: [PersonalizationSample]
+        public var completionOptions: CompletionOptions
+        public var visualContextEligibilityDecision: VisualContextEligibilityDecision?
+        public var suggestion: Suggestion?
 
         /// Aggregated diagnostics for this pipeline run.
         public var diagnostics: SuggestionDiagnosticsTypes.Report
 
-        /// The caller may store additional per-request values here while the contract
-        /// is stabilizing. Prefer promoting commonly used values into first-class
-        /// properties over time.
-        public var userInfo: [String: Sendable]
-
         public init(
             requestId: UUID = UUID(),
             createdAt: Date = Date(),
-            diagnostics: SuggestionDiagnosticsTypes.Report = .init(),
-            userInfo: [String: Sendable] = [:]
+            textContext: TextContext? = nil,
+            privacySettings: PrivacySettings? = nil,
+            isSecureField: Bool = false,
+            visualContext: VisualContextSnapshot? = nil,
+            clipboardContext: ClipboardContextSnapshot? = nil,
+            personalizationSamples: [PersonalizationSample] = [],
+            completionOptions: CompletionOptions = CompletionOptions(),
+            visualContextEligibilityDecision: VisualContextEligibilityDecision? = nil,
+            suggestion: Suggestion? = nil,
+            diagnostics: SuggestionDiagnosticsTypes.Report = .init()
         ) {
             self.requestId = requestId
             self.createdAt = createdAt
+            self.textContext = textContext
+            self.privacySettings = privacySettings
+            self.isSecureField = isSecureField
+            self.visualContext = visualContext
+            self.clipboardContext = clipboardContext
+            self.personalizationSamples = personalizationSamples
+            self.completionOptions = completionOptions
+            self.visualContextEligibilityDecision = visualContextEligibilityDecision
+            self.suggestion = suggestion
             self.diagnostics = diagnostics
-            self.userInfo = userInfo
         }
+
+        public var providerInvocationRequest: ProviderInvocation.Request? {
+            guard let textContext, let privacySettings else {
+                return nil
+            }
+
+            return ProviderInvocation.Request(
+                context: textContext,
+                privacySettings: privacySettings,
+                visualContext: visualContext,
+                clipboardContext: clipboardContext,
+                personalizationSamples: personalizationSamples,
+                options: completionOptions
+            )
+        }
+    }
+
+    public enum VisualContextEligibilityDecision: Sendable, Equatable {
+        case eligible
+        case ineligible(reason: String)
     }
 
     /// A structured reason for discarding a request.

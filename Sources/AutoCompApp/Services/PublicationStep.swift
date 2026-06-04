@@ -3,6 +3,10 @@ import Foundation
 
 /// Pipeline step that publishes a finalized suggestion.
 ///
+/// Precondition: this step must run after a pipeline step, currently `ProviderInvocationStep`,
+/// that stores the finalized suggestion in `context.suggestion`; otherwise the request is
+/// discarded as `missing-suggestion`.
+///
 /// This step is explicitly `@MainActor` because it mutates UI-facing state via the
 /// `SuggestionPublicationController` (which drives the overlay presenter).
 @MainActor
@@ -33,7 +37,7 @@ struct PublicationStep: SuggestionPipeline.Step {
             return .discard(.init(kind: .stale, message: "missing-publication-context"))
         }
 
-        guard let suggestion = context.userInfo["suggestion"] as? Suggestion else {
+        guard let suggestion = context.suggestion else {
             return .discard(.init(kind: .other, message: "missing-suggestion"))
         }
 

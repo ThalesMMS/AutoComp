@@ -1,37 +1,38 @@
 import Foundation
 
 extension SuggestionPipeline {
+    public struct PrivacyGateInput: Sendable {
+        public let privacySettings: PrivacySettings
+        public let appBundleID: String
+        public let domain: String?
+        public let isSecureField: Bool
+
+        public init(
+            privacySettings: PrivacySettings,
+            appBundleID: String,
+            domain: String?,
+            isSecureField: Bool
+        ) {
+            self.privacySettings = privacySettings
+            self.appBundleID = appBundleID
+            self.domain = domain
+            self.isSecureField = isSecureField
+        }
+    }
+
     /// Gating step that applies user privacy settings and contextual privacy exclusions.
     ///
     /// This step is intentionally pure (given its inputs) and does not perform IO.
-    /// Callers are expected to supply a `PrivacySettings` snapshot (usually loaded
-    /// once per request) and any additional signals (e.g. "secure field") via the
-    /// request context.
+    /// Callers are expected to supply request-scoped text, privacy, and secure-field
+    /// signals through `RequestContext`.
     public struct PrivacyGateStep<Payload: Sendable & Equatable>: Step {
-        public struct Input: Sendable {
-            public let privacySettings: PrivacySettings
-            public let appBundleID: String
-            public let domain: String?
-            public let isSecureField: Bool
-
-            public init(
-                privacySettings: PrivacySettings,
-                appBundleID: String,
-                domain: String?,
-                isSecureField: Bool
-            ) {
-                self.privacySettings = privacySettings
-                self.appBundleID = appBundleID
-                self.domain = domain
-                self.isSecureField = isSecureField
-            }
-        }
+        public typealias Input = PrivacyGateInput
 
         public typealias InputProvider = @Sendable (_ context: RequestContext) -> Input?
 
         private let input: InputProvider
 
-        public init(input: @escaping InputProvider) {
+        public init(input: @escaping InputProvider = Self.input(from:)) {
             self.input = input
         }
 
@@ -54,6 +55,20 @@ extension SuggestionPipeline {
             }
 
             return .continue
+        }
+
+        public static func input(from context: RequestContext) -> Input? {
+            guard let privacySettings = context.privacySettings,
+                  let textContext = context.textContext else {
+                return nil
+            }
+
+            return Input(
+                privacySettings: privacySettings,
+                appBundleID: textContext.app.bundleID,
+                domain: textContext.domain,
+                isSecureField: context.isSecureField
+            )
         }
     }
 }
