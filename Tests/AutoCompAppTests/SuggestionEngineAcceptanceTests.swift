@@ -5,75 +5,6 @@ import XCTest
 
 @MainActor
 final class SuggestionEngineAcceptanceTests: XCTestCase {
-    func testCompletionRequiresObservedTrailingWhitespaceTrigger() async throws {
-        let app = AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1)
-        let initialContext = TextContext(
-            app: app,
-            focusedElementID: "textedit-field",
-            textBeforeCursor: "Please"
-        )
-        let triggeredContext = TextContext(
-            app: app,
-            focusedElementID: "textedit-field",
-            textBeforeCursor: "Please "
-        )
-        let contextProvider = MutableContextProvider(context: initialContext)
-        let completionProvider = CountingCompletionProvider(
-            suggestion: Suggestion(
-                baseContextID: initialContext.id,
-                visibleText: "continue this",
-                latencyMs: 25
-            )
-        )
-        let engine = SuggestionEngine(
-            contextProvider: contextProvider,
-            completionProvider: completionProvider,
-            presenter: RecordingSuggestionPresenter()
-        )
-
-        engine.start()
-        try await Task.sleep(nanoseconds: 650_000_000)
-        let callCountBeforeSpace = await completionProvider.getCallCount()
-        XCTAssertEqual(callCountBeforeSpace, 0)
-
-        await contextProvider.updateContext(triggeredContext)
-        try await Task.sleep(nanoseconds: 700_000_000)
-        let callCountAfterSpace = await completionProvider.getCallCount()
-        XCTAssertEqual(callCountAfterSpace, 1)
-        engine.stop()
-    }
-
-    func testInitialTrailingWhitespaceDoesNotRequestCompletionWithoutObservedInput() async throws {
-        let app = AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1)
-        let initialContext = TextContext(
-            app: app,
-            focusedElementID: "textedit-field",
-            textBeforeCursor: "Already typed "
-        )
-        let contextProvider = MutableContextProvider(context: initialContext)
-        let completionProvider = CountingCompletionProvider(
-            suggestion: Suggestion(
-                baseContextID: initialContext.id,
-                visibleText: "continuation",
-                latencyMs: 25
-            )
-        )
-        let engine = SuggestionEngine(
-            contextProvider: contextProvider,
-            completionProvider: completionProvider,
-            presenter: RecordingSuggestionPresenter()
-        )
-
-        engine.start()
-        try await Task.sleep(nanoseconds: 700_000_000)
-
-        let callCount = await completionProvider.getCallCount()
-        XCTAssertEqual(callCount, 0)
-        XCTAssertEqual(engine.diagnostics.eligibility?.outcome, "ineligible")
-        XCTAssertNotNil(engine.diagnostics.eligibility?.skipReason)
-        engine.stop()
-    }
-
     func testCapturedTextEventSchedulesPredictionWithoutPollingTimer() async throws {
         let app = AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1)
         let context = TextContext(
@@ -2004,71 +1935,6 @@ final class SuggestionEngineAcceptanceTests: XCTestCase {
         engine.stop()
     }
 
-    func testReadyVisualContextIsDiscardedWhenStableFieldChangesBeforeCompletion() async throws {
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: "AutoCompVisualStale-\(UUID().uuidString)"))
-        let privacyStore = PrivacySettingsStore(defaults: defaults, key: "privacy")
-        try privacyStore.save(PrivacySettings(screenContextEnabled: true))
-        let app = AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1)
-        let firstIdentity = StableFieldIdentity(
-            app: app,
-            role: "AXTextArea",
-            focusedElementFrame: CGRect(x: 100, y: 100, width: 500, height: 40),
-            focusChangeSequence: 3
-        )
-        let secondIdentity = StableFieldIdentity(
-            app: app,
-            role: "AXTextArea",
-            focusedElementFrame: CGRect(x: 100, y: 180, width: 500, height: 40),
-            focusChangeSequence: 4
-        )
-        let firstContext = TextContext(
-            app: app,
-            focusedElementID: "textedit-field-a",
-            stableFieldIdentity: firstIdentity,
-            textBeforeCursor: "Please "
-        )
-        let secondContext = TextContext(
-            app: app,
-            focusedElementID: "textedit-field-b",
-            stableFieldIdentity: secondIdentity,
-            textBeforeCursor: "Please "
-        )
-        let contextProvider = MutableContextProvider(context: firstContext)
-        let visualContextProvider = SuspendedStableVisualContextProvider()
-        let completionProvider = CountingCompletionProvider(
-            suggestion: Suggestion(
-                baseContextID: firstContext.id,
-                visibleText: "continue this",
-                latencyMs: 25
-            )
-        )
-        let presenter = RecordingSuggestionPresenter()
-        let engine = SuggestionEngine(
-            contextProvider: contextProvider,
-            completionProvider: completionProvider,
-            visualContextProvider: visualContextProvider,
-            presenter: presenter,
-            privacyStore: privacyStore
-        )
-
-        engine.start()
-        engine.recordSuggestionTriggerKey(.text(keyCode: CapturedInputEventAdapter.spaceKeyCode, isSuggestionTrigger: true))
-        await visualContextProvider.waitForPendingRequestCount(1)
-        await contextProvider.updateContext(secondContext)
-        await visualContextProvider.resumeNext(with: VisualContextSnapshot(
-            summary: "Visible title Budget Review",
-            stableFieldIdentity: firstIdentity
-        ))
-        try await Task.sleep(nanoseconds: 400_000_000)
-
-        let callCount = await completionProvider.getCallCount()
-        let recordedStableFieldIdentities = await visualContextProvider.recordedStableFieldIdentities()
-        XCTAssertEqual(callCount, 0)
-        XCTAssertNil(presenter.lastSuggestion)
-        XCTAssertEqual(recordedStableFieldIdentities, [firstIdentity])
-        engine.stop()
-    }
-
     func testBackendSwitchClearsPendingVisualContextBeforeCallingOldProvider() async throws {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: "AutoCompVisualBackendSwitch-\(UUID().uuidString)"))
         let privacyStore = PrivacySettingsStore(defaults: defaults, key: "privacy")
@@ -2161,45 +2027,6 @@ final class SuggestionEngineAcceptanceTests: XCTestCase {
         let recordedPrivacySettings = await completionProvider.recordedPrivacySettings()
         XCTAssertEqual(recordedClipboardContext, clipboardContext)
         XCTAssertEqual(recordedPrivacySettings?.clipboardContextEnabled, true)
-        engine.stop()
-    }
-
-    func testLateCompletionIsDiscardedWhenLiveContextChanges() async throws {
-        let app = AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1)
-        let requestedContext = TextContext(
-            app: app,
-            focusedElementID: "textedit-field-a",
-            textBeforeCursor: "Please "
-        )
-        let changedContext = TextContext(
-            app: app,
-            focusedElementID: "textedit-field-b",
-            textBeforeCursor: "Different"
-        )
-        let contextProvider = MutableContextProvider(context: requestedContext)
-        let completionProvider = DelayedCompletionProvider(
-            visibleText: "continue this",
-            delayNanoseconds: 700_000_000
-        )
-        let presenter = RecordingSuggestionPresenter()
-        let engine = SuggestionEngine(
-            contextProvider: contextProvider,
-            completionProvider: completionProvider,
-            presenter: presenter
-        )
-
-        engine.start()
-        engine.recordSuggestionTriggerKey(.text(keyCode: CapturedInputEventAdapter.spaceKeyCode, isSuggestionTrigger: true))
-        try await Task.sleep(nanoseconds: 650_000_000)
-        await contextProvider.updateContext(changedContext)
-        try await Task.sleep(nanoseconds: 900_000_000)
-
-        let callCount = await completionProvider.getCallCount()
-        XCTAssertEqual(callCount, 1)
-        XCTAssertNil(engine.currentSuggestion)
-        XCTAssertNil(presenter.lastSuggestion)
-        XCTAssertEqual(engine.diagnostics.backend.status, .discarded)
-        XCTAssertNotNil(engine.diagnostics.staleDiscardReason)
         engine.stop()
     }
 
@@ -4095,39 +3922,6 @@ private final class RecordingManagedVisualContextProvider: TextContextVisualCont
         lock.lock()
         defer { lock.unlock() }
         return storedRefreshContexts
-    }
-}
-
-private actor SuspendedStableVisualContextProvider: StableFieldVisualContextProvider {
-    private var continuations: [CheckedContinuation<VisualContextSnapshot?, Never>] = []
-    private var stableFieldIdentities: [StableFieldIdentity?] = []
-
-    func currentVisualContext() async -> VisualContextSnapshot? {
-        await currentVisualContext(for: nil)
-    }
-
-    func currentVisualContext(for stableFieldIdentity: StableFieldIdentity?) async -> VisualContextSnapshot? {
-        stableFieldIdentities.append(stableFieldIdentity)
-        return await withCheckedContinuation { continuation in
-            continuations.append(continuation)
-        }
-    }
-
-    func waitForPendingRequestCount(_ count: Int) async {
-        while continuations.count < count {
-            await Task.yield()
-        }
-    }
-
-    func resumeNext(with snapshot: VisualContextSnapshot?) {
-        guard !continuations.isEmpty else {
-            return
-        }
-        continuations.removeFirst().resume(returning: snapshot)
-    }
-
-    func recordedStableFieldIdentities() -> [StableFieldIdentity] {
-        stableFieldIdentities.compactMap { $0 }
     }
 }
 

@@ -14,53 +14,6 @@ struct StrictGenerationSignature: Equatable, Sendable {
     let selectedRangeLength: Int?
 }
 
-struct FocusIdentity: Equatable, Sendable {
-    let focusedElementID: String
-    let stableFieldIdentity: StableFieldIdentity?
-    let focusedElementRect: CGRect?
-    let caretRect: CGRect?
-    let lineReferenceRect: CGRect?
-    let isScreenOCR: Bool
-
-    init(context: TextContext) {
-        focusedElementID = context.focusedElementID
-        stableFieldIdentity = context.stableFieldIdentity
-        focusedElementRect = context.focusedElementRect
-        caretRect = context.caretRect
-        lineReferenceRect = context.lineReferenceRect
-        isScreenOCR = context.caretGeometryQuality == .screenOCR
-            || context.captureSources.contains(.screenOCR)
-    }
-
-    func matches(_ other: FocusIdentity) -> Bool {
-        let metricTolerance: CGFloat = isScreenOCR || other.isScreenOCR ? 16 : 4
-        let elementTolerance: CGFloat = isScreenOCR || other.isScreenOCR ? 16 : 8
-        return focusedElementID == other.focusedElementID
-            || approximatelySameRect(focusedElementRect, other.focusedElementRect, tolerance: elementTolerance)
-            || approximatelySameRect(caretRect, other.caretRect, tolerance: metricTolerance)
-            || approximatelySameRect(lineReferenceRect, other.lineReferenceRect, tolerance: metricTolerance)
-    }
-
-    func matchesStableField(_ other: FocusIdentity) -> Bool {
-        guard let stableFieldIdentity,
-              let otherStableFieldIdentity = other.stableFieldIdentity else {
-            return false
-        }
-        return stableFieldIdentity.matchesStableTarget(otherStableFieldIdentity)
-    }
-
-    private func approximatelySameRect(_ lhs: CGRect?, _ rhs: CGRect?, tolerance: CGFloat) -> Bool {
-        guard let lhs, let rhs else {
-            return false
-        }
-
-        return abs(lhs.minX - rhs.minX) <= tolerance
-            && abs(lhs.minY - rhs.minY) <= tolerance
-            && abs(lhs.width - rhs.width) <= tolerance
-            && abs(lhs.height - rhs.height) <= tolerance
-    }
-}
-
 struct ContextGenerationTracker {
     func signature(for context: TextContext) -> StrictGenerationSignature {
         StrictGenerationSignature(

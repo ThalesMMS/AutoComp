@@ -17,14 +17,19 @@ final class SettingsMicrocopyDensityTests: XCTestCase {
     }
 
     func testPrivacyKeepsDensePolicyAndBackendDetailsCollapsed() throws {
-        let settingsSource = try settingsSourceContents(packageRoot: packageRoot())
+        let root = try packageRoot()
+        let settingsSource = try settingsSourceContents(packageRoot: root)
+        let backendSurfaceSource = try String(
+            contentsOf: root.appendingPathComponent("Sources/AutoCompApp/Services/BackendSurface.swift"),
+            encoding: .utf8
+        )
 
         XCTAssertTrue(settingsSource.contains("Used to write the suggestion you requested."))
         XCTAssertTrue(settingsSource.contains("Clipboard and visible screen text stay off until enabled."))
         XCTAssertTrue(settingsSource.contains("DisclosureGroup(\"Technical source policy\")"))
         XCTAssertTrue(settingsSource.contains("DisclosureGroup(\"Backend privacy details\")"))
-        XCTAssertTrue(settingsSource.contains("backendPrivacySummary"))
-        XCTAssertTrue(settingsSource.contains("Autocomplete text is sent to the configured remote backend."))
+        XCTAssertTrue(settingsSource.contains("backendSurface.privacySummary"))
+        XCTAssertTrue(backendSurfaceSource.contains("Autocomplete text is sent to the configured remote backend."))
     }
 
     func testHealthRowsShowNextStepBeforeTechnicalDetails() throws {

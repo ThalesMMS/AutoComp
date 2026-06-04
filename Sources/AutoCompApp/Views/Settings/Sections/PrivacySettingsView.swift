@@ -231,17 +231,18 @@ struct PrivacySettingsView: View {
 
             Section("Completion backend") {
                 let backendSettings = controller.completionBackendSettings
+                let backendSurface = BackendSurface(settings: backendSettings)
                 SettingsActionRow(
                     title: "Request destination",
-                    subtitle: backendPrivacySummary(backendSettings),
-                    state: backendPrivacyState(backendSettings),
-                    statusTitle: backendPrivacyStatusTitle(backendSettings)
+                    subtitle: backendSurface.privacySummary,
+                    state: backendPrivacyState(backendSurface),
+                    statusTitle: backendSurface.privacyStatusTitle
                 )
                 DisclosureGroup("Backend privacy details") {
                     LabeledContent("Active engine", value: backendSettings.engineKind.displayName)
-                    LabeledContent("Request destination", value: backendSettings.requestDestinationTitle)
-                    LabeledContent("Data leaves this Mac", value: backendSettings.dataLeavesDeviceTitle)
-                    LabeledContent("Remote fallback", value: backendSettings.remoteFallbackTitle)
+                    LabeledContent("Request destination", value: backendSurface.requestDestinationTitle)
+                    LabeledContent("Data leaves this Mac", value: backendSurface.dataLeavesDeviceTitle)
+                    LabeledContent("Remote fallback", value: backendSurface.remoteFallbackTitle)
                     LabeledContent("Last backend used", value: engine.diagnostics.backend.lastUsedTitle)
                     SectionFooterNote(text: "Privacy controls limit optional local context. The selected completion backend still receives the autocomplete request shown here.")
                 }
@@ -359,44 +360,12 @@ struct PrivacySettingsView: View {
     }
 
     private func remoteBackendExposure(sourceEnabled: Bool) -> String {
-        controller.completionBackendSettings.remoteBackendExposureTitle(sourceEnabled: sourceEnabled)
+        BackendSurface(settings: controller.completionBackendSettings)
+            .remoteBackendExposureTitle(sourceEnabled: sourceEnabled)
     }
 
-    private func backendPrivacySummary(_ settings: CompletionBackendSettings) -> String {
-        switch settings.engineKind {
-        case .remote:
-            return "Autocomplete text is sent to the configured remote backend."
-        case .localLlama:
-            return settings.fallbackToRemoteOnLocalFailure
-                ? "Runs locally first; remote fallback can send text after a local failure."
-                : "Completion requests stay on this Mac when the local runtime is ready."
-        case .appleIntelligence:
-            return settings.fallbackToRemoteOnAppleIntelligenceFailure
-                ? "Uses Apple Intelligence first; remote fallback can send text after a failure."
-                : "Completion requests stay on this Mac while Apple Intelligence succeeds."
-        }
-    }
-
-    private func backendPrivacyState(_ settings: CompletionBackendSettings) -> SettingsVisualState {
-        switch settings.engineKind {
-        case .remote:
-            return .warning
-        case .localLlama:
-            return settings.fallbackToRemoteOnLocalFailure ? .warning : .ok
-        case .appleIntelligence:
-            return settings.fallbackToRemoteOnAppleIntelligenceFailure ? .warning : .ok
-        }
-    }
-
-    private func backendPrivacyStatusTitle(_ settings: CompletionBackendSettings) -> String {
-        switch settings.engineKind {
-        case .remote:
-            return "Remote"
-        case .localLlama:
-            return settings.fallbackToRemoteOnLocalFailure ? "Fallback" : "Local"
-        case .appleIntelligence:
-            return settings.fallbackToRemoteOnAppleIntelligenceFailure ? "Fallback" : "Local"
-        }
+    private func backendPrivacyState(_ surface: BackendSurface) -> SettingsVisualState {
+        surface.exposesAutocompleteTextRemotely ? .warning : .ok
     }
 
     private func privacyPolicyTable(rows: [PrivacyPolicyRow]) -> some View {

@@ -100,7 +100,7 @@ final class AppController: ObservableObject {
         self.activationPolicyController = AppActivationPolicyController()
         self.usesInlinePreviewTestProvider = environment.usesInlinePreviewTestProvider
         self.completionBackendSettings = environment.initialCompletionBackendSettings
-        self.completionBackendSummary = environment.initialCompletionBackendSettings.summary
+        self.completionBackendSummary = BackendSurface(settings: environment.initialCompletionBackendSettings).summary
 
         permissionService.$inputMonitoringAllowed
             .removeDuplicates()
@@ -463,14 +463,14 @@ final class AppController: ObservableObject {
             return
         }
         completionBackendSettings = completionBackendConfigurationService.load()
-        completionBackendSummary = completionBackendSettings.summary
+        completionBackendSummary = BackendSurface(settings: completionBackendSettings).summary
     }
 
     func saveCompletionBackendSettings(_ settings: CompletionBackendSettings) {
         let switchReason = completionProviderSwitchReason(from: completionBackendSettings, to: settings)
         completionBackendConfigurationService.save(settings)
         completionBackendSettings = settings
-        completionBackendSummary = settings.summary
+        completionBackendSummary = BackendSurface(settings: settings).summary
         suggestionEngine.updateMultiSuggestionEnabled(settings.multiSuggestionEnabled)
         suggestionEngine.updateCompletionProvider(
             environment.completionProvider(for: settings),

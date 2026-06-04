@@ -20,23 +20,6 @@ struct LocalLlamaRuntimeState: Equatable {
     )
 }
 
-struct LocalLlamaDiagnostic: Equatable {
-    var runtimeTitle: String
-    var modelFileTitle: String
-    var loadStateTitle: String
-    var lastErrorTitle: String
-    var fallbackTitle: String
-    var memoryLimitTitle: String
-    var isUsable: Bool
-}
-
-struct AppleIntelligenceDiagnostic: Equatable {
-    var availabilityTitle: String
-    var requirementTitle: String
-    var fallbackTitle: String
-    var isUsable: Bool
-}
-
 struct CompletionBackendSettings: Equatable {
     /// The user's selected completion backend.
     ///
@@ -122,40 +105,6 @@ struct CompletionBackendSettings: Equatable {
         self.stopSequences = stopSequences
     }
 
-    var summary: String {
-        backendSummary()
-    }
-
-    func backendSummary(
-        fileExists: (String) -> Bool = FileManager.default.fileExists(atPath:),
-        appleAvailability: AppleFoundationModelAvailability = SystemAppleFoundationModelBackend.availability()
-    ) -> String {
-        switch engineKind {
-        case .remote:
-            return "Remote backend: \(remoteModel) at \(remoteBaseURL)"
-        case .localLlama:
-            let diagnostic = localDiagnostic(fileExists: fileExists)
-            if diagnostic.isUsable {
-                return fallbackToRemoteOnLocalFailure
-                    ? "Local Llama backend available with remote fallback at \(localModelPath)"
-                    : "Local Llama backend available without fallback at \(localModelPath)"
-            }
-            return fallbackToRemoteOnLocalFailure
-                ? "Local Llama backend unavailable: \(diagnostic.runtimeTitle); \(diagnostic.modelFileTitle); remote fallback enabled"
-                : "Local Llama backend unavailable: \(diagnostic.runtimeTitle); \(diagnostic.modelFileTitle); remote fallback disabled"
-        case .appleIntelligence:
-            let diagnostic = appleIntelligenceDiagnostic(availability: appleAvailability)
-            if diagnostic.isUsable {
-                return fallbackToRemoteOnAppleIntelligenceFailure
-                    ? "Apple Intelligence backend available with remote fallback"
-                    : "Apple Intelligence backend available without fallback"
-            }
-            return fallbackToRemoteOnAppleIntelligenceFailure
-                ? "Apple Intelligence backend unavailable: \(diagnostic.requirementTitle); remote fallback enabled"
-                : "Apple Intelligence backend unavailable: \(diagnostic.requirementTitle); remote fallback disabled"
-        }
-    }
-
     var remoteConfiguration: RemoteCompletionConfiguration {
         RemoteCompletionConfiguration(
             baseURL: remoteBaseURL,
@@ -180,92 +129,6 @@ struct CompletionBackendSettings: Equatable {
         }
     }
 
-    var requestDestinationTitle: String {
-        switch engineKind {
-        case .remote:
-            return "Remote: \(remoteModel) at \(remoteBaseURL)"
-        case .localLlama:
-            guard !localModelPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                return "Local in-process: no model selected"
-            }
-            let modelFileName = URL(fileURLWithPath: localModelPath).lastPathComponent
-            return "Local in-process: \(modelFileName.isEmpty ? localConfiguration.modelName : modelFileName)"
-        case .appleIntelligence:
-            return "Apple Intelligence on this Mac"
-        }
-    }
-
-    var dataLeavesDeviceTitle: String {
-        dataLeavesDeviceTitle()
-    }
-
-    func dataLeavesDeviceTitle(
-        fileExists: (String) -> Bool = FileManager.default.fileExists(atPath:),
-        appleAvailability: AppleFoundationModelAvailability = SystemAppleFoundationModelBackend.availability()
-    ) -> String {
-        switch engineKind {
-        case .remote:
-            return "Yes, autocomplete text is sent to \(remoteBaseURL)."
-        case .localLlama:
-            if fallbackToRemoteOnLocalFailure {
-                return "Local first; text may be sent to \(remoteBaseURL) after a local failure."
-            }
-            return localDiagnostic(fileExists: fileExists).isUsable
-                ? "No, local completion requests stay on this Mac."
-                : "No remote endpoint; local completion is blocked until runtime and model prerequisites are met."
-        case .appleIntelligence:
-            if fallbackToRemoteOnAppleIntelligenceFailure {
-                return "Apple first; text may be sent to \(remoteBaseURL) after an Apple Intelligence failure."
-            }
-            return appleIntelligenceDiagnostic(availability: appleAvailability).isUsable
-                ? "No remote endpoint while Apple Intelligence succeeds."
-                : "No remote endpoint; Apple Intelligence is unavailable on this Mac."
-        }
-    }
-
-    var remoteFallbackTitle: String {
-        switch engineKind {
-        case .remote:
-            return "Not applicable because the remote backend is selected."
-        case .localLlama:
-            return fallbackToRemoteOnLocalFailure ? "Enabled after local failure" : "Disabled"
-        case .appleIntelligence:
-            return fallbackToRemoteOnAppleIntelligenceFailure ? "Enabled after Apple Intelligence failure" : "Disabled"
-        }
-    }
-
-    var remoteFallbackWarning: String? {
-        switch engineKind {
-        case .remote:
-            return nil
-        case .localLlama where fallbackToRemoteOnLocalFailure:
-            return "Remote fallback is enabled: if local completion fails, autocomplete text may be sent to \(remoteBaseURL)."
-        case .appleIntelligence where fallbackToRemoteOnAppleIntelligenceFailure:
-            return "Remote fallback is enabled: if Apple Intelligence fails, autocomplete text may be sent to \(remoteBaseURL)."
-        case .localLlama, .appleIntelligence:
-            return nil
-        }
-    }
-
-    func remoteBackendExposureTitle(sourceEnabled: Bool) -> String {
-        guard sourceEnabled else {
-            return "No; source is off."
-        }
-
-        switch engineKind {
-        case .remote:
-            return "Yes, sent to \(remoteBaseURL)."
-        case .localLlama:
-            return fallbackToRemoteOnLocalFailure
-                ? "Only after local failure fallback to \(remoteBaseURL)."
-                : "No remote backend."
-        case .appleIntelligence:
-            return fallbackToRemoteOnAppleIntelligenceFailure
-                ? "Only after Apple Intelligence fallback to \(remoteBaseURL)."
-                : "No remote backend."
-        }
-    }
-
     var localConfiguration: LocalLlamaConfiguration {
         LocalLlamaConfiguration(
             modelPath: localModelPath,
@@ -274,79 +137,11 @@ struct CompletionBackendSettings: Equatable {
         )
     }
 
-    func localDiagnostic(
-        fileExists: (String) -> Bool = FileManager.default.fileExists(atPath:),
-        loadStatus: LocalLlamaRuntimeStatus = .unloaded
-    ) -> LocalLlamaDiagnostic {
-        let hasModelPath = !localModelPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        let modelExists = hasModelPath && fileExists(localModelPath)
-        let runtimeTitle = localRuntimeState.isAvailable ? "Available" : "Unavailable: \(localRuntimeState.message)"
-        let modelFileTitle: String
-        if !hasModelPath {
-            modelFileTitle = "No model selected"
-        } else {
-            modelFileTitle = modelExists ? "Found at \(localModelPath)" : "Missing at \(localModelPath)"
-        }
-        let loadStateTitle: String
-        if localRuntimeState.isAvailable && modelExists {
-            loadStateTitle = loadStatus.applies(to: localModelPath)
-                ? loadStatus.state.title
-                : LocalLlamaRuntimeLoadState.unloaded.title
-        } else {
-            loadStateTitle = "Blocked"
-        }
-        let lastErrorTitle: String
-        if let localLastError, !localLastError.isEmpty {
-            lastErrorTitle = localLastError
-        } else if loadStatus.applies(to: localModelPath),
-                  loadStatus.state == .failed,
-                  let message = loadStatus.message,
-                  !message.isEmpty {
-            lastErrorTitle = message
-        } else {
-            lastErrorTitle = "None"
-        }
-        let fallbackTitle = fallbackToRemoteOnLocalFailure ? "Remote fallback enabled" : "Remote fallback disabled"
-        let memoryLimitTitle = ByteCountFormatter.string(
-            fromByteCount: Int64(min(localMaxRAMBytes, UInt64(Int64.max))),
-            countStyle: .memory
-        )
-
-        return LocalLlamaDiagnostic(
-            runtimeTitle: runtimeTitle,
-            modelFileTitle: modelFileTitle,
-            loadStateTitle: loadStateTitle,
-            lastErrorTitle: lastErrorTitle,
-            fallbackTitle: fallbackTitle,
-            memoryLimitTitle: memoryLimitTitle,
-            isUsable: localRuntimeState.isAvailable && modelExists
-        )
-    }
-
-    func appleIntelligenceDiagnostic(
-        availability: AppleFoundationModelAvailability = SystemAppleFoundationModelBackend.availability()
-    ) -> AppleIntelligenceDiagnostic {
-        AppleIntelligenceDiagnostic(
-            availabilityTitle: availability.statusTitle,
-            requirementTitle: availability.detail,
-            fallbackTitle: fallbackToRemoteOnAppleIntelligenceFailure
-                ? "Remote fallback enabled"
-                : "Remote fallback disabled",
-            isUsable: availability.isAvailable
-        )
-    }
-
     static var defaultLocalModelPath: String {
         AutoCompUserDirectories.appSupportDirectory
             .appendingPathComponent("Models", isDirectory: true)
             .appendingPathComponent("autocomp.gguf")
             .path
-    }
-}
-
-private extension LocalLlamaRuntimeStatus {
-    func applies(to modelPath: String) -> Bool {
-        self.modelPath == nil || self.modelPath == modelPath
     }
 }
 

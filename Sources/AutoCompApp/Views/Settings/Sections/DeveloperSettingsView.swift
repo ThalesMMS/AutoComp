@@ -102,13 +102,14 @@ struct DeveloperSettingsView: View {
 
             Section("Backend diagnostics") {
                 let activeSettings = controller.completionBackendSettings
+                let activeSurface = BackendSurface(settings: activeSettings, diagnostics: engine.diagnostics)
                 SettingsActionRow(
                     title: "Backend state",
                     state: SettingsVisualState.backend(engine.backendStatusSummary.state),
                     statusTitle: engine.backendStatusSummary.menuTitle
                 )
                 LabeledContent("Active engine", value: activeSettings.engineKind.displayName)
-                LabeledContent("Request destination", value: activeSettings.requestDestinationTitle)
+                LabeledContent("Request destination", value: activeSurface.requestDestinationTitle)
                 LabeledContent("Requested backend", value: engine.diagnostics.backend.requestedKind?.displayName ?? "None yet")
                 LabeledContent("Delivered backend", value: engine.diagnostics.backend.deliveredKind?.displayName ?? "None yet")
                 LabeledContent("Last backend used", value: engine.diagnostics.backend.lastUsedTitle)
@@ -125,7 +126,10 @@ struct DeveloperSettingsView: View {
 
             Section("Local runtime diagnostics") {
                 let activeSettings = controller.completionBackendSettings
-                let diagnostic = activeSettings.localDiagnostic(loadStatus: localRuntimeStatusStore.status)
+                let diagnostic = BackendSurface(
+                    settings: activeSettings,
+                    localLoadStatus: localRuntimeStatusStore.status
+                ).localRuntimeDiagnostic
                 LabeledContent("Bootstrap", value: activeSettings.localRuntimeState.message)
                 LabeledContent("Runtime", value: diagnostic.runtimeTitle)
                 LabeledContent("Model file", value: diagnostic.modelFileTitle)
@@ -140,7 +144,7 @@ struct DeveloperSettingsView: View {
 
             Section("Apple Intelligence diagnostics") {
                 let activeSettings = controller.completionBackendSettings
-                let diagnostic = activeSettings.appleIntelligenceDiagnostic()
+                let diagnostic = BackendSurface(settings: activeSettings).appleIntelligenceAvailabilityDiagnostic
                 LabeledContent("Availability", value: diagnostic.availabilityTitle)
                 LabeledContent("Requirement", value: diagnostic.requirementTitle)
                 LabeledContent("Fallback", value: diagnostic.fallbackTitle)

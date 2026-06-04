@@ -44,9 +44,10 @@ final class CompletionBackendConfigurationServiceTests: XCTestCase {
         XCTAssertFalse(defaults.bool(forKey: "completionBackend.multiSuggestionEnabled"))
         XCTAssertEqual(defaults.array(forKey: "completionBackend.stopSequences.continuation") as? [String], ["\n"])
         XCTAssertEqual(defaults.array(forKey: "completionBackend.stopSequences.fillInMiddle") as? [String], ["<|fim_suffix|>"])
-        XCTAssertEqual(loaded.summary, "Remote backend: test-model at http://127.0.0.1:8000")
-        XCTAssertEqual(loaded.requestDestinationTitle, "Remote: test-model at http://127.0.0.1:8000")
-        XCTAssertTrue(loaded.dataLeavesDeviceTitle.contains("sent to http://127.0.0.1:8000"))
+        let surface = BackendSurface(settings: loaded)
+        XCTAssertEqual(surface.summary, "Remote backend: test-model at http://127.0.0.1:8000")
+        XCTAssertEqual(surface.requestDestinationTitle, "Remote: test-model at http://127.0.0.1:8000")
+        XCTAssertTrue(surface.dataLeavesDeviceTitle.contains("sent to http://127.0.0.1:8000"))
         XCTAssertEqual(loaded.remoteConfiguration.stopSequences.continuation, ["\n"])
         XCTAssertEqual(loaded.localConfiguration.stopSequences.fillInMiddle, ["<|fim_suffix|>"])
     }
@@ -118,7 +119,7 @@ final class CompletionBackendConfigurationServiceTests: XCTestCase {
         XCTAssertTrue(settings.fallbackToRemoteOnLocalFailure)
         XCTAssertFalse(settings.fallbackToRemoteOnAppleIntelligenceFailure)
         XCTAssertEqual(
-            settings.summary,
+            BackendSurface(settings: settings, fileExists: { _ in false }).summary,
             "Local Llama backend unavailable: Unavailable: Local runtime is unavailable in this app build.; Missing at /tmp/model.gguf; remote fallback enabled"
         )
     }
@@ -149,27 +150,31 @@ final class CompletionBackendConfigurationServiceTests: XCTestCase {
 
         XCTAssertEqual(available.localRuntimeState, .available)
         XCTAssertEqual(unavailable.localRuntimeState, .unavailableInBuild)
-        XCTAssertEqual(available.summary, "Local Llama backend available without fallback at \(modelURL.path)")
         XCTAssertEqual(
-            unavailable.summary,
+            BackendSurface(settings: available).summary,
+            "Local Llama backend available without fallback at \(modelURL.path)"
+        )
+        XCTAssertEqual(
+            BackendSurface(settings: unavailable).summary,
             "Local Llama backend unavailable: Unavailable: Local runtime is unavailable in this app build.; Found at \(modelURL.path); remote fallback disabled"
         )
     }
 
     func testAppleIntelligenceSummaryDescribesSelectedBackend() {
         let settings = CompletionBackendSettings(engineKind: .appleIntelligence)
-        let diagnostic = settings.appleIntelligenceDiagnostic(availability: AppleFoundationModelAvailability(
+        let surface = BackendSurface(settings: settings, appleAvailability: AppleFoundationModelAvailability(
             isAvailable: false,
             statusTitle: "Unavailable",
             detail: "FoundationModels requires macOS 26.0 or newer."
         ))
+        let diagnostic = surface.appleIntelligenceAvailabilityDiagnostic
 
-        XCTAssertTrue(settings.summary.contains("Apple Intelligence backend"))
+        XCTAssertTrue(surface.summary.contains("Apple Intelligence backend"))
         XCTAssertEqual(diagnostic.availabilityTitle, "Unavailable")
         XCTAssertEqual(diagnostic.requirementTitle, "FoundationModels requires macOS 26.0 or newer.")
         XCTAssertEqual(diagnostic.fallbackTitle, "Remote fallback disabled")
-        XCTAssertEqual(settings.remoteFallbackTitle, "Disabled")
-        XCTAssertNil(settings.remoteFallbackWarning)
+        XCTAssertEqual(surface.remoteFallbackTitle, "Disabled")
+        XCTAssertNil(surface.remoteFallbackWarning)
         XCTAssertFalse(diagnostic.isUsable)
     }
 
@@ -179,9 +184,10 @@ final class CompletionBackendConfigurationServiceTests: XCTestCase {
         XCTAssertFalse(settings.fallbackToRemoteOnLocalFailure)
         XCTAssertFalse(settings.fallbackToRemoteOnAppleIntelligenceFailure)
         XCTAssertFalse(settings.multiSuggestionEnabled)
-        XCTAssertEqual(settings.remoteFallbackTitle, "Disabled")
+        let surface = BackendSurface(settings: settings, fileExists: { _ in false })
+        XCTAssertEqual(surface.remoteFallbackTitle, "Disabled")
         XCTAssertEqual(
-            settings.dataLeavesDeviceTitle,
+            surface.dataLeavesDeviceTitle,
             "No remote endpoint; local completion is blocked until runtime and model prerequisites are met."
         )
     }
@@ -210,9 +216,10 @@ final class CompletionBackendConfigurationServiceTests: XCTestCase {
             fallbackToRemoteOnLocalFailure: true
         )
 
-        XCTAssertEqual(settings.remoteFallbackTitle, "Enabled after local failure")
+        let surface = BackendSurface(settings: settings)
+        XCTAssertEqual(surface.remoteFallbackTitle, "Enabled after local failure")
         XCTAssertEqual(
-            settings.remoteFallbackWarning,
+            surface.remoteFallbackWarning,
             "Remote fallback is enabled: if local completion fails, autocomplete text may be sent to http://127.0.0.1:8000."
         )
     }
@@ -266,11 +273,11 @@ final class CompletionBackendConfigurationServiceTests: XCTestCase {
             fallbackToRemoteOnAppleIntelligenceFailure: false
         )
 
-        let diagnostic = settings.appleIntelligenceDiagnostic(availability: AppleFoundationModelAvailability(
+        let diagnostic = BackendSurface(settings: settings, appleAvailability: AppleFoundationModelAvailability(
             isAvailable: true,
             statusTitle: "Available",
             detail: "FoundationModels system language model is available."
-        ))
+        )).appleIntelligenceAvailabilityDiagnostic
 
         XCTAssertEqual(diagnostic.availabilityTitle, "Available")
         XCTAssertEqual(diagnostic.requirementTitle, "FoundationModels system language model is available.")
@@ -302,13 +309,16 @@ final class CompletionBackendConfigurationServiceTests: XCTestCase {
             localRuntimeState: .unavailableInBuild
         )
 
-        XCTAssertEqual(available.summary, "Local Llama backend available without fallback at \(modelURL.path)")
         XCTAssertEqual(
-            missingModel.summary,
+            BackendSurface(settings: available).summary,
+            "Local Llama backend available without fallback at \(modelURL.path)"
+        )
+        XCTAssertEqual(
+            BackendSurface(settings: missingModel).summary,
             "Local Llama backend unavailable: Available; Missing at \(modelURL.appendingPathExtension("missing").path); remote fallback disabled"
         )
         XCTAssertEqual(
-            unavailableRuntime.summary,
+            BackendSurface(settings: unavailableRuntime).summary,
             "Local Llama backend unavailable: Unavailable: Local runtime is unavailable in this app build.; Found at \(modelURL.path); remote fallback disabled"
         )
     }
@@ -323,7 +333,7 @@ final class CompletionBackendConfigurationServiceTests: XCTestCase {
             fallbackToRemoteOnLocalFailure: false
         )
 
-        let diagnostic = settings.localDiagnostic(fileExists: { _ in false })
+        let diagnostic = BackendSurface(settings: settings, fileExists: { _ in false }).localRuntimeDiagnostic
 
         XCTAssertEqual(diagnostic.runtimeTitle, "Available")
         XCTAssertEqual(diagnostic.modelFileTitle, "Missing at /tmp/missing.gguf")
@@ -341,36 +351,40 @@ final class CompletionBackendConfigurationServiceTests: XCTestCase {
         )
 
         XCTAssertEqual(
-            settings.localDiagnostic(
+            BackendSurface(
+                settings: settings,
                 fileExists: { _ in true },
-                loadStatus: LocalLlamaRuntimeStatus(state: .loaded, modelPath: "/tmp/model.gguf")
-            ).loadStateTitle,
+                localLoadStatus: LocalLlamaRuntimeStatus(state: .loaded, modelPath: "/tmp/model.gguf")
+            ).localRuntimeDiagnostic.loadStateTitle,
             "Loaded"
         )
         XCTAssertEqual(
-            settings.localDiagnostic(
+            BackendSurface(
+                settings: settings,
                 fileExists: { _ in true },
-                loadStatus: LocalLlamaRuntimeStatus(state: .loading, modelPath: "/tmp/model.gguf")
-            ).loadStateTitle,
+                localLoadStatus: LocalLlamaRuntimeStatus(state: .loading, modelPath: "/tmp/model.gguf")
+            ).localRuntimeDiagnostic.loadStateTitle,
             "Loading"
         )
 
-        let failed = settings.localDiagnostic(
+        let failed = BackendSurface(
+            settings: settings,
             fileExists: { _ in true },
-            loadStatus: LocalLlamaRuntimeStatus(
+            localLoadStatus: LocalLlamaRuntimeStatus(
                 state: .failed,
                 modelPath: "/tmp/model.gguf",
                 message: "Local model allocation failed: limit exceeded"
             )
-        )
+        ).localRuntimeDiagnostic
         XCTAssertEqual(failed.loadStateTitle, "Failed")
         XCTAssertEqual(failed.lastErrorTitle, "Local model allocation failed: limit exceeded")
 
         XCTAssertEqual(
-            settings.localDiagnostic(
+            BackendSurface(
+                settings: settings,
                 fileExists: { _ in true },
-                loadStatus: LocalLlamaRuntimeStatus(state: .loaded, modelPath: "/tmp/other.gguf")
-            ).loadStateTitle,
+                localLoadStatus: LocalLlamaRuntimeStatus(state: .loaded, modelPath: "/tmp/other.gguf")
+            ).localRuntimeDiagnostic.loadStateTitle,
             "Unloaded"
         )
     }

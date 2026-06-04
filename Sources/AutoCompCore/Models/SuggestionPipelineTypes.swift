@@ -12,6 +12,7 @@ public enum SuggestionPipeline {
         public var visualContext: VisualContextSnapshot?
         public var clipboardContext: ClipboardContextSnapshot?
         public var personalizationSamples: [PersonalizationSample]
+        public var requestsMultipleSuggestions: Bool
         public var completionOptions: CompletionOptions
         public var visualContextEligibilityDecision: VisualContextEligibilityDecision?
         public var suggestion: Suggestion?
@@ -28,6 +29,7 @@ public enum SuggestionPipeline {
             visualContext: VisualContextSnapshot? = nil,
             clipboardContext: ClipboardContextSnapshot? = nil,
             personalizationSamples: [PersonalizationSample] = [],
+            requestsMultipleSuggestions: Bool? = nil,
             completionOptions: CompletionOptions = CompletionOptions(),
             visualContextEligibilityDecision: VisualContextEligibilityDecision? = nil,
             suggestion: Suggestion? = nil,
@@ -41,10 +43,37 @@ public enum SuggestionPipeline {
             self.visualContext = visualContext
             self.clipboardContext = clipboardContext
             self.personalizationSamples = personalizationSamples
+            self.requestsMultipleSuggestions = requestsMultipleSuggestions ?? (completionOptions.suggestionCount > 1)
             self.completionOptions = completionOptions
             self.visualContextEligibilityDecision = visualContextEligibilityDecision
             self.suggestion = suggestion
             self.diagnostics = diagnostics
+        }
+
+        public var isLowTrustRequest: Bool {
+            textContext?.captureSources == [.keystrokeBufferLowTrust]
+        }
+
+        public mutating func prepareProviderInvocation(
+            privacySettings: PrivacySettings,
+            personalizationSamples: [PersonalizationSample] = [],
+            visualContext: VisualContextSnapshot? = nil,
+            clipboardContext: ClipboardContextSnapshot? = nil,
+            requestsMultipleSuggestions: Bool = false
+        ) {
+            self.privacySettings = privacySettings
+            self.personalizationSamples = personalizationSamples
+            self.requestsMultipleSuggestions = requestsMultipleSuggestions
+            self.completionOptions = CompletionOptions(suggestionCount: requestsMultipleSuggestions ? 3 : 1)
+
+            guard !isLowTrustRequest else {
+                self.visualContext = nil
+                self.clipboardContext = nil
+                return
+            }
+
+            self.visualContext = visualContext
+            self.clipboardContext = clipboardContext
         }
 
         public var providerInvocationRequest: ProviderInvocation.Request? {

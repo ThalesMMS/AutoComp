@@ -118,6 +118,7 @@ struct OnboardingView: View {
     private var backendStep: some View {
         VStack(alignment: .leading, spacing: 14) {
             let settings = controller.completionBackendSettings
+            let surface = BackendSurface(settings: settings)
 
             SettingsInfoCard(
                 title: "Backend / Model",
@@ -132,7 +133,7 @@ struct OnboardingView: View {
                 )
                 SettingsActionRow(
                     title: "Request destination",
-                    subtitle: settings.requestDestinationTitle
+                    subtitle: surface.requestDestinationTitle
                 )
                 Button("Open Model Settings") {
                     openSettings(.model)
@@ -179,7 +180,7 @@ struct OnboardingView: View {
             )
             SettingsActionRow(
                 title: "Remote requests",
-                subtitle: controller.completionBackendSettings.dataLeavesDeviceTitle,
+                subtitle: BackendSurface(settings: controller.completionBackendSettings).dataLeavesDeviceTitle,
                 state: privacyBackendState,
                 statusTitle: privacyBackendStatusTitle
             )

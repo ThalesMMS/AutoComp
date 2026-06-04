@@ -50,14 +50,16 @@ struct SetupSettingsView: View {
             }
 
             Section("Backend") {
+                let backendSettings = controller.completionBackendSettings
+                let backendSurface = BackendSurface(settings: backendSettings)
                 SettingsActionRow(
                     title: "Completion backend",
-                    subtitle: "Active: \(controller.completionBackendSettings.engineKind.displayName). Requests use the model selected in Model."
+                    subtitle: "Active: \(backendSettings.engineKind.displayName). Requests use the model selected in Model."
                 )
                 DisclosureGroup("Backend details") {
-                    LabeledContent("Selected engine", value: controller.completionBackendSettings.engineKind.displayName)
-                    LabeledContent("Request destination", value: controller.completionBackendSettings.requestDestinationTitle)
-                    SectionFooterNote(text: controller.completionBackendSummary)
+                    LabeledContent("Selected engine", value: backendSettings.engineKind.displayName)
+                    LabeledContent("Request destination", value: backendSurface.requestDestinationTitle)
+                    SectionFooterNote(text: backendSurface.summary)
                 }
                 Button("Open Model Settings") {
                     controller.selectedSettingsSection = .model

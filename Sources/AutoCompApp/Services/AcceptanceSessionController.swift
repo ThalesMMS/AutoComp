@@ -168,7 +168,12 @@ final class AcceptanceSessionController {
             return .passedThrough(.targetChanged)
         }
 
-        let sameFocusedElement = sameFocusedElement(context: context, stateFocusIdentity: state.focusIdentity)
+        let sameFocusedElement = InteractionTargetMatcher.matches(
+            context,
+            app: state.session.target.app,
+            domain: state.session.target.domain,
+            focusIdentity: state.focusIdentity
+        )
             || isSameGoogleDocsTextTarget(context: context, state: state)
         guard sameFocusedElement else {
             clearAll()
@@ -240,7 +245,7 @@ final class AcceptanceSessionController {
               let previousContext,
               var suggestion = currentSuggestion,
               !suggestion.isExhausted,
-              isSameInteractionTarget(context, as: previousContext),
+              InteractionTargetMatcher.matches(context, as: previousContext),
               let leakedShortcut = leakedShortcut(
                 in: context.textBeforeCursor,
                 previousText: previousContext.textBeforeCursor,
@@ -295,37 +300,25 @@ final class AcceptanceSessionController {
 
         GeometryDebug.log("completed-accept-all check observedLength=\((context.textBeforeCursor as NSString).length) expectedLength=\((state.expectedTextBeforeCursor as NSString).length)")
 
-        guard context.app == state.app,
-              context.domain == state.domain else {
+        switch evaluateCompletedAcceptAllLeak(context: context, state: state, now: now) {
+        case .settled:
+            GeometryDebug.log("completed-accept-all settled")
+            return .handled
+        case .delayedEcho:
+            return .handled
+        case .invalid(.targetAppDomain):
             GeometryDebug.log("completed-accept-all cleared reason=target-app-domain")
             completedAcceptAllState = nil
             return .cleared
-        }
-
-        guard sameFocusedElement(context: context, stateFocusIdentity: state.focusIdentity)
-            || isSameGoogleDocsCompletedAcceptAllTextTarget(context: context, state: state) else {
+        case .invalid(.focusedTarget):
             GeometryDebug.log("completed-accept-all cleared reason=focused-target")
             completedAcceptAllState = nil
             return .cleared
+        case .invalid(.diverged):
+            completedAcceptAllState = nil
+            GeometryDebug.log("completed-accept-all cleared reason=diverged")
+            return .cleared
         }
-
-        if completedAcceptAllTextMatchesExpected(context.textBeforeCursor, state: state) {
-            GeometryDebug.log("completed-accept-all settled")
-            return .handled
-        }
-
-        let isPotentialDelayedEcho = isCompletedAcceptAllPotentialDelayedEcho(
-            context.textBeforeCursor,
-            state: state
-        )
-        if isPotentialDelayedEcho,
-           now.timeIntervalSince(state.lastAcceptedAt) <= completedAcceptAllLeakGraceInterval {
-            return .handled
-        }
-
-        completedAcceptAllState = nil
-        GeometryDebug.log("completed-accept-all cleared reason=diverged")
-        return .cleared
     }
 
     func isTextConsistentWithAcceptedSuggestion(
@@ -335,7 +328,7 @@ final class AcceptanceSessionController {
     ) -> Bool {
         guard context.app == previousContext.app,
               context.domain == previousContext.domain,
-              isSameInteractionTarget(context, as: previousContext) else {
+              InteractionTargetMatcher.matches(context, as: previousContext) else {
             return false
         }
 
@@ -378,7 +371,12 @@ final class AcceptanceSessionController {
             return .notActive
         }
 
-        let sameFocusedElement = sameFocusedElement(context: context, stateFocusIdentity: state.focusIdentity)
+        let sameFocusedElement = InteractionTargetMatcher.matches(
+            context,
+            app: state.session.target.app,
+            domain: state.session.target.domain,
+            focusIdentity: state.focusIdentity
+        )
             || isSameGoogleDocsTextTarget(context: context, state: state)
         guard sameFocusedElement else {
             acceptanceState = nil
@@ -453,6 +451,75 @@ final class AcceptanceSessionController {
         }
     }
 
+    func shouldHandleAcceptedSuggestionSession(context: TextContext) -> Bool {
+        guard let state = acceptanceState else {
+            return false
+        }
+
+        guard context.app == state.session.target.app,
+              context.domain == state.session.target.domain else {
+            // Different app/domain: route through the handler so it clears the stale session.
+            return true
+        }
+
+        return !(state.source == .publication
+            && context.textBeforeCursor == state.session.baseTextBeforeCursor)
+    }
+
+    func canRepairLeakedShortcut(
+        context: TextContext,
+        previousContext: TextContext?,
+        currentSuggestion: Suggestion?,
+        repairInserter: ShortcutLeakRepairing?
+    ) -> Bool {
+        guard repairInserter != nil,
+              let previousContext,
+              let suggestion = currentSuggestion,
+              !suggestion.isExhausted,
+              InteractionTargetMatcher.matches(context, as: previousContext),
+              leakedShortcut(
+                in: context.textBeforeCursor,
+                previousText: previousContext.textBeforeCursor,
+                appBundleID: context.app.bundleID
+              ) != nil else {
+            return false
+        }
+
+        return true
+    }
+
+    func canRepairCompletedAcceptAllLeak(
+        context: TextContext,
+        now: Date = Date()
+    ) -> Bool {
+        guard let state = completedAcceptAllState else {
+            return false
+        }
+
+        switch evaluateCompletedAcceptAllLeak(context: context, state: state, now: now) {
+        case .settled, .delayedEcho:
+            return true
+        case .invalid:
+            return false
+        }
+    }
+
+    func clearCompletedAcceptAllLeakIfInvalid(
+        context: TextContext,
+        now: Date = Date()
+    ) {
+        guard let state = completedAcceptAllState else {
+            return
+        }
+
+        guard case .invalid(let reason) = evaluateCompletedAcceptAllLeak(context: context, state: state, now: now) else {
+            return
+        }
+
+        completedAcceptAllState = nil
+        GeometryDebug.log("completed-accept-all cleared reason=\(reason.rawValue)")
+    }
+
     private func suggestionAfterTypingThrough(
         _ currentSuggestion: Suggestion?,
         typedText: String
@@ -498,6 +565,42 @@ final class AcceptanceSessionController {
             && normalizedObservedText.hasPrefix(normalizedBaseText)
     }
 
+    private func evaluateCompletedAcceptAllLeak(
+        context: TextContext,
+        state: CompletedAcceptAllState,
+        now: Date
+    ) -> CompletedAcceptAllLeakEvaluation {
+        guard context.app == state.app,
+              context.domain == state.domain else {
+            return .invalid(.targetAppDomain)
+        }
+
+        guard InteractionTargetMatcher.matches(
+            context,
+            app: state.app,
+            domain: state.domain,
+            focusIdentity: state.focusIdentity
+        )
+            || isSameGoogleDocsCompletedAcceptAllTextTarget(context: context, state: state) else {
+            return .invalid(.focusedTarget)
+        }
+
+        if completedAcceptAllTextMatchesExpected(context.textBeforeCursor, state: state) {
+            return .settled
+        }
+
+        let isPotentialDelayedEcho = isCompletedAcceptAllPotentialDelayedEcho(
+            context.textBeforeCursor,
+            state: state
+        )
+        if isPotentialDelayedEcho,
+           now.timeIntervalSince(state.lastAcceptedAt) <= completedAcceptAllLeakGraceInterval {
+            return .delayedEcho
+        }
+
+        return .invalid(.diverged)
+    }
+
     private func leakedShortcut(in observedText: String, previousText: String, appBundleID: String) -> LeakedShortcut? {
         guard observedText.hasPrefix(previousText) else {
             return nil
@@ -520,31 +623,6 @@ final class AcceptanceSessionController {
         }
 
         return nil
-    }
-
-    private func isSameInteractionTarget(_ context: TextContext, as previousContext: TextContext) -> Bool {
-        guard context.app == previousContext.app,
-              context.domain == previousContext.domain else {
-            return false
-        }
-
-        return sameFocusedElement(
-            context: context,
-            stateFocusIdentity: FocusIdentity(context: previousContext)
-        )
-    }
-
-    private func sameFocusedElement(context: TextContext, stateFocusIdentity: FocusIdentity) -> Bool {
-        let contextFocusIdentity = FocusIdentity(context: context)
-        return contextFocusIdentity.matchesStableField(stateFocusIdentity)
-            || contextFocusIdentity.matches(stateFocusIdentity)
-            || approximatelySameRect(context.focusedElementRect, stateFocusIdentity.focusedElementRect)
-            || isSameGoogleDocsVolatileLineTarget(
-                app: context.app,
-                domain: context.domain,
-                context.focusedElementRect,
-                stateFocusIdentity.focusedElementRect
-            )
     }
 
     private func isSameGoogleDocsTextTarget(context: TextContext, state: AcceptanceState) -> Bool {
@@ -582,34 +660,6 @@ final class AcceptanceSessionController {
         ((lhs?.isEmpty ?? true) && (rhs?.isEmpty ?? true)) || lhs == rhs
     }
 
-    private func approximatelySameRect(_ lhs: CGRect?, _ rhs: CGRect?) -> Bool {
-        guard let lhs, let rhs else {
-            return false
-        }
-
-        let tolerance: CGFloat = 8
-        return abs(lhs.minX - rhs.minX) <= tolerance
-            && abs(lhs.minY - rhs.minY) <= tolerance
-            && abs(lhs.width - rhs.width) <= tolerance
-            && abs(lhs.height - rhs.height) <= tolerance
-    }
-
-    private func isSameGoogleDocsVolatileLineTarget(
-        app: AppIdentity,
-        domain: String?,
-        _ lhs: CGRect?,
-        _ rhs: CGRect?
-    ) -> Bool {
-        guard app.bundleID == "com.google.Chrome",
-              domain?.contains("docs.google.com") == true,
-              let lhs,
-              let rhs else {
-            return false
-        }
-
-        return StableFieldIdentity.isGoogleDocsVolatileLineMetric(lhs)
-            && StableFieldIdentity.isGoogleDocsVolatileLineMetric(rhs)
-    }
 }
 
 private struct AcceptanceState {
@@ -630,6 +680,18 @@ private struct CompletedAcceptAllState {
     let baseTextBeforeCursor: String
     let expectedTextBeforeCursor: String
     let lastAcceptedAt: Date
+}
+
+private enum CompletedAcceptAllLeakEvaluation {
+    case settled
+    case delayedEcho
+    case invalid(CompletedAcceptAllClearReason)
+}
+
+private enum CompletedAcceptAllClearReason: String {
+    case targetAppDomain = "target-app-domain"
+    case focusedTarget = "focused-target"
+    case diverged
 }
 
 private struct LeakedShortcut {

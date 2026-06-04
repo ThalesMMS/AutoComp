@@ -16,7 +16,43 @@ final class BackendSurfaceConsistencyTests: XCTestCase {
 
     func testDisabledSourcePolicyNeverClaimsRemoteExposure() {
         for settings in representativeSettings() {
-            XCTAssertEqual(settings.remoteBackendExposureTitle(sourceEnabled: false), "No; source is off.")
+            let surface = BackendSurface(settings: settings)
+            XCTAssertEqual(surface.remoteBackendExposureTitle(sourceEnabled: false), "No; source is off.")
+        }
+    }
+
+    func testSettingsAndPlaygroundUseBackendSurfaceForBackendCopy() throws {
+        let packageRoot = try packageRoot()
+        let settingsSource = try settingsSourceContents(packageRoot: packageRoot)
+        let playgroundSource = try String(
+            contentsOf: packageRoot.appendingPathComponent("Sources/AutoCompApp/Services/CompletionPlaygroundService.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(settingsSource.contains("BackendSurface("))
+        XCTAssertTrue(playgroundSource.contains("BackendSurface("))
+
+        for forbiddenFragment in [
+            "activeSettings.requestDestinationTitle",
+            "activeSettings.dataLeavesDeviceTitle",
+            "activeSettings.remoteFallbackTitle",
+            "backendSettings.requestDestinationTitle",
+            "backendSettings.dataLeavesDeviceTitle",
+            "backendSettings.remoteFallbackTitle",
+            "settings.requestDestinationTitle",
+            "settings.dataLeavesDeviceTitle",
+            "settings.remoteFallbackTitle",
+            "settings.remoteBackendExposureTitle",
+            "draft.requestDestinationTitle",
+            "draft.dataLeavesDeviceTitle",
+            "draft.remoteFallbackWarning",
+            "draft.localDiagnostic(",
+            "draft.appleIntelligenceDiagnostic("
+        ] {
+            XCTAssertFalse(
+                settingsSource.contains(forbiddenFragment) || playgroundSource.contains(forbiddenFragment),
+                "Backend copy should come from BackendSurface, found \(forbiddenFragment)"
+            )
         }
     }
 
@@ -153,38 +189,36 @@ final class BackendSurfaceConsistencyTests: XCTestCase {
         ),
         diagnostics: SuggestionDiagnostics? = nil
     ) -> BackendSurfaceSnapshot {
-        let localDiagnostic = settings.engineKind == .localLlama
-            ? settings.localDiagnostic(fileExists: fileExists, loadStatus: loadStatus)
-            : nil
-        let appleDiagnostic = settings.engineKind == .appleIntelligence
-            ? settings.appleIntelligenceDiagnostic(availability: appleAvailability)
-            : nil
+        let surface = BackendSurface(
+            settings: settings,
+            fileExists: fileExists,
+            localLoadStatus: loadStatus,
+            appleAvailability: appleAvailability,
+            diagnostics: diagnostics
+        )
 
         return BackendSurfaceSnapshot(
             name: name,
-            summary: settings.backendSummary(fileExists: fileExists, appleAvailability: appleAvailability),
-            requestDestination: settings.requestDestinationTitle,
-            dataLeavesThisMac: settings.dataLeavesDeviceTitle(
-                fileExists: fileExists,
-                appleAvailability: appleAvailability
-            ),
-            remoteFallback: settings.remoteFallbackTitle,
-            remoteFallbackWarning: settings.remoteFallbackWarning,
-            sourcePolicyRemoteBackend: settings.remoteBackendExposureTitle(sourceEnabled: true),
-            localRuntime: localDiagnostic?.runtimeTitle,
-            localModelFile: localDiagnostic?.modelFileTitle,
-            localLoadState: localDiagnostic?.loadStateTitle,
-            localLastError: localDiagnostic?.lastErrorTitle,
-            localFallback: localDiagnostic?.fallbackTitle,
-            localUsable: localDiagnostic?.isUsable,
-            appleAvailability: appleDiagnostic?.availabilityTitle,
-            appleRequirement: appleDiagnostic?.requirementTitle,
-            appleFallback: appleDiagnostic?.fallbackTitle,
-            appleUsable: appleDiagnostic?.isUsable,
-            diagnosticsLastBackend: diagnostics?.backend.lastUsedTitle,
-            diagnosticsLocalError: diagnostics?.backend.errorTitle(for: .localLlama),
-            diagnosticsAppleError: diagnostics?.backend.errorTitle(for: .appleIntelligence),
-            diagnosticsRemoteError: diagnostics?.backend.errorTitle(for: .remote)
+            summary: surface.summary,
+            requestDestination: surface.requestDestinationTitle,
+            dataLeavesThisMac: surface.dataLeavesDeviceTitle,
+            remoteFallback: surface.remoteFallbackTitle,
+            remoteFallbackWarning: surface.remoteFallbackWarning,
+            sourcePolicyRemoteBackend: surface.remoteBackendExposureTitle(sourceEnabled: true),
+            localRuntime: surface.localDiagnostic?.runtimeTitle,
+            localModelFile: surface.localDiagnostic?.modelFileTitle,
+            localLoadState: surface.localDiagnostic?.loadStateTitle,
+            localLastError: surface.localDiagnostic?.lastErrorTitle,
+            localFallback: surface.localDiagnostic?.fallbackTitle,
+            localUsable: surface.localDiagnostic?.isUsable,
+            appleAvailability: surface.appleIntelligenceDiagnostic?.availabilityTitle,
+            appleRequirement: surface.appleIntelligenceDiagnostic?.requirementTitle,
+            appleFallback: surface.appleIntelligenceDiagnostic?.fallbackTitle,
+            appleUsable: surface.appleIntelligenceDiagnostic?.isUsable,
+            diagnosticsLastBackend: surface.diagnosticsLastBackendTitle,
+            diagnosticsLocalError: surface.diagnosticsErrorTitle(for: .localLlama),
+            diagnosticsAppleError: surface.diagnosticsErrorTitle(for: .appleIntelligence),
+            diagnosticsRemoteError: surface.diagnosticsErrorTitle(for: .remote)
         )
     }
 

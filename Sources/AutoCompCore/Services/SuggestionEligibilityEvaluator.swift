@@ -194,7 +194,7 @@ public struct SuggestionEligibilityEvaluator: Sendable {
         }
 
         if let previousContext,
-           isSameInteractionTarget(context, as: previousContext),
+           InteractionTargetMatcher.matches(context, as: previousContext),
            previousContext.textBeforeCursor != context.textBeforeCursor {
             return SuggestionEligibilityDecision(outcome: .eligible, logs: logs)
         }
@@ -282,28 +282,6 @@ public struct SuggestionEligibilityEvaluator: Sendable {
             || context.selectedText?.isEmpty == false
     }
 
-    private func isSameInteractionTarget(_ context: TextContext, as previousContext: TextContext) -> Bool {
-        guard context.app == previousContext.app,
-              context.domain == previousContext.domain else {
-            return false
-        }
-
-        if context.focusedElementID == previousContext.focusedElementID {
-            return true
-        }
-
-        if approximatelySameRect(context.focusedElementRect, previousContext.focusedElementRect) {
-            return true
-        }
-
-        return isSameGoogleDocsVolatileLineTarget(
-            app: context.app,
-            domain: context.domain,
-            context.focusedElementRect,
-            previousContext.focusedElementRect
-        )
-    }
-
     private func isDelayedGoogleDocsTextProgression(
         _ context: TextContext,
         from previousContext: TextContext
@@ -331,32 +309,4 @@ public struct SuggestionEligibilityEvaluator: Sendable {
         ].contains(bundleID)
     }
 
-    private func approximatelySameRect(_ lhs: CGRect?, _ rhs: CGRect?) -> Bool {
-        guard let lhs, let rhs else {
-            return false
-        }
-
-        let tolerance: CGFloat = 8
-        return abs(lhs.minX - rhs.minX) <= tolerance
-            && abs(lhs.minY - rhs.minY) <= tolerance
-            && abs(lhs.width - rhs.width) <= tolerance
-            && abs(lhs.height - rhs.height) <= tolerance
-    }
-
-    private func isSameGoogleDocsVolatileLineTarget(
-        app: AppIdentity,
-        domain: String?,
-        _ lhs: CGRect?,
-        _ rhs: CGRect?
-    ) -> Bool {
-        guard app.bundleID == "com.google.Chrome",
-              domain?.contains("docs.google.com") == true,
-              let lhs,
-              let rhs else {
-            return false
-        }
-
-        return StableFieldIdentity.isGoogleDocsVolatileLineMetric(lhs)
-            && StableFieldIdentity.isGoogleDocsVolatileLineMetric(rhs)
-    }
 }

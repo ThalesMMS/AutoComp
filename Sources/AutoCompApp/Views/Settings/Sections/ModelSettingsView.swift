@@ -76,17 +76,26 @@ struct ModelSettingsView: View {
     private var activeBackendSection: some View {
         Section("Active backend") {
             let activeSettings = controller.completionBackendSettings
+            let activeSurface = BackendSurface(settings: activeSettings)
             SectionFooterNote(text: "Current saved provider and routing state.")
             SettingsInfoCard(
                 title: activeSettings.engineKind.displayName,
-                subtitle: activeBackendSubtitle(for: activeSettings),
-                state: activeBackendState(for: activeSettings),
-                statusTitle: activeBackendStatusTitle(for: activeSettings),
+                subtitle: activeSurface.activeBackendSubtitle(
+                    remoteProviderConfigured: activeSurface.isRemoteProviderConfigured
+                ),
+                state: activeBackendState(
+                    for: activeSurface,
+                    remoteProviderConfigured: activeSurface.isRemoteProviderConfigured
+                ),
+                statusTitle: activeSurface.activeBackendStatusTitle(
+                    remoteProviderConfigured: activeSurface.isRemoteProviderConfigured,
+                    remoteStatus: engine.backendStatusSummary
+                ),
                 systemImage: "bolt.horizontal.circle"
             ) {
-                LabeledContent("Request destination", value: activeSettings.requestDestinationTitle)
-                LabeledContent("Data leaves this Mac", value: activeSettings.dataLeavesDeviceTitle)
-                LabeledContent("Remote fallback", value: activeSettings.remoteFallbackTitle)
+                LabeledContent("Request destination", value: activeSurface.requestDestinationTitle)
+                LabeledContent("Data leaves this Mac", value: activeSurface.dataLeavesDeviceTitle)
+                LabeledContent("Remote fallback", value: activeSurface.remoteFallbackTitle)
                 DisclosureGroup("Advanced backend details") {
                     LabeledContent("Stop sequences", value: activeSettings.stopSequenceSummaryTitle)
                     LabeledContent("Stop behavior", value: activeSettings.stopSequenceBehaviorTitle)
@@ -102,6 +111,7 @@ struct ModelSettingsView: View {
     @ViewBuilder
     private var providerSection: some View {
         Section("Provider") {
+            let draftSurface = BackendSurface(settings: draft)
             SectionFooterNote(text: "Choose one provider. Only settings needed by the selected path appear here.")
             Picker("Selected backend", selection: $draft.engineKind) {
                 ForEach(CompletionEngineKind.allCases, id: \.self) { kind in
@@ -111,7 +121,7 @@ struct ModelSettingsView: View {
 
             providerSpecificSettings
 
-            if let warning = draft.remoteFallbackWarning {
+            if let warning = draftSurface.remoteFallbackWarning {
                 StatusBadge("Remote fallback", state: .warning)
                 SectionFooterNote(text: warning)
             }
@@ -133,6 +143,7 @@ struct ModelSettingsView: View {
 
     @ViewBuilder
     private var providerSpecificSettings: some View {
+        let draftSurface = BackendSurface(settings: draft)
         switch draft.engineKind {
         case .remote:
             SettingsActionRow(
@@ -143,15 +154,15 @@ struct ModelSettingsView: View {
             )
             remoteProviderFields
         case .localLlama:
-            let diagnostic = draft.localDiagnostic()
+            let diagnostic = draftSurface.localRuntimeDiagnostic
             SettingsActionRow(
                 title: "Local Llama",
                 subtitle: diagnostic.modelFileTitle,
                 state: diagnostic.isUsable ? .ok : .warning,
                 statusTitle: diagnostic.isUsable ? "Ready" : "Needs setup"
             )
-            LabeledContent("Request destination", value: draft.requestDestinationTitle)
-            LabeledContent("Data leaves this Mac", value: draft.dataLeavesDeviceTitle)
+            LabeledContent("Request destination", value: draftSurface.requestDestinationTitle)
+            LabeledContent("Data leaves this Mac", value: draftSurface.dataLeavesDeviceTitle)
             Toggle("Fallback to remote if local fails", isOn: $draft.fallbackToRemoteOnLocalFailure)
             if draft.fallbackToRemoteOnLocalFailure {
                 SectionFooterNote(text: "Remote fallback is enabled: if local completion fails, autocomplete text may be sent after explicit consent below.")
@@ -160,15 +171,15 @@ struct ModelSettingsView: View {
                 }
             }
         case .appleIntelligence:
-            let diagnostic = draft.appleIntelligenceDiagnostic()
+            let diagnostic = draftSurface.appleIntelligenceAvailabilityDiagnostic
             SettingsActionRow(
                 title: "Apple Intelligence",
                 subtitle: diagnostic.requirementTitle,
                 state: diagnostic.isUsable ? .ok : .warning,
                 statusTitle: diagnostic.availabilityTitle
             )
-            LabeledContent("Request destination", value: draft.requestDestinationTitle)
-            LabeledContent("Data leaves this Mac", value: draft.dataLeavesDeviceTitle)
+            LabeledContent("Request destination", value: draftSurface.requestDestinationTitle)
+            LabeledContent("Data leaves this Mac", value: draftSurface.dataLeavesDeviceTitle)
             Toggle("Fallback to remote if Apple fails", isOn: $draft.fallbackToRemoteOnAppleIntelligenceFailure)
             SectionFooterNote(text: "Apple Intelligence fallback uses the remote backend settings above.")
             if draft.fallbackToRemoteOnAppleIntelligenceFailure {
@@ -271,7 +282,7 @@ struct ModelSettingsView: View {
 
     @ViewBuilder
     private var localRuntimeStatusCard: some View {
-        let diagnostic = draft.localDiagnostic()
+        let diagnostic = BackendSurface(settings: draft).localRuntimeDiagnostic
         SettingsInfoCard(
             title: "Local runtime",
             subtitle: diagnostic.modelFileTitle,
@@ -292,7 +303,7 @@ struct ModelSettingsView: View {
 
     @ViewBuilder
     private var appleRuntimeStatusCard: some View {
-        let diagnostic = draft.appleIntelligenceDiagnostic()
+        let diagnostic = BackendSurface(settings: draft).appleIntelligenceAvailabilityDiagnostic
         SettingsInfoCard(
             title: "Apple Intelligence",
             subtitle: diagnostic.requirementTitle,
@@ -524,7 +535,7 @@ struct ModelSettingsView: View {
         controller.saveCompletionBackendSettings(draft)
         draft = controller.completionBackendSettings
         selectedRemotePreset = AutoCompCore.RemoteEndpointPreset.preset(forBaseURL: draft.remoteBaseURL)
-        backendSaveMessage = savedBackendMessage(for: draft)
+        backendSaveMessage = BackendSurface(settings: draft).savedBackendMessage
     }
 
     private func reloadSavedBackend() {
@@ -533,17 +544,6 @@ struct ModelSettingsView: View {
         selectedRemotePreset = AutoCompCore.RemoteEndpointPreset.preset(forBaseURL: draft.remoteBaseURL)
         connectionTestState = .idle
         backendSaveMessage = nil
-    }
-
-    private func savedBackendMessage(for settings: CompletionBackendSettings) -> String {
-        switch settings.engineKind {
-        case .remote:
-            return "Saved Remote OpenAI-compatible: \(settings.remoteModel) at \(settings.remoteBaseURL)."
-        case .localLlama:
-            return "Saved Local Llama as the selected backend."
-        case .appleIntelligence:
-            return "Saved Apple Intelligence as the selected backend."
-        }
     }
 
     private var showsRemoteProviderSettings: Bool {
@@ -562,75 +562,31 @@ struct ModelSettingsView: View {
     }
 
     private var remoteProviderState: SettingsVisualState {
-        isRemoteProviderConfigured(draft) ? .ok : .warning
+        BackendSurface(settings: draft).isRemoteProviderConfigured ? .ok : .warning
     }
 
     private var remoteProviderStatusTitle: String {
-        isRemoteProviderConfigured(draft) ? "Configured" : "Needs setup"
+        BackendSurface(settings: draft).isRemoteProviderConfigured ? "Configured" : "Needs setup"
     }
 
     private var remoteConnectionActionTitle: String {
         draft.engineKind == .remote ? "Test Connection" : "Test Remote Fallback"
     }
 
-    private func isRemoteProviderConfigured(_ settings: CompletionBackendSettings) -> Bool {
-        !settings.remoteBaseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && !settings.remoteModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-
-    private func activeBackendSubtitle(for settings: CompletionBackendSettings) -> String {
-        switch settings.engineKind {
-        case .remote where !isRemoteProviderConfigured(settings):
-            return "Complete the remote URL and model before using this provider."
+    private func activeBackendState(
+        for surface: BackendSurface,
+        remoteProviderConfigured: Bool
+    ) -> SettingsVisualState {
+        switch surface.engineKind {
         case .remote:
-            return settings.requestDestinationTitle
-        case .localLlama:
-            let diagnostic = settings.localDiagnostic()
-            return diagnostic.isUsable ? settings.requestDestinationTitle : diagnostic.modelFileTitle
-        case .appleIntelligence:
-            let diagnostic = settings.appleIntelligenceDiagnostic()
-            return diagnostic.isUsable ? settings.requestDestinationTitle : diagnostic.requirementTitle
-        }
-    }
-
-    private func activeBackendState(for settings: CompletionBackendSettings) -> SettingsVisualState {
-        switch settings.engineKind {
-        case .remote:
-            guard isRemoteProviderConfigured(settings) else {
+            guard remoteProviderConfigured else {
                 return .warning
             }
             return SettingsVisualState.backend(engine.backendStatusSummary.state)
         case .localLlama:
-            return settings.localDiagnostic().isUsable ? .ok : .warning
+            return surface.localRuntimeDiagnostic.isUsable ? .ok : .warning
         case .appleIntelligence:
-            return settings.appleIntelligenceDiagnostic().isUsable ? .ok : .warning
-        }
-    }
-
-    private func activeBackendStatusTitle(for settings: CompletionBackendSettings) -> String {
-        switch settings.engineKind {
-        case .remote:
-            guard isRemoteProviderConfigured(settings) else {
-                return "Not configured"
-            }
-            switch engine.backendStatusSummary.state {
-            case .connected:
-                return "Ready"
-            case .disconnected:
-                return "Failed"
-            case .paused:
-                return "Paused"
-            }
-        case .localLlama:
-            if settings.localDiagnostic().isUsable {
-                return "Ready"
-            }
-            return settings.fallbackToRemoteOnLocalFailure ? "Fallback" : "Not configured"
-        case .appleIntelligence:
-            if settings.appleIntelligenceDiagnostic().isUsable {
-                return "Ready"
-            }
-            return settings.fallbackToRemoteOnAppleIntelligenceFailure ? "Fallback" : "Not configured"
+            return surface.appleIntelligenceAvailabilityDiagnostic.isUsable ? .ok : .warning
         }
     }
 
@@ -1001,7 +957,7 @@ struct ModelSettingsView: View {
         controller.saveCompletionBackendSettings(updatedDraft)
         refreshLocalModels()
         localModelActionState = .ready(message)
-        backendSaveMessage = savedBackendMessage(for: updatedDraft)
+        backendSaveMessage = BackendSurface(settings: updatedDraft).savedBackendMessage
     }
 
     private func removeSelectedLocalModel() {

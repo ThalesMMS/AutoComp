@@ -64,7 +64,12 @@ final class BackendModeTextTests: XCTestCase {
     }
 
     func testModelSettingsSeparatesProviderSelectionFromConditionalRemoteFields() throws {
-        let settingsSource = try settingsSourceContents(packageRoot: packageRoot())
+        let root = try packageRoot()
+        let settingsSource = try settingsSourceContents(packageRoot: root)
+        let backendSurfaceSource = try String(
+            contentsOf: root.appendingPathComponent("Sources/AutoCompApp/Services/BackendSurface.swift"),
+            encoding: .utf8
+        )
         let providerRange = try XCTUnwrap(settingsSource.range(of: "Section(\"Provider\")"))
         let consentRange = try XCTUnwrap(settingsSource.range(of: "Section(\"Remote completion consent\")"))
         let providerBlock = String(settingsSource[providerRange.lowerBound..<consentRange.lowerBound])
@@ -75,7 +80,7 @@ final class BackendModeTextTests: XCTestCase {
         XCTAssertTrue(settingsSource.contains("DisclosureGroup(\"Remote fallback provider\")"))
         XCTAssertFalse(settingsSource.contains("Section(\"Remote backend settings\")"))
         XCTAssertTrue(settingsSource.contains("Apple Intelligence fallback uses the remote backend settings above."))
-        XCTAssertTrue(settingsSource.contains("Saved Apple Intelligence as the selected backend."))
+        XCTAssertTrue(backendSurfaceSource.contains("Saved Apple Intelligence as the selected backend."))
     }
 
     func testPrivacySettingsTextReflectsActiveBackendDestination() throws {

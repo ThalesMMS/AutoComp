@@ -4,9 +4,19 @@ import Foundation
 struct CompletionPlaygroundPreview: Equatable {
     let context: TextContext
     let request: CompletionRequest
-    let requestDestinationTitle: String
-    let dataLeavesDeviceTitle: String
-    let remoteFallbackTitle: String
+    let backendSurface: BackendSurface
+
+    var requestDestinationTitle: String {
+        backendSurface.requestDestinationTitle
+    }
+
+    var dataLeavesDeviceTitle: String {
+        backendSurface.dataLeavesDeviceTitle
+    }
+
+    var remoteFallbackTitle: String {
+        backendSurface.remoteFallbackTitle
+    }
 
     var modeTitle: String {
         switch request.mode {
@@ -91,9 +101,7 @@ struct CompletionPlaygroundService {
         return CompletionPlaygroundPreview(
             context: context,
             request: request,
-            requestDestinationTitle: settings.requestDestinationTitle,
-            dataLeavesDeviceTitle: settings.dataLeavesDeviceTitle,
-            remoteFallbackTitle: settings.remoteFallbackTitle
+            backendSurface: BackendSurface(settings: settings)
         )
     }
 
