@@ -1031,7 +1031,7 @@ public struct LocalModelDiagnosticsRunner: Sendable {
     ///
     /// It validates the GGUF magic and attempts to extract a few commonly used metadata keys:
     /// - general.architecture (string)
-    /// - llama.context_length (u32)
+    /// - <architecture>.context_length (u32), with llama.context_length as a fallback
     /// - general.file_type (u32) which is mapped to a coarse quantization label
     public func parseGGUFHeader(atPath path: String) throws -> GGUFHeaderSummary {
         guard FileManager.default.isReadableFile(atPath: path) else {
@@ -1052,11 +1052,7 @@ public struct LocalModelDiagnosticsRunner: Sendable {
         let maxBytes = 1_048_576
         let data: Data
         do {
-            if #available(macOS 10.15.4, *) {
-                data = try handle.read(upToCount: maxBytes) ?? Data()
-            } else {
-                data = handle.readData(ofLength: maxBytes)
-            }
+            data = try handle.read(upToCount: maxBytes) ?? Data()
         } catch {
             throw GGUFHeaderParseError.ioFailure
         }
@@ -1077,8 +1073,9 @@ public struct LocalModelDiagnosticsRunner: Sendable {
 
         // Iterate over key-value entries.
         var architecture: String?
-        var contextLength: Int?
+        var contextLengthsByArchitecture: [String: Int] = [:]
         var fileType: UInt32?
+        let contextLengthSuffix = ".context_length"
 
         while !cursor.isAtEnd {
             guard let key = cursor.readString() else { break }
@@ -1091,24 +1088,31 @@ public struct LocalModelDiagnosticsRunner: Sendable {
 
             if key == "general.architecture" {
                 architecture = cursor.readValueAsString(type: valueType)
-            } else if key == "llama.context_length" {
-                contextLength = cursor.readValueAsInt(type: valueType)
-                _ = architecture // keep compiler happy
+            } else if key.hasSuffix(contextLengthSuffix), key.count > contextLengthSuffix.count {
+                let contextArchitecture = String(key.dropLast(contextLengthSuffix.count))
+                if let contextLength = cursor.readValueAsInt(type: valueType) {
+                    contextLengthsByArchitecture[contextArchitecture] = contextLength
+                }
             } else if key == "general.file_type" {
                 if let v = cursor.readValueAsInt(type: valueType) {
                     fileType = UInt32(v)
                 }
             } else {
                 // Skip value
-                cursor.skipValue(type: valueType)
+                guard cursor.skipValue(type: valueType) else {
+                    break
+                }
             }
 
-            if architecture != nil, contextLength != nil, fileType != nil {
+            let architectureContextLength = architecture.flatMap { contextLengthsByArchitecture[$0] }
+            if architecture != nil, architectureContextLength != nil, fileType != nil {
                 break
             }
         }
 
         let quantization = fileType.map { GGUFFileType(rawValue: $0)?.label ?? "type \($0)" }
+        let contextLength = architecture.flatMap { contextLengthsByArchitecture[$0] }
+            ?? contextLengthsByArchitecture["llama"]
 
         return GGUFHeaderSummary(
             architecture: architecture,
@@ -1216,27 +1220,40 @@ private struct GGUFDataCursor {
         return String(data: bytes, encoding: .utf8)
     }
 
-    mutating func skipValue(type: GGUFValueType) {
+    @discardableResult
+    mutating func skipValue(type: GGUFValueType) -> Bool {
         switch type {
         case .uint8, .int8, .bool:
-            _ = readBytes(count: 1)
+            return readBytes(count: 1) != nil
         case .uint16, .int16:
-            _ = readBytes(count: 2)
+            return readBytes(count: 2) != nil
         case .uint32, .int32, .float32:
-            _ = readBytes(count: 4)
+            return readBytes(count: 4) != nil
         case .uint64, .int64, .float64:
-            _ = readBytes(count: 8)
+            return readBytes(count: 8) != nil
         case .string:
-            _ = readString()
+            return skipString()
         case .array:
             // array: u32 element type + u64 length + elements
-            guard let elementTypeRaw = readUInt32(), let length = readUInt64() else { return }
-            guard let elementType = GGUFValueType(rawValue: elementTypeRaw) else { return }
+            guard let elementTypeRaw = readUInt32(), let length = readUInt64() else { return false }
+            guard let elementType = GGUFValueType(rawValue: elementTypeRaw) else { return false }
             for _ in 0..<length {
-                skipValue(type: elementType)
-                if isAtEnd { break }
+                let elementOffset = offset
+                guard skipValue(type: elementType), offset > elementOffset else {
+                    return false
+                }
+                if isAtEnd {
+                    break
+                }
             }
+            return true
         }
+    }
+
+    private mutating func skipString() -> Bool {
+        guard let length = readUInt64() else { return false }
+        guard length <= UInt64(Int.max) else { return false }
+        return readBytes(count: Int(length)) != nil
     }
 
     mutating func readValueAsString(type: GGUFValueType) -> String? {

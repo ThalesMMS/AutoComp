@@ -55,6 +55,18 @@ final class InstallationLocationServiceTests: XCTestCase {
         XCTAssertEqual(status.revealPath, "/Users/test/GitHub/AutoComp/.build/debug/AutoComp")
     }
 
+    func testUnknownExecutableFallsBackToBundleURL() {
+        let status = InstallationLocationService.status(
+            bundleURL: URL(fileURLWithPath: "/Applications/AutoComp.app", isDirectory: true),
+            executablePath: "unknown",
+            homeDirectory: URL(fileURLWithPath: "/Users/test", isDirectory: true)
+        )
+
+        XCTAssertFalse(status.shouldWarn)
+        XCTAssertEqual(status.currentPath, "/Applications/AutoComp.app")
+        XCTAssertEqual(status.revealPath, "/Applications/AutoComp.app")
+    }
+
     func testRevealTargetDerivesAppBundleWhenBundleURLIsInsideAppContents() {
         let status = InstallationLocationService.status(
             bundleURL: URL(fileURLWithPath: "/Users/test/GitHub/AutoComp/dist/AutoComp.app/Contents/MacOS", isDirectory: true),

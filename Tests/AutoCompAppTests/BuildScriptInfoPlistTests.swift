@@ -27,6 +27,17 @@ final class BuildScriptInfoPlistTests: XCTestCase {
         XCTAssertTrue(script.contains("configured autocomplete backend on the local network"))
     }
 
+    func testDevelopmentLauncherWarnsAndCanSkipEmbeddedLocalEnv() throws {
+        let scriptURL = try packageRoot().appendingPathComponent("script/build_and_run.sh")
+        let script = try String(contentsOf: scriptURL, encoding: .utf8)
+
+        XCTAssertTrue(script.contains("AUTOCOMP_EMBED_ENV_LOCAL"))
+        XCTAssertTrue(script.contains("AUTOCOMP_EMBED_ENV_LOCAL=0"))
+        XCTAssertTrue(script.contains("WARNING: embedding local environment file"))
+        XCTAssertTrue(script.contains("autocomp.env may contain local credentials"))
+        XCTAssertTrue(script.contains("do not share this dev-staged app bundle"))
+    }
+
     func testGeneratedBundlesDeclarePrivacyUsageDescriptions() throws {
         let root = try packageRoot()
         let scripts = [
@@ -41,15 +52,4 @@ final class BuildScriptInfoPlistTests: XCTestCase {
         }
     }
 
-    private func packageRoot() throws -> URL {
-        var url = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-        while url.path != "/" {
-            if FileManager.default.fileExists(atPath: url.appendingPathComponent("Package.swift").path) {
-                return url
-            }
-            url.deleteLastPathComponent()
-        }
-
-        throw XCTSkip("Unable to locate package root")
-    }
 }

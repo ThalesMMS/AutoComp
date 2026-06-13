@@ -107,7 +107,8 @@ public struct StableFieldIdentity: Codable, Equatable, Sendable {
 
     private func isSameGoogleDocsVolatileLineTarget(as other: StableFieldIdentity) -> Bool {
         guard bundleID == "com.google.Chrome",
-              hasGoogleDocsDomain(domain) || hasGoogleDocsDomain(other.domain),
+              GoogleDocsContext.matches(bundleID: bundleID, domain: domain, appGate: .chrome)
+                || GoogleDocsContext.matches(bundleID: bundleID, domain: other.domain, appGate: .chrome),
               compatible(domain, other.domain),
               compatible(role, other.role),
               compatible(subrole, other.subrole),
@@ -118,10 +119,6 @@ public struct StableFieldIdentity: Codable, Equatable, Sendable {
 
         return Self.isGoogleDocsVolatileLineMetric(roundedFocusedElementFrame)
             && Self.isGoogleDocsVolatileLineMetric(otherRoundedFocusedElementFrame)
-    }
-
-    private func hasGoogleDocsDomain(_ value: String?) -> Bool {
-        value?.contains("docs.google.com") == true
     }
 
     private func compatible(_ lhs: String?, _ rhs: String?) -> Bool {
@@ -231,5 +228,33 @@ public struct TextContext: Identifiable, Codable, Equatable, Sendable {
         self.languageHint = languageHint
         self.captureSources = captureSources
         self.createdAt = createdAt
+    }
+
+    public func copy(
+        textBeforeCursor: String? = nil,
+        stableFieldIdentity: StableFieldIdentity?? = nil
+    ) -> TextContext {
+        TextContext(
+            id: id,
+            app: app,
+            domain: domain,
+            focusedElementID: focusedElementID,
+            stableFieldIdentity: stableFieldIdentity ?? self.stableFieldIdentity,
+            textBeforeCursor: textBeforeCursor ?? self.textBeforeCursor,
+            textAfterCursor: textAfterCursor,
+            selectedText: selectedText,
+            fullTextWindow: fullTextWindow,
+            selectedRange: selectedRange,
+            caretRect: caretRect,
+            focusedElementRect: focusedElementRect,
+            previousGlyphRect: previousGlyphRect,
+            nextGlyphRect: nextGlyphRect,
+            lineReferenceRect: lineReferenceRect,
+            caretGeometryQuality: caretGeometryQuality,
+            observedCharacterWidth: observedCharacterWidth,
+            languageHint: languageHint,
+            captureSources: captureSources,
+            createdAt: createdAt
+        )
     }
 }

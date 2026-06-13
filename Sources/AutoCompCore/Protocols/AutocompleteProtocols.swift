@@ -75,6 +75,67 @@ public protocol MultiplePersonalizationContextAwareCompletionProvider: Personali
     ) async throws -> [Suggestion]
 }
 
+public extension VisualContextAwareCompletionProvider {
+    func complete(context: TextContext) async throws -> Suggestion {
+        try await complete(
+            context: context,
+            privacySettings: PrivacySettings(),
+            visualContext: nil
+        )
+    }
+}
+
+public extension ClipboardContextAwareCompletionProvider {
+    func complete(
+        context: TextContext,
+        privacySettings: PrivacySettings,
+        visualContext: VisualContextSnapshot?
+    ) async throws -> Suggestion {
+        try await complete(
+            context: context,
+            privacySettings: privacySettings,
+            visualContext: visualContext,
+            clipboardContext: nil
+        )
+    }
+}
+
+public extension PersonalizationContextAwareCompletionProvider {
+    func complete(
+        context: TextContext,
+        privacySettings: PrivacySettings,
+        visualContext: VisualContextSnapshot?,
+        clipboardContext: ClipboardContextSnapshot?
+    ) async throws -> Suggestion {
+        try await complete(
+            context: context,
+            privacySettings: privacySettings,
+            visualContext: visualContext,
+            clipboardContext: clipboardContext,
+            personalizationSamples: []
+        )
+    }
+}
+
+public extension MultiplePersonalizationContextAwareCompletionProvider {
+    func complete(
+        context: TextContext,
+        privacySettings: PrivacySettings,
+        visualContext: VisualContextSnapshot?,
+        clipboardContext: ClipboardContextSnapshot?,
+        options: CompletionOptions
+    ) async throws -> [Suggestion] {
+        try await complete(
+            context: context,
+            privacySettings: privacySettings,
+            visualContext: visualContext,
+            clipboardContext: clipboardContext,
+            personalizationSamples: [],
+            options: options
+        )
+    }
+}
+
 @MainActor
 public protocol SuggestionPresenter: AnyObject {
     func show(_ suggestion: Suggestion, for context: TextContext, mode: SuggestionDisplayMode)

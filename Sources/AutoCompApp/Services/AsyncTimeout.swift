@@ -78,11 +78,3 @@ private final class OneShotContinuation<Value>: @unchecked Sendable {
         return true
     }
 }
-
-private extension NSLock {
-    func withLock<T>(_ operation: () -> T) -> T {
-        lock()
-        defer { unlock() }
-        return operation()
-    }
-}

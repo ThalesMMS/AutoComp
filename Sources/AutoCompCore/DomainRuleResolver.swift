@@ -63,11 +63,7 @@ public struct DomainRuleResolver: Sendable {
     /// - Important: `input.activeDomain` must be host-only (or host + coarse path segment) and must not
     ///   include query strings, fragments, or document identifiers.
     public func resolve(input: Input, ruleset: DomainWebAppRuleset?) -> Resolution {
-        guard let host = input.activeDomain, let ruleset else {
-            return Resolution(input: input, matchedRule: nil, effectiveAction: .allow)
-        }
-
-        if let matched = DomainPatternMatcher.bestMatchingRule(forHost: host, rules: ruleset.rules) {
+        if let matched = matchingRule(input: input, ruleset: ruleset) {
             return Resolution(
                 input: input,
                 matchedRule: matched,
@@ -76,6 +72,33 @@ public struct DomainRuleResolver: Sendable {
         }
 
         return Resolution(input: input, matchedRule: nil, effectiveAction: .allow)
+    }
+
+    /// Resolves persisted user rules first, then falls back to production defaults.
+    ///
+    /// Keeping the two rule sets separate is intentional: a user-created broad allow rule should be
+    /// able to override built-in deny/manual defaults without losing to a more-specific fallback rule.
+    public func resolve(
+        input: Input,
+        userRuleset: DomainWebAppRuleset?,
+        fallbackRuleset: DomainWebAppRuleset?
+    ) -> Resolution {
+        if let matched = matchingRule(input: input, ruleset: userRuleset) {
+            return Resolution(
+                input: input,
+                matchedRule: matched,
+                effectiveAction: mapActionToEffectiveAction(matched.action)
+            )
+        }
+
+        return resolve(input: input, ruleset: fallbackRuleset)
+    }
+
+    private func matchingRule(input: Input, ruleset: DomainWebAppRuleset?) -> DomainWebAppRule? {
+        guard let host = input.activeDomain, let ruleset else {
+            return nil
+        }
+        return DomainPatternMatcher.bestMatchingRule(forHost: host, rules: ruleset.rules)
     }
 
     private func mapActionToEffectiveAction(_ action: DomainWebAppRuleAction) -> EffectiveAction {

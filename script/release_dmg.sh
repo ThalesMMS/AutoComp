@@ -5,6 +5,7 @@ APP_PATH=""
 OUTPUT_PATH=""
 VOLUME_NAME="AutoComp"
 DRY_RUN=0
+EMBEDDED_ENV_RELATIVE_PATH="Contents/Resources/autocomp.env"
 
 usage() {
   cat >&2 <<'USAGE'
@@ -61,6 +62,13 @@ fi
 
 if [[ ! -d "$APP_PATH/Contents" ]]; then
   echo "App bundle not found: $APP_PATH" >&2
+  exit 1
+fi
+
+EMBEDDED_ENV_PATH="$APP_PATH/$EMBEDDED_ENV_RELATIVE_PATH"
+if [[ -f "$EMBEDDED_ENV_PATH" ]]; then
+  echo "Refusing to package app bundle containing embedded local environment file: $EMBEDDED_ENV_PATH" >&2
+  echo "Build shareable dev bundles with AUTOCOMP_EMBED_ENV_LOCAL=0, or use script/release_build.sh for distribution artifacts." >&2
   exit 1
 fi
 

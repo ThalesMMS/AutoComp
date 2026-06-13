@@ -60,7 +60,7 @@ public enum DomainWebAppRulePresetCatalog {
         DomainWebAppRulePreset(
             id: PresetId.googleDocs,
             title: "Google Docs",
-            description: "Improve reliability on Google Docs by requiring visual context.",
+            description: "Require visual context before automatic autocomplete in Google Docs.",
             patterns: [
                 .exactHost("docs.google.com"),
                 .wildcardSubdomains("docs.google.com")
@@ -70,27 +70,27 @@ public enum DomainWebAppRulePresetCatalog {
         DomainWebAppRulePreset(
             id: PresetId.googleSheets,
             title: "Google Sheets",
-            description: "Improve reliability on Google Sheets by requiring visual context.",
+            description: "Limit autocomplete to manual trigger mode on Google Sheets.",
             patterns: [
                 .exactHost("sheets.google.com"),
                 .wildcardSubdomains("sheets.google.com")
             ],
-            defaultAction: .visualContextRequired
+            defaultAction: .manualOnly
         ),
         DomainWebAppRulePreset(
             id: PresetId.googleSlides,
             title: "Google Slides",
-            description: "Improve reliability on Google Slides by requiring visual context.",
+            description: "Limit autocomplete to manual trigger mode on Google Slides.",
             patterns: [
                 .exactHost("slides.google.com"),
                 .wildcardSubdomains("slides.google.com")
             ],
-            defaultAction: .visualContextRequired
+            defaultAction: .manualOnly
         ),
         DomainWebAppRulePreset(
             id: PresetId.emailWebApps,
             title: "Email Web Apps",
-            description: "Limit autocomplete to manual-only mode on common email web apps.",
+            description: "Disable autocomplete on common email web apps.",
             patterns: [
                 .exactHost("mail.google.com"),
                 .wildcardSubdomains("mail.google.com"),
@@ -105,7 +105,7 @@ public enum DomainWebAppRulePresetCatalog {
                 .exactHost("protonmail.com"),
                 .wildcardSubdomains("protonmail.com")
             ],
-            defaultAction: .manualOnly
+            defaultAction: .deny
         ),
         DomainWebAppRulePreset(
             id: PresetId.sensitiveOrUnsupported,

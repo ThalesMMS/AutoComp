@@ -15,10 +15,6 @@ public final class CompatibilitySettingsStore: @unchecked Sendable {
         self.modeKey = modeKey
     }
 
-    public func loadOverrides() -> [String: Bool] {
-        loadModeOverrides().mapValues { $0 != .disabled }
-    }
-
     public func loadModeOverrides() -> [String: CompatibilityOverrideMode] {
         if let rawModes = defaults.dictionary(forKey: modeKey) as? [String: String] {
             return rawModes.compactMapValues(CompatibilityOverrideMode.init(rawValue:))
@@ -26,10 +22,6 @@ public final class CompatibilitySettingsStore: @unchecked Sendable {
 
         let legacyOverrides = defaults.dictionary(forKey: legacyEnabledKey) as? [String: Bool] ?? [:]
         return legacyOverrides.mapValues { $0 ? .automatic : .disabled }
-    }
-
-    public func setEnabled(_ enabled: Bool, for bundleID: String) {
-        setMode(enabled ? .automatic : .disabled, for: bundleID)
     }
 
     public func setMode(_ mode: CompatibilityOverrideMode?, for bundleID: String) {

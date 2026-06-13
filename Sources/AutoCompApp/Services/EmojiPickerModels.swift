@@ -117,9 +117,9 @@ struct EmojiCatalogEntry: Identifiable, Equatable, Sendable {
         skinToneVariants: [EmojiSkinTone: String] = [:],
         genderVariants: [EmojiGenderPresentation: String] = [:]
     ) {
-        self.aliases = aliases.map(Self.normalized)
+        self.aliases = aliases.map(Self.normalizedAliasOrKeyword)
         self.glyph = glyph
-        self.keywords = keywords.map(Self.normalized)
+        self.keywords = keywords.map(Self.normalizedAliasOrKeyword)
         self.skinToneVariants = skinToneVariants
         self.genderVariants = genderVariants
     }
@@ -132,7 +132,7 @@ struct EmojiCatalogEntry: Identifiable, Equatable, Sendable {
         aliases.first ?? ""
     }
 
-    private static func normalized(_ value: String) -> String {
+    private static func normalizedAliasOrKeyword(_ value: String) -> String {
         value
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
@@ -207,7 +207,7 @@ struct EmojiMatcher: Sendable {
     var entries: [EmojiCatalogEntry] = EmojiCatalog.defaultEntries
 
     func matches(for rawQuery: String, limit: Int = 6) -> [EmojiMatch] {
-        let query = normalized(rawQuery)
+        let query = normalizedQuery(rawQuery)
         guard !query.isEmpty else {
             return []
         }
@@ -226,7 +226,7 @@ struct EmojiMatcher: Sendable {
     }
 
     func exactMatch(for rawQuery: String) -> EmojiMatch? {
-        let query = normalized(rawQuery)
+        let query = normalizedQuery(rawQuery)
         return entries.first { $0.aliases.contains(query) }
             .map { EmojiMatch(entry: $0, score: 0) }
     }
@@ -255,7 +255,7 @@ struct EmojiMatcher: Sendable {
         return nil
     }
 
-    private func normalized(_ value: String) -> String {
+    private func normalizedQuery(_ value: String) -> String {
         value
             .trimmingCharacters(in: CharacterSet(charactersIn: ":").union(.whitespacesAndNewlines))
             .lowercased()

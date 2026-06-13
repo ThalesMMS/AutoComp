@@ -71,17 +71,6 @@ final class OverlayPresenterSupportTests: XCTestCase {
         XCTAssertFalse(presenterSource.contains("NSScreen.screens.map(\\.frame)"))
     }
 
-    private func packageRoot() throws -> URL {
-        var url = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-        while url.path != "/" {
-            if FileManager.default.fileExists(atPath: url.appendingPathComponent("Package.swift").path) {
-                return url
-            }
-            url.deleteLastPathComponent()
-        }
-
-        throw XCTSkip("Unable to locate package root")
-    }
 }
 
 private extension TextContext {

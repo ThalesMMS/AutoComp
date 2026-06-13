@@ -1,12 +1,5 @@
 import Foundation
 
-extension Duration {
-    var appMilliseconds: Int {
-        let components = components
-        return Int(components.seconds * 1_000 + components.attoseconds / 1_000_000_000_000_000)
-    }
-}
-
 struct CompletionLatencyMetricRow: Codable, Equatable, Sendable {
     let key: String
     let title: String

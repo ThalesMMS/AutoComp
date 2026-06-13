@@ -74,9 +74,6 @@ struct SuggestionDiagnostics: Equatable {
         case domainManualOnly = "domain-manual-only"
         case domainNeedsVisualContext = "domain-needs-visual-context"
 
-        // Legacy privacy switch (retained for compatibility with existing diagnostics).
-        case privacyDomainDisabled = "privacy-domain-disabled"
-
         case riskyHostApp = "blocked-risky-host-app"
         case noMeaningfulPrefix = "no-meaningful-prefix"
         case sentenceComplete = "sentence-complete"

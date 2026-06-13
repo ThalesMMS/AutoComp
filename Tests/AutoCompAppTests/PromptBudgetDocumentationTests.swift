@@ -52,14 +52,4 @@ final class PromptBudgetDocumentationTests: XCTestCase {
         }
     }
 
-    private func packageRoot() throws -> URL {
-        var url = URL(fileURLWithPath: #filePath)
-        while url.pathComponents.count > 1 {
-            url.deleteLastPathComponent()
-            if FileManager.default.fileExists(atPath: url.appendingPathComponent("Package.swift").path) {
-                return url
-            }
-        }
-        throw NSError(domain: "PromptBudgetDocumentationTests", code: 1)
-    }
 }

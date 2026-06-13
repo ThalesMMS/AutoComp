@@ -103,7 +103,7 @@ final class FIMNormalizerRegressionTests: XCTestCase {
         let fixture = try XCTUnwrap(
             loadFixtures().first { $0.categories.contains("selection") }
         )
-        let context = makeContext(for: fixture)
+        let context = context(for: fixture)
         let evaluator = SuggestionEligibilityEvaluator()
         let now = Date(timeIntervalSinceReferenceDate: 10)
         let compatibilityDecision = supportedCompatibilityDecision(for: context)
@@ -166,7 +166,7 @@ final class FIMNormalizerRegressionTests: XCTestCase {
     }
 
     private func makeRequest(for fixture: FIMNormalizerFixture) -> CompletionRequest {
-        makeRequest(for: makeContext(for: fixture))
+        makeRequest(for: context(for: fixture))
     }
 
     private func makeRequest(for context: TextContext) -> CompletionRequest {
@@ -180,36 +180,17 @@ final class FIMNormalizerRegressionTests: XCTestCase {
         )
     }
 
-    private func makeContext(for fixture: FIMNormalizerFixture) -> TextContext {
+    private func context(for fixture: FIMNormalizerFixture) -> TextContext {
         makeContext(
             textBeforeCursor: fixture.textBeforeCursor,
             textAfterCursor: fixture.textAfterCursor,
+            domain: "example.com",
             selectedText: fixture.selectedText,
             fullTextWindow: fixture.fullTextWindow
-        )
-    }
-
-    private func makeContext(
-        textBeforeCursor: String,
-        textAfterCursor: String?,
-        selectedText: String? = nil,
-        fullTextWindow: String? = nil
-    ) -> TextContext {
-        let resolvedFullTextWindow = fullTextWindow
-            ?? "\(textBeforeCursor)\(selectedText ?? "")\(textAfterCursor ?? "")"
-        let selectedRange = selectedText.map { selected in
-            NSRange(location: textBeforeCursor.count, length: selected.count)
-        }
-
-        return TextContext(
-            app: AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1),
-            domain: "example.com",
-            focusedElementID: "field",
-            textBeforeCursor: textBeforeCursor,
-            textAfterCursor: textAfterCursor,
-            selectedText: selectedText,
-            fullTextWindow: resolvedFullTextWindow,
-            selectedRange: selectedRange
+                ?? "\(fixture.textBeforeCursor)\(fixture.selectedText ?? "")\(fixture.textAfterCursor ?? "")",
+            selectedRange: fixture.selectedText.map { selected in
+                NSRange(location: fixture.textBeforeCursor.count, length: selected.count)
+            }
         )
     }
 

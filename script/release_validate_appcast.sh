@@ -387,6 +387,7 @@ fi
 
 # Validate each item
 idx=0
+if [[ "${#ITEM_FILES[@]}" -gt 0 ]]; then
 for item_file in "${ITEM_FILES[@]}"; do
   idx=$((idx+1))
   group_start "Item #${idx}"
@@ -519,6 +520,7 @@ for item_file in "${ITEM_FILES[@]}"; do
   group_end
 
 done
+fi
 
 # Final status
 if [[ "$STRICT_WARNINGS" -gt 0 ]]; then

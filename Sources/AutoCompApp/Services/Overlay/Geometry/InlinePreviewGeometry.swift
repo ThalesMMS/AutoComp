@@ -77,7 +77,7 @@ enum InlinePreviewGeometry {
             )
         }
 
-        if isWebLikeApp(context.app.bundleID),
+        if WebHostApps.isWebLike(context.app.bundleID),
            focusedElementRect != nil,
            previousGlyphRect == nil,
            !hasReliableFineCaret(caretRect) {
@@ -333,14 +333,14 @@ enum InlinePreviewGeometry {
     }
 
     private static func estimatedFontSize(for focusedElementRect: CGRect, context: TextContext) -> CGFloat {
-        if isWebLikeApp(context.app.bundleID) {
+        if WebHostApps.isWebLike(context.app.bundleID) {
             return 14
         }
         return min(17, max(13, focusedElementRect.height * 0.42))
     }
 
     private static func estimatedHorizontalPadding(for context: TextContext) -> CGFloat {
-        isWebLikeApp(context.app.bundleID) ? 4 : 8
+        WebHostApps.isWebLike(context.app.bundleID) ? 4 : 8
     }
 
     private static func estimatedLineHeight(for font: NSFont) -> CGFloat {
@@ -348,22 +348,10 @@ enum InlinePreviewGeometry {
     }
 
     private static func estimatedVerticalPadding(for visibleFocus: CGRect, context: TextContext) -> CGFloat {
-        if isWebLikeApp(context.app.bundleID) {
+        if WebHostApps.isWebLike(context.app.bundleID) {
             return min(8, max(5, visibleFocus.height * 0.12))
         }
         return max(CGFloat(4), min(CGFloat(10), visibleFocus.height * 0.16))
-    }
-
-    private static func isWebLikeApp(_ bundleID: String) -> Bool {
-        [
-            "com.openai.codex",
-            "com.google.Chrome",
-            "com.brave.Browser",
-            "com.microsoft.edgemac",
-            "company.thebrowser.Browser",
-            "company.thebrowser.dia",
-            "com.todesktop.230313mzl4w4u92"
-        ].contains(bundleID)
     }
 
     private static func estimatedVisibleLine(in text: String, font: NSFont, maxLineWidth: CGFloat) -> (width: CGFloat, lineIndex: Int) {

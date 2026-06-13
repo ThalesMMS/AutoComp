@@ -339,11 +339,3 @@ struct VisualContextOCRCapturer: VisualTextCapturing {
         return observations
     }
 }
-
-private extension NSLock {
-    func withLock<T>(_ operation: () -> T) -> T {
-        lock()
-        defer { unlock() }
-        return operation()
-    }
-}

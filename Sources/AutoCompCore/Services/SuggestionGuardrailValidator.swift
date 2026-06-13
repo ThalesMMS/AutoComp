@@ -90,7 +90,8 @@ public struct SuggestionGuardrailValidator: Sendable {
         )
             && isSameGoogleDocsStableTarget(
                 binding.stableFieldIdentity,
-                currentStableFieldIdentity
+                currentStableFieldIdentity,
+                fallbackDomain: binding.contextFingerprint?.domain ?? currentContextFingerprint?.domain
             )
         let targetMatches = stableFieldMatches || googleDocsTextContextMatches
 
@@ -129,10 +130,15 @@ public struct SuggestionGuardrailValidator: Sendable {
 
     private func isSameGoogleDocsStableTarget(
         _ baseline: StableFieldIdentity?,
-        _ current: StableFieldIdentity?
+        _ current: StableFieldIdentity?,
+        fallbackDomain: String?
     ) -> Bool {
         guard let knownIdentity = baseline ?? current,
-              knownIdentity.bundleID == "com.google.Chrome" else {
+              GoogleDocsContext.matches(
+                bundleID: knownIdentity.bundleID,
+                domain: knownIdentity.domain ?? fallbackDomain,
+                appGate: .chrome
+              ) else {
             return false
         }
 
@@ -148,17 +154,14 @@ public struct SuggestionGuardrailValidator: Sendable {
         return true
     }
 
-    private func hasGoogleDocsDomain(_ value: String?) -> Bool {
-        value?.contains("docs.google.com") == true
-    }
-
     private func isGoogleDocsTextFingerprintMatch(
         _ baseline: SuggestionContextFingerprint?,
         _ current: SuggestionContextFingerprint?
     ) -> Bool {
         guard let baseline,
               let current,
-              hasGoogleDocsDomain(baseline.domain) || hasGoogleDocsDomain(current.domain),
+              GoogleDocsContext.matches(bundleID: "", domain: baseline.domain)
+                || GoogleDocsContext.matches(bundleID: "", domain: current.domain),
               compatible(baseline.domain, current.domain),
               googleDocsCollapsedSelectionCompatible(baseline.selectedRange, current.selectedRange),
               baseline.prefixHash == current.prefixHash,

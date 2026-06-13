@@ -1,4 +1,5 @@
 import AppKit
+import AutoCompCore
 import Foundation
 
 enum BrowserDomainResolutionStatus: String, Codable, Equatable, Sendable {
@@ -80,9 +81,9 @@ struct BrowserContextResolver {
 
     private func normalizedDomain(host: String, urlString: String) -> String {
         var normalized = host
-        if urlString.contains("docs.google.com/spreadsheets") {
+        if GoogleDocsContext.surface(for: urlString) == .spreadsheet {
             normalized += "/spreadsheets"
-        } else if urlString.contains("docs.google.com/presentation") {
+        } else if GoogleDocsContext.surface(for: urlString) == .presentation {
             normalized += "/presentation"
         }
         return normalized

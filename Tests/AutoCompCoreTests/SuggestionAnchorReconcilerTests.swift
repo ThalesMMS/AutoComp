@@ -196,25 +196,4 @@ final class SuggestionAnchorReconcilerTests: XCTestCase {
         )
     }
 
-    private func makeContext(
-        textBeforeCursor: String,
-        textAfterCursor: String? = nil,
-        app: AppIdentity = AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1),
-        domain: String? = nil,
-        focusedElementID: String = "field",
-        stableFieldIdentity: StableFieldIdentity? = nil,
-        selectedText: String? = nil,
-        selectedRange: NSRange? = NSRange(location: 0, length: 0)
-    ) -> TextContext {
-        TextContext(
-            app: app,
-            domain: domain,
-            focusedElementID: focusedElementID,
-            stableFieldIdentity: stableFieldIdentity,
-            textBeforeCursor: textBeforeCursor,
-            textAfterCursor: textAfterCursor,
-            selectedText: selectedText,
-            selectedRange: selectedRange
-        )
-    }
 }

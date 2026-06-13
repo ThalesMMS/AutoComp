@@ -33,6 +33,18 @@ final class EmojiPickerControllerTests: XCTestCase {
         XCTAssertEqual(matcher.exactMatch(for: ":smile:")?.entry.glyph, "😄")
     }
 
+    func testMatcherQueryTrimsColonsWithoutChangingCatalogAliases() {
+        let colonAlias = EmojiCatalogEntry(aliases: [":ship it:"], glyph: "🛳")
+        XCTAssertEqual(colonAlias.primaryAlias, ":ship_it:")
+        XCTAssertNil(EmojiMatcher(entries: [colonAlias]).exactMatch(for: ":ship it:"))
+
+        let plainAlias = EmojiCatalogEntry(aliases: ["ship it"], glyph: "🚢")
+        let matcher = EmojiMatcher(entries: [plainAlias])
+
+        XCTAssertEqual(matcher.exactMatch(for: ":ship it:")?.entry.glyph, "🚢")
+        XCTAssertEqual(matcher.matches(for: " ship it ").first?.entry.glyph, "🚢")
+    }
+
     func testControllerShowsPanelAndCommitsSelectedEmoji() async {
         let contextProvider = FakeEmojiTextContextProvider(context: textContext("hello :smile"))
         let replacer = RecordingEmojiTextReplacer()

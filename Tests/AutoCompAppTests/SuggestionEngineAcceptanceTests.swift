@@ -164,6 +164,7 @@ final class SuggestionEngineAcceptanceTests: XCTestCase {
             contextProvider: contextProvider,
             completionProvider: completionProvider,
             presenter: RecordingSuggestionPresenter(),
+            privacyStore: try googleDocsAllowedPrivacyStore(),
             hostPublishAwaiter: HostPublishAwaiter(configuration: HostPublishAwaitConfiguration(
                 firstReadDelayNanoseconds: 100_000_000,
                 pollIntervalNanoseconds: 100_000_000,
@@ -214,6 +215,7 @@ final class SuggestionEngineAcceptanceTests: XCTestCase {
             contextProvider: contextProvider,
             completionProvider: completionProvider,
             presenter: RecordingSuggestionPresenter(),
+            privacyStore: try googleDocsAllowedPrivacyStore(),
             hostPublishAwaiter: HostPublishAwaiter(configuration: HostPublishAwaitConfiguration(
                 firstReadDelayNanoseconds: 100_000_000,
                 pollIntervalNanoseconds: 100_000_000,
@@ -260,6 +262,187 @@ final class SuggestionEngineAcceptanceTests: XCTestCase {
             }
             try await Task.sleep(nanoseconds: 50_000_000)
         }
+    }
+
+    func testPersistedDomainRuleCanOverrideBuiltInMailDenial() async throws {
+        let app = AppIdentity(bundleID: "com.google.Chrome", displayName: "Google Chrome", processID: 1)
+        let context = TextContext(
+            app: app,
+            domain: "mail.google.com",
+            focusedElementID: "mail-compose",
+            textBeforeCursor: "Please "
+        )
+        let privacyStore = try makePrivacyStore(domainRules: [
+            DomainWebAppRule(
+                pattern: .exactHost("mail.google.com"),
+                action: .allow
+            )
+        ])
+        let completionProvider = CountingCompletionProvider(
+            suggestion: Suggestion(
+                baseContextID: context.id,
+                visibleText: "continue this",
+                latencyMs: 25
+            )
+        )
+        let engine = SuggestionEngine(
+            contextProvider: MutableContextProvider(context: context),
+            completionProvider: completionProvider,
+            presenter: RecordingSuggestionPresenter(),
+            privacyStore: privacyStore
+        )
+
+        engine.recordCapturedInputEvent(.text(keyCode: CapturedInputEventAdapter.spaceKeyCode, isSuggestionTrigger: true))
+        try await waitForVisibleSuggestion("continue this", engine: engine, timeoutNanoseconds: 1_500_000_000)
+
+        let callCount = await completionProvider.getCallCount()
+        XCTAssertEqual(callCount, 1)
+        XCTAssertEqual(engine.currentSuggestion?.visibleText, "continue this")
+        engine.stop()
+    }
+
+    func testPersistedManualOnlyDomainRuleBlocksAutomaticButAllowsManualTrigger() async throws {
+        let app = AppIdentity(bundleID: "com.google.Chrome", displayName: "Google Chrome", processID: 1)
+        let context = TextContext(
+            app: app,
+            domain: "example.com",
+            focusedElementID: "web-field",
+            textBeforeCursor: "Please "
+        )
+        let privacyStore = try makePrivacyStore(domainRules: [
+            DomainWebAppRule(
+                pattern: .exactHost("example.com"),
+                action: .manualOnly
+            )
+        ])
+        let completionProvider = CountingCompletionProvider(
+            suggestion: Suggestion(
+                baseContextID: context.id,
+                visibleText: "continue this",
+                latencyMs: 25
+            )
+        )
+        let engine = SuggestionEngine(
+            contextProvider: MutableContextProvider(context: context),
+            completionProvider: completionProvider,
+            presenter: RecordingSuggestionPresenter(),
+            privacyStore: privacyStore
+        )
+
+        engine.recordCapturedInputEvent(.text(keyCode: CapturedInputEventAdapter.spaceKeyCode, isSuggestionTrigger: true))
+        try await Task.sleep(nanoseconds: 900_000_000)
+
+        let automaticCallCount = await completionProvider.getCallCount()
+        XCTAssertEqual(automaticCallCount, 0)
+        XCTAssertNil(engine.currentSuggestion)
+        XCTAssertEqual(engine.diagnostics.eligibility?.skipReason, "domain-manual-only")
+
+        await engine.triggerManualSuggestion()
+        try await waitForVisibleSuggestion("continue this", engine: engine, timeoutNanoseconds: 1_500_000_000)
+
+        let manualCallCount = await completionProvider.getCallCount()
+        XCTAssertEqual(manualCallCount, 1)
+        XCTAssertEqual(engine.currentSuggestion?.visibleText, "continue this")
+        engine.stop()
+    }
+
+    func testPersistedVisualContextRequiredDomainRuleBlocksAutomaticWithoutVisualContext() async throws {
+        let app = AppIdentity(bundleID: "com.google.Chrome", displayName: "Google Chrome", processID: 1)
+        let context = TextContext(
+            app: app,
+            domain: "example.com",
+            focusedElementID: "web-field",
+            textBeforeCursor: "Please "
+        )
+        let privacyStore = try makePrivacyStore(
+            screenContextEnabled: true,
+            domainRules: [
+                DomainWebAppRule(
+                    pattern: .exactHost("example.com"),
+                    action: .visualContextRequired
+                )
+            ]
+        )
+        let completionProvider = CountingCompletionProvider(
+            suggestion: Suggestion(
+                baseContextID: context.id,
+                visibleText: "continue this",
+                latencyMs: 25
+            )
+        )
+        let engine = SuggestionEngine(
+            contextProvider: MutableContextProvider(context: context),
+            completionProvider: completionProvider,
+            presenter: RecordingSuggestionPresenter(),
+            privacyStore: privacyStore
+        )
+
+        engine.recordCapturedInputEvent(.text(keyCode: CapturedInputEventAdapter.spaceKeyCode, isSuggestionTrigger: true))
+        try await Task.sleep(nanoseconds: 900_000_000)
+
+        let callCount = await completionProvider.getCallCount()
+        XCTAssertEqual(callCount, 0)
+        XCTAssertNil(engine.currentSuggestion)
+        XCTAssertEqual(engine.diagnostics.eligibility?.skipReason, "domain-needs-visual-context")
+        engine.stop()
+    }
+
+    func testGoogleDocsProductionDefaultBlocksAutomaticWithoutVisualContext() async throws {
+        let app = AppIdentity(bundleID: "com.google.Chrome", displayName: "Google Chrome", processID: 1)
+        let context = TextContext(
+            app: app,
+            domain: "docs.google.com",
+            focusedElementID: "google-docs-field",
+            textBeforeCursor: "Please "
+        )
+        let privacyStore = try makePrivacyStore(screenContextEnabled: true, domainRules: [])
+        let completionProvider = CountingCompletionProvider(
+            suggestion: Suggestion(
+                baseContextID: context.id,
+                visibleText: "continue this",
+                latencyMs: 25
+            )
+        )
+        let engine = SuggestionEngine(
+            contextProvider: MutableContextProvider(context: context),
+            completionProvider: completionProvider,
+            presenter: RecordingSuggestionPresenter(),
+            privacyStore: privacyStore
+        )
+
+        engine.recordCapturedInputEvent(.text(keyCode: CapturedInputEventAdapter.spaceKeyCode, isSuggestionTrigger: true))
+        try await Task.sleep(nanoseconds: 900_000_000)
+
+        let callCount = await completionProvider.getCallCount()
+        XCTAssertEqual(callCount, 0)
+        XCTAssertNil(engine.currentSuggestion)
+        XCTAssertEqual(engine.diagnostics.eligibility?.skipReason, "domain-needs-visual-context")
+        engine.stop()
+    }
+
+    private func makePrivacyStore(
+        screenContextEnabled: Bool = false,
+        domainRules: [DomainWebAppRule]
+    ) throws -> PrivacySettingsStore {
+        let suiteName = "AutoCompDomainRules-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        let store = PrivacySettingsStore(defaults: defaults, key: "privacy")
+        try store.save(PrivacySettings(
+            screenContextEnabled: screenContextEnabled,
+            domainWebAppRules: DomainWebAppRules(
+                ruleset: DomainWebAppRuleset(rules: domainRules)
+            )
+        ))
+        return store
+    }
+
+    private func googleDocsAllowedPrivacyStore(screenContextEnabled: Bool = false) throws -> PrivacySettingsStore {
+        try makePrivacyStore(
+            screenContextEnabled: screenContextEnabled,
+            domainRules: [
+                DomainWebAppRule(pattern: .exactHost("docs.google.com"), action: .allow)
+            ]
+        )
     }
 
     func testPromptCacheDiagnosticsRecordedAfterCompletion() async throws {
@@ -352,7 +535,8 @@ final class SuggestionEngineAcceptanceTests: XCTestCase {
         let engine = SuggestionEngine(
             contextProvider: contextProvider,
             completionProvider: completionProvider,
-            presenter: presenter
+            presenter: presenter,
+            privacyStore: try googleDocsAllowedPrivacyStore()
         )
 
         await engine.triggerManualSuggestion()
@@ -609,7 +793,8 @@ final class SuggestionEngineAcceptanceTests: XCTestCase {
         let engine = SuggestionEngine(
             contextProvider: contextProvider,
             completionProvider: completionProvider,
-            presenter: presenter
+            presenter: presenter,
+            privacyStore: try googleDocsAllowedPrivacyStore()
         )
 
         await engine.triggerManualSuggestion()
@@ -1025,7 +1210,8 @@ final class SuggestionEngineAcceptanceTests: XCTestCase {
         let engine = SuggestionEngine(
             contextProvider: contextProvider,
             completionProvider: completionProvider,
-            presenter: presenter
+            presenter: presenter,
+            privacyStore: try googleDocsAllowedPrivacyStore()
         )
 
         engine.start()
@@ -1140,7 +1326,8 @@ final class SuggestionEngineAcceptanceTests: XCTestCase {
         let engine = SuggestionEngine(
             contextProvider: contextProvider,
             completionProvider: completionProvider,
-            presenter: presenter
+            presenter: presenter,
+            privacyStore: try googleDocsAllowedPrivacyStore()
         )
 
         await engine.triggerManualSuggestion()
@@ -1186,7 +1373,8 @@ final class SuggestionEngineAcceptanceTests: XCTestCase {
         let engine = SuggestionEngine(
             contextProvider: contextProvider,
             completionProvider: completionProvider,
-            presenter: presenter
+            presenter: presenter,
+            privacyStore: try googleDocsAllowedPrivacyStore()
         )
 
         engine.start()
@@ -1264,7 +1452,8 @@ final class SuggestionEngineAcceptanceTests: XCTestCase {
         let engine = SuggestionEngine(
             contextProvider: contextProvider,
             completionProvider: completionProvider,
-            presenter: presenter
+            presenter: presenter,
+            privacyStore: try googleDocsAllowedPrivacyStore()
         )
 
         engine.start()
@@ -1326,7 +1515,8 @@ final class SuggestionEngineAcceptanceTests: XCTestCase {
         let engine = SuggestionEngine(
             contextProvider: contextProvider,
             completionProvider: completionProvider,
-            presenter: presenter
+            presenter: presenter,
+            privacyStore: try googleDocsAllowedPrivacyStore()
         )
 
         engine.start()
@@ -1396,7 +1586,8 @@ final class SuggestionEngineAcceptanceTests: XCTestCase {
         let engine = SuggestionEngine(
             contextProvider: contextProvider,
             completionProvider: completionProvider,
-            presenter: presenter
+            presenter: presenter,
+            privacyStore: try googleDocsAllowedPrivacyStore()
         )
 
         engine.start()
@@ -1435,7 +1626,8 @@ final class SuggestionEngineAcceptanceTests: XCTestCase {
         let engine = SuggestionEngine(
             contextProvider: contextProvider,
             completionProvider: completionProvider,
-            presenter: presenter
+            presenter: presenter,
+            privacyStore: try googleDocsAllowedPrivacyStore()
         )
 
         engine.start()
@@ -1528,7 +1720,8 @@ final class SuggestionEngineAcceptanceTests: XCTestCase {
         let engine = SuggestionEngine(
             contextProvider: contextProvider,
             completionProvider: completionProvider,
-            presenter: presenter
+            presenter: presenter,
+            privacyStore: try googleDocsAllowedPrivacyStore()
         )
 
         engine.start()
@@ -1817,9 +2010,7 @@ final class SuggestionEngineAcceptanceTests: XCTestCase {
     }
 
     func testMissingVisualContextDoesNotBlockCompletion() async throws {
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: "AutoCompVisualCooldown-\(UUID().uuidString)"))
-        let privacyStore = PrivacySettingsStore(defaults: defaults, key: "privacy")
-        try privacyStore.save(PrivacySettings(screenContextEnabled: true))
+        let privacyStore = try googleDocsAllowedPrivacyStore(screenContextEnabled: true)
         let app = AppIdentity(bundleID: "com.google.Chrome", displayName: "Google Chrome", processID: 1)
         let stableFieldIdentity = StableFieldIdentity(
             app: app,
@@ -2442,6 +2633,7 @@ final class SuggestionEngineAcceptanceTests: XCTestCase {
             contextProvider: contextProvider,
             completionProvider: completionProvider,
             presenter: RecordingSuggestionPresenter(),
+            privacyStore: try googleDocsAllowedPrivacyStore(),
             shortcutLeakRepairInserter: repairer
         )
 
@@ -2559,7 +2751,8 @@ final class SuggestionEngineAcceptanceTests: XCTestCase {
         let engine = SuggestionEngine(
             contextProvider: contextProvider,
             completionProvider: completionProvider,
-            presenter: presenter
+            presenter: presenter,
+            privacyStore: try googleDocsAllowedPrivacyStore()
         )
 
         engine.start()
@@ -2611,7 +2804,8 @@ final class SuggestionEngineAcceptanceTests: XCTestCase {
         let engine = SuggestionEngine(
             contextProvider: contextProvider,
             completionProvider: completionProvider,
-            presenter: presenter
+            presenter: presenter,
+            privacyStore: try googleDocsAllowedPrivacyStore()
         )
 
         engine.start()
@@ -2667,7 +2861,8 @@ final class SuggestionEngineAcceptanceTests: XCTestCase {
         let engine = SuggestionEngine(
             contextProvider: contextProvider,
             completionProvider: completionProvider,
-            presenter: presenter
+            presenter: presenter,
+            privacyStore: try googleDocsAllowedPrivacyStore()
         )
 
         engine.start()
@@ -2724,7 +2919,8 @@ final class SuggestionEngineAcceptanceTests: XCTestCase {
         let engine = SuggestionEngine(
             contextProvider: contextProvider,
             completionProvider: completionProvider,
-            presenter: presenter
+            presenter: presenter,
+            privacyStore: try googleDocsAllowedPrivacyStore()
         )
 
         engine.start()
@@ -2782,7 +2978,8 @@ final class SuggestionEngineAcceptanceTests: XCTestCase {
         let engine = SuggestionEngine(
             contextProvider: contextProvider,
             completionProvider: completionProvider,
-            presenter: presenter
+            presenter: presenter,
+            privacyStore: try googleDocsAllowedPrivacyStore()
         )
 
         engine.start()
@@ -2848,7 +3045,8 @@ final class SuggestionEngineAcceptanceTests: XCTestCase {
         let engine = SuggestionEngine(
             contextProvider: contextProvider,
             completionProvider: completionProvider,
-            presenter: presenter
+            presenter: presenter,
+            privacyStore: try googleDocsAllowedPrivacyStore()
         )
 
         engine.start()
@@ -4007,10 +4205,6 @@ private actor RecordingVisualContextCompletionProvider: VisualContextAwareComple
         storedPrivacySettings
     }
 
-    func complete(context: TextContext) async throws -> Suggestion {
-        try await complete(context: context, privacySettings: PrivacySettings(), visualContext: nil)
-    }
-
     func complete(
         context: TextContext,
         privacySettings: PrivacySettings,
@@ -4043,28 +4237,6 @@ private actor RecordingClipboardContextCompletionProvider: ClipboardContextAware
 
     func recordedPrivacySettings() -> PrivacySettings? {
         storedPrivacySettings
-    }
-
-    func complete(context: TextContext) async throws -> Suggestion {
-        try await complete(
-            context: context,
-            privacySettings: PrivacySettings(),
-            visualContext: nil,
-            clipboardContext: nil
-        )
-    }
-
-    func complete(
-        context: TextContext,
-        privacySettings: PrivacySettings,
-        visualContext: VisualContextSnapshot?
-    ) async throws -> Suggestion {
-        try await complete(
-            context: context,
-            privacySettings: privacySettings,
-            visualContext: visualContext,
-            clipboardContext: nil
-        )
     }
 
     func complete(

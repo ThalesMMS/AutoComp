@@ -46,7 +46,7 @@ public enum SuggestionTextNormalizer {
         text = removeTrailingTextEcho(from: text, trailingText: trailingText)
 
         if endsWithWhitespace(precedingText) {
-            text = droppingLeadingWhitespace(from: text)
+            text = droppingLeadingHorizontalWhitespace(from: text)
         }
 
         return trimmingTrailingWhitespaceAndNewlines(from: text)
@@ -248,7 +248,7 @@ public enum SuggestionTextNormalizer {
         text.unicodeScalars.last.map(CharacterSet.whitespacesAndNewlines.contains) == true
     }
 
-    private static func droppingLeadingWhitespace(from text: String) -> String {
+    private static func droppingLeadingHorizontalWhitespace(from text: String) -> String {
         String(text.unicodeScalars.drop { CharacterSet.whitespaces.contains($0) })
     }
 

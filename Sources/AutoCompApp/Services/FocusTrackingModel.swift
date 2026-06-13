@@ -98,7 +98,7 @@ final class FocusTrackingModel: ObservableObject, TextContextProvider, FocusCont
             let axCaptureStartedAt = ContinuousClock.now
             let focusSnapshot = try focusSnapshotResolver.resolve()
             lastDomainResolution = focusSnapshot.domainResolution
-            let axCaptureMs = axCaptureStartedAt.duration(to: .now).appMilliseconds
+            let axCaptureMs = axCaptureStartedAt.duration(to: .now).milliseconds
             let geometryStartedAt = ContinuousClock.now
             var geometry = textGeometryResolver.resolve(snapshot: focusSnapshot)
             let selectedRange = focusSnapshot.selectedRange
@@ -153,7 +153,7 @@ final class FocusTrackingModel: ObservableObject, TextContextProvider, FocusCont
                     GeometryDebug.log("ax-fallback source=screenOCR-geometry focusedElementRect=\(fallback.focusedElementRect) caretRect=\(fallback.caretRect)")
                 }
             }
-            let geometryMs = geometryStartedAt.duration(to: .now).appMilliseconds
+            let geometryMs = geometryStartedAt.duration(to: .now).milliseconds
             lastFocusContextLatencyReport = FocusContextLatencyReport(
                 axCaptureMs: axCaptureMs,
                 geometryMs: geometryMs
@@ -315,27 +315,6 @@ private struct TrackedFocusIdentity {
 
 private extension TextContext {
     func withStableFieldIdentity(_ stableFieldIdentity: StableFieldIdentity?) -> TextContext {
-        TextContext(
-            id: id,
-            app: app,
-            domain: domain,
-            focusedElementID: focusedElementID,
-            stableFieldIdentity: stableFieldIdentity,
-            textBeforeCursor: textBeforeCursor,
-            textAfterCursor: textAfterCursor,
-            selectedText: selectedText,
-            fullTextWindow: fullTextWindow,
-            selectedRange: selectedRange,
-            caretRect: caretRect,
-            focusedElementRect: focusedElementRect,
-            previousGlyphRect: previousGlyphRect,
-            nextGlyphRect: nextGlyphRect,
-            lineReferenceRect: lineReferenceRect,
-            caretGeometryQuality: caretGeometryQuality,
-            observedCharacterWidth: observedCharacterWidth,
-            languageHint: languageHint,
-            captureSources: captureSources,
-            createdAt: createdAt
-        )
+        self.copy(stableFieldIdentity: stableFieldIdentity)
     }
 }

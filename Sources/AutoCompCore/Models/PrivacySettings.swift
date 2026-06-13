@@ -89,6 +89,20 @@ public struct PrivacySettings: Codable, Equatable, Sendable {
         )
     }
 
+    public var personalizationPromptSampleLimit: Int {
+        guard localPersonalizationEnabled else {
+            return 0
+        }
+
+        let normalizedStrength = min(max(personalizationStrength, 0), 1)
+        guard normalizedStrength > 0 else {
+            return 0
+        }
+
+        let maxSamples = PersonalizationSampleRecorder.defaultPromptSampleLimit
+        return min(maxSamples, max(1, Int(ceil(normalizedStrength * Double(maxSamples)))))
+    }
+
     public func allowsCollection(appBundleID: String, domain: String?) -> Bool {
         collectionDecision(appBundleID: appBundleID, domain: domain).allowed
     }

@@ -113,10 +113,100 @@ final class LlamaRuntimeBuildContractTests: XCTestCase {
         XCTAssertTrue(header.contains("stop_sequences"))
         XCTAssertTrue(header.contains("stop_sequence_count"))
         XCTAssertTrue(bridge.contains("autocomp_llama_find_stop_sequence_offset"))
-        XCTAssertTrue(bridge.contains("partial_text"))
+        XCTAssertTrue(bridge.contains("incremental_text"))
+        XCTAssertTrue(bridge.contains("autocomp_llama_find_stop_sequence_offset_in_tail"))
         XCTAssertTrue(bridge.contains("break;"))
         XCTAssertTrue(runtime.contains("request.stopSequences"))
         XCTAssertTrue(runtime.contains("withCStringArray(stopSequences)"))
+    }
+
+    func testLlamaBridgeSamplerAcceptAndStopScanningStayLinear() throws {
+        let bridge = try String(
+            contentsOf: try packageRoot().appendingPathComponent("Sources/CLlamaBridge/CLlamaBridge.cpp"),
+            encoding: .utf8
+        )
+        let loopStart = try XCTUnwrap(bridge.range(of: "for (int32_t i = 0; i < max_tokens; i++)"))
+        let loopEnd = try XCTUnwrap(
+            bridge.range(
+                of: "if (generated_count == 0)",
+                range: loopStart.upperBound..<bridge.endIndex
+            )
+        )
+        let generationLoop = String(bridge[loopStart.lowerBound..<loopEnd.lowerBound])
+
+        XCTAssertTrue(bridge.contains("llama_sampler_sample already accepts the sampled token"))
+        XCTAssertFalse(generationLoop.contains("llama_sampler_accept(sampler, token);"))
+        XCTAssertTrue(bridge.contains("autocomp_llama_append_token_text"))
+        XCTAssertFalse(generationLoop.contains("autocomp_llama_detokenize_to_string(vocab, generated_tokens, generated_count, error)"))
+        XCTAssertTrue(bridge.contains("autocomp_llama_find_stop_sequence_offset_in_tail"))
+        XCTAssertTrue(generationLoop.contains("previous_incremental_text_length"))
+        XCTAssertTrue(generationLoop.contains("autocomp_llama_find_stop_sequence_offset_in_tail"))
+    }
+
+    func testLlamaRuntimeFreesGeneratedCStringBeforePostGenerationCancellationCheck() throws {
+        let runtime = try String(
+            contentsOf: try packageRoot().appendingPathComponent("Sources/AutoCompLlamaRuntime/LlamaCppRuntimeBackend.swift"),
+            encoding: .utf8
+        )
+        let generatedGuard = try XCTUnwrap(runtime.range(of: "guard let generated else"))
+        let postGeneratedRange = generatedGuard.upperBound..<runtime.endIndex
+        let freeDefer = try XCTUnwrap(
+            runtime.range(
+                of: "defer { autocomp_llama_string_free(generated) }",
+                range: postGeneratedRange
+            )
+        )
+        let cancellationCheck = try XCTUnwrap(
+            runtime.range(of: "try Task.checkCancellation()", range: postGeneratedRange)
+        )
+
+        let freeOffset = runtime.distance(from: runtime.startIndex, to: freeDefer.lowerBound)
+        let cancellationOffset = runtime.distance(from: runtime.startIndex, to: cancellationCheck.lowerBound)
+        XCTAssertLessThan(freeOffset, cancellationOffset)
+    }
+
+    func testLlamaGenerationAllocationFailuresUseDistinctErrorCodes() throws {
+        let bridge = try String(
+            contentsOf: try packageRoot().appendingPathComponent("Sources/CLlamaBridge/CLlamaBridge.cpp"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(bridge.contains("autocomp_llama_set_error(error, 16, \"Could not allocate generated tokens.\");"))
+        XCTAssertTrue(bridge.contains("autocomp_llama_set_error(error, 27, \"Could not allocate generated text.\");"))
+        XCTAssertFalse(bridge.contains("autocomp_llama_set_error(error, 16, \"Could not allocate generated text.\");"))
+    }
+
+    func testLlamaRuntimeUsesProcessLevelBackendLifecycle() throws {
+        let runtime = try String(
+            contentsOf: try packageRoot().appendingPathComponent("Sources/AutoCompLlamaRuntime/LlamaCppRuntimeBackend.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(runtime.contains("LlamaBackendGlobalLifecycle"))
+        XCTAssertTrue(runtime.contains("backendLifecycle.retain()"))
+        XCTAssertTrue(runtime.contains("backendLifecycle.release()"))
+        XCTAssertFalse(runtime.contains("backendInitialized"))
+    }
+
+    func testLlamaDetokenizeReservesCStringTerminatorCapacity() throws {
+        let bridge = try String(
+            contentsOf: try packageRoot().appendingPathComponent("Sources/CLlamaBridge/CLlamaBridge.cpp"),
+            encoding: .utf8
+        )
+        let functionStart = try XCTUnwrap(
+            bridge.range(of: "static char *autocomp_llama_detokenize_to_string")
+        )
+        let functionEnd = try XCTUnwrap(
+            bridge.range(
+                of: "static int32_t autocomp_llama_find_stop_sequence_offset",
+                range: functionStart.upperBound..<bridge.endIndex
+            )
+        )
+        let function = String(bridge[functionStart.lowerBound..<functionEnd.lowerBound])
+
+        let terminatorSafeMaxLengthCount = function.components(separatedBy: "text_capacity - 1").count - 1
+        XCTAssertEqual(terminatorSafeMaxLengthCount, 2)
+        XCTAssertFalse(function.contains("\n        text_capacity,\n        false,"))
     }
 
     func testConstrainedLocalFeatureFlagIsRuntimeOptIn() {
@@ -133,15 +223,4 @@ final class LlamaRuntimeBuildContractTests: XCTestCase {
         )
     }
 
-    private func packageRoot() throws -> URL {
-        var url = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-        while url.path != "/" {
-            if FileManager.default.fileExists(atPath: url.appendingPathComponent("Package.swift").path) {
-                return url
-            }
-            url.deleteLastPathComponent()
-        }
-
-        throw XCTSkip("Unable to locate package root")
-    }
 }

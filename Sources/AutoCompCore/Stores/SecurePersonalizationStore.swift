@@ -49,6 +49,7 @@ public final class SecurePersonalizationStore: @unchecked Sendable {
     private let directory: URL
     private let service: String
     private let account: String
+    private let lock = NSLock()
 
     public init(
         directory: URL,
@@ -80,41 +81,40 @@ public final class SecurePersonalizationStore: @unchecked Sendable {
         maxStoredSamples: Int = SecurePersonalizationStore.defaultMaxStoredSamples,
         maxExcerptCharacters: Int = SecurePersonalizationStore.defaultMaxExcerptCharacters
     ) throws -> PersonalizationSample {
-        let sample = PersonalizationSample(
-            excerpt: String(excerpt.prefix(max(0, maxExcerptCharacters))),
-            appBundleID: appBundleID,
-            domain: domain.flatMap(DomainNormalization.canonicalDomainString(from:)),
-            languageHint: normalizedLanguageHint(languageHint),
-            createdAt: createdAt
-        )
-        let samples = try deduplicatedSamples(appending: sample, maxStoredSamples: maxStoredSamples)
-        try writeSamples(samples)
-        return sample
+        try lock.withLock {
+            let sample = PersonalizationSample(
+                excerpt: String(excerpt.prefix(max(0, maxExcerptCharacters))),
+                appBundleID: appBundleID,
+                domain: domain.flatMap(DomainNormalization.canonicalDomainString(from:)),
+                languageHint: normalizedLanguageHint(languageHint),
+                createdAt: createdAt
+            )
+            let samples = try deduplicatedSamples(appending: sample, maxStoredSamples: maxStoredSamples)
+            try writeSamples(samples)
+            return sample
+        }
     }
 
     public func deleteAll() throws {
-        if FileManager.default.fileExists(atPath: directory.path) {
-            try FileManager.default.removeItem(at: directory)
+        try lock.withLock {
+            if FileManager.default.fileExists(atPath: directory.path) {
+                try FileManager.default.removeItem(at: directory)
+            }
+            try deleteKey()
         }
-        try deleteKey()
     }
 
     public func recordCount() -> Int {
-        guard let files = try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) else {
-            return 0
+        lock.withLock {
+            recordCountUnlocked()
         }
-        return files.filter { $0.pathExtension == "record" }.count
     }
 
     public func samples(limit: Int = Int.max) throws -> [PersonalizationSample] {
-        let samples = try readSamples()
-            .sorted { lhs, rhs in
-                if lhs.createdAt == rhs.createdAt {
-                    return lhs.excerpt < rhs.excerpt
-                }
-                return lhs.createdAt > rhs.createdAt
-            }
-        return Array(samples.prefix(max(0, limit)))
+        try lock.withLock {
+            let samples = try sortedSamples()
+            return Array(samples.prefix(max(0, limit)))
+        }
     }
 
     public func promptSamples(
@@ -126,39 +126,50 @@ public final class SecurePersonalizationStore: @unchecked Sendable {
         let canonicalDomain = domain.flatMap(DomainNormalization.canonicalDomainString(from:))
         let normalizedLanguageHint = normalizedLanguageHint(languageHint)
 
-        let scoped = try samples().filter { sample in
-            guard sample.appBundleID == appBundleID else {
-                return false
+        return try lock.withLock {
+            let scoped = try readSamples().filter { sample in
+                guard sample.appBundleID == appBundleID else {
+                    return false
+                }
+
+                if canonicalDomain != nil {
+                    return sample.domain == canonicalDomain
+                }
+
+                return sample.domain == nil
             }
 
-            if canonicalDomain != nil {
-                return sample.domain == canonicalDomain
+            let ranked = scoped.sorted { lhs, rhs in
+                let lhsRank = sampleRank(lhs, languageHint: normalizedLanguageHint)
+                let rhsRank = sampleRank(rhs, languageHint: normalizedLanguageHint)
+                if lhsRank == rhsRank {
+                    return lhs.createdAt > rhs.createdAt
+                }
+                return lhsRank > rhsRank
             }
 
-            return sample.domain == nil
+            return Array(ranked.prefix(max(0, limit)))
         }
-
-        let ranked = scoped.sorted { lhs, rhs in
-            let lhsRank = sampleRank(lhs, languageHint: normalizedLanguageHint)
-            let rhsRank = sampleRank(rhs, languageHint: normalizedLanguageHint)
-            if lhsRank == rhsRank {
-                return lhs.createdAt > rhs.createdAt
-            }
-            return lhsRank > rhsRank
-        }
-
-        return Array(ranked.prefix(max(0, limit)))
     }
 
     public func summary() -> PersonalizationStoreSummary {
-        guard let samples = try? samples() else {
-            return PersonalizationStoreSummary(sampleCount: recordCount(), newestSampleDate: nil)
-        }
+        lock.withLock {
+            guard let samples = try? sortedSamples() else {
+                return PersonalizationStoreSummary(sampleCount: recordCountUnlocked(), newestSampleDate: nil)
+            }
 
-        return PersonalizationStoreSummary(
-            sampleCount: samples.count,
-            newestSampleDate: samples.map(\.createdAt).max()
-        )
+            return PersonalizationStoreSummary(
+                sampleCount: samples.count,
+                newestSampleDate: samples.map(\.createdAt).max()
+            )
+        }
+    }
+
+    private func recordCountUnlocked() -> Int {
+        guard let files = try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) else {
+            return 0
+        }
+        return files.filter { $0.pathExtension == "record" }.count
     }
 
     private func deduplicatedSamples(
@@ -171,6 +182,16 @@ public final class SecurePersonalizationStore: @unchecked Sendable {
         return Array(([sample] + existing)
             .sorted { $0.createdAt > $1.createdAt }
             .prefix(max(0, maxStoredSamples)))
+    }
+
+    private func sortedSamples() throws -> [PersonalizationSample] {
+        try readSamples()
+            .sorted { lhs, rhs in
+                if lhs.createdAt == rhs.createdAt {
+                    return lhs.excerpt < rhs.excerpt
+                }
+                return lhs.createdAt > rhs.createdAt
+            }
     }
 
     private func readSamples() throws -> [PersonalizationSample] {
@@ -237,8 +258,15 @@ public final class SecurePersonalizationStore: @unchecked Sendable {
 
         let key = SymmetricKey(size: .bits256)
         let data = key.withUnsafeBytes { Data($0) }
-        try saveKeyData(data)
-        return key
+        if try saveKeyData(data) {
+            return key
+        }
+
+        guard let existingData = try loadKeyData() else {
+            throw SecurePersonalizationStoreError.keychain(errSecDuplicateItem)
+        }
+
+        return SymmetricKey(data: existingData)
     }
 
     private func loadKeyData() throws -> Data? {
@@ -263,7 +291,7 @@ public final class SecurePersonalizationStore: @unchecked Sendable {
         return result as? Data
     }
 
-    private func saveKeyData(_ data: Data) throws {
+    private func saveKeyData(_ data: Data) throws -> Bool {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -272,9 +300,15 @@ public final class SecurePersonalizationStore: @unchecked Sendable {
         ]
 
         let status = SecItemAdd(query as CFDictionary, nil)
+        if status == errSecDuplicateItem {
+            return false
+        }
+
         guard status == errSecSuccess else {
             throw SecurePersonalizationStoreError.keychain(status)
         }
+
+        return true
     }
 
     private func deleteKey() throws {

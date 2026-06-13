@@ -3,6 +3,34 @@ import AutoCompCore
 import XCTest
 
 final class LlamaCppRuntimeBackendTests: XCTestCase {
+    func testBackendLifecycleFreesOnlyAfterLastRelease() {
+        var initCount = 0
+        var freeCount = 0
+        let lifecycle = LlamaBackendGlobalLifecycle(
+            initialize: { initCount += 1 },
+            free: { freeCount += 1 }
+        )
+
+        lifecycle.retain()
+        lifecycle.retain()
+        XCTAssertEqual(initCount, 1)
+        XCTAssertEqual(freeCount, 0)
+
+        lifecycle.release()
+        XCTAssertEqual(freeCount, 0)
+
+        lifecycle.release()
+        XCTAssertEqual(freeCount, 1)
+
+        lifecycle.release()
+        XCTAssertEqual(freeCount, 1)
+
+        lifecycle.retain()
+        XCTAssertEqual(initCount, 2)
+        lifecycle.release()
+        XCTAssertEqual(freeCount, 2)
+    }
+
     func testRuntimeSystemInfoReportsLinkedRuntime() {
         let systemInfo = LlamaCppRuntimeBackend.runtimeSystemInfo()
 

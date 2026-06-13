@@ -590,6 +590,74 @@ final class KeyboardShortcutServiceTests: XCTestCase {
         ])
     }
 
+    @MainActor
+    func testPassThroughInputEventForwardsOnceAcrossDuplicateTapObservations() async throws {
+        let service = KeyboardShortcutService()
+        var capturedEvents: [CapturedInputEvent] = []
+        service.configureHandlers(
+            onTab: {},
+            onAcceptAll: {},
+            onInputEvent: { event in
+                capturedEvents.append(event)
+            }
+        )
+
+        let text = try XCTUnwrap(CGEvent(keyboardEventSource: nil, virtualKey: 50, keyDown: true))
+        text.flags = []
+        text.timestamp = 321
+
+        XCTAssertNotNil(service.handle(type: .keyDown, event: text))
+        XCTAssertNotNil(service.handle(type: .keyDown, event: text))
+        XCTAssertNotNil(service.handle(type: .keyDown, event: text))
+
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(capturedEvents, [.text(keyCode: 50, isSuggestionTrigger: false)])
+    }
+
+    @MainActor
+    func testSyntheticPasteInputIsSuppressedAcrossDuplicateTapObservations() async throws {
+        let clock = KeyboardShortcutTestClock()
+        let suppressionController = InputSuppressionController(
+            syntheticInputSuppressionInterval: 0.5,
+            now: { clock.now }
+        )
+        let service = KeyboardShortcutService(inputSuppressionController: suppressionController)
+        var capturedEvents: [CapturedInputEvent] = []
+        service.configureHandlers(
+            onTab: {},
+            onAcceptAll: {},
+            onInputEvent: { event in
+                capturedEvents.append(event)
+            }
+        )
+
+        let syntheticPaste = try XCTUnwrap(CGEvent(keyboardEventSource: nil, virtualKey: 9, keyDown: true))
+        syntheticPaste.flags = .maskCommand
+        syntheticPaste.timestamp = 411
+        let syntheticPasteRelease = try XCTUnwrap(CGEvent(keyboardEventSource: nil, virtualKey: 9, keyDown: false))
+        syntheticPasteRelease.flags = .maskCommand
+        syntheticPasteRelease.timestamp = 412
+
+        suppressionController.registerSyntheticInsertion(expectedKeyDownCount: 1, expectedKeyUpCount: 1)
+        XCTAssertNotNil(service.handle(type: .keyDown, event: syntheticPaste))
+        XCTAssertNotNil(service.handle(type: .keyDown, event: syntheticPaste))
+        XCTAssertNotNil(service.handle(type: .keyDown, event: syntheticPaste))
+        XCTAssertNotNil(service.handle(type: .keyUp, event: syntheticPasteRelease))
+        XCTAssertNotNil(service.handle(type: .keyUp, event: syntheticPasteRelease))
+        XCTAssertNotNil(service.handle(type: .keyUp, event: syntheticPasteRelease))
+
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(capturedEvents, [])
+
+        let realPaste = try XCTUnwrap(CGEvent(keyboardEventSource: nil, virtualKey: 9, keyDown: true))
+        realPaste.flags = .maskCommand
+        realPaste.timestamp = 413
+        XCTAssertNotNil(service.handle(type: .keyDown, event: realPaste))
+
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(capturedEvents, [.shortcutMutation(keyCode: 9)])
+    }
+
     func testModifiedTabPassesThroughWhenSuggestionIsActive() throws {
         let service = KeyboardShortcutService()
         service.configureHandlers(onTab: {}, onAcceptAll: {})

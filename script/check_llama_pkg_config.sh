@@ -35,10 +35,16 @@ else
   LLAMA_CFLAGS=()
   LLAMA_LIBS=()
   for package in "${PKG_CONFIG_PACKAGES[@]}"; do
+    PACKAGE_CFLAGS=()
+    PACKAGE_LIBS=()
     read -r -a PACKAGE_CFLAGS <<<"$(pkg-config --cflags "$package")"
     read -r -a PACKAGE_LIBS <<<"$(pkg-config --libs "$package")"
-    LLAMA_CFLAGS+=("${PACKAGE_CFLAGS[@]}")
-    LLAMA_LIBS+=("${PACKAGE_LIBS[@]}")
+    if [[ "${#PACKAGE_CFLAGS[@]}" -gt 0 ]]; then
+      LLAMA_CFLAGS+=("${PACKAGE_CFLAGS[@]}")
+    fi
+    if [[ "${#PACKAGE_LIBS[@]}" -gt 0 ]]; then
+      LLAMA_LIBS+=("${PACKAGE_LIBS[@]}")
+    fi
   done
   SOURCE_DESCRIPTION="pkg-config ${PKG_CONFIG_PACKAGES[*]}"
 fi
@@ -60,7 +66,17 @@ int main(void) {
 }
 C
 
-if ! COMPILE_OUTPUT="$(cc "${LLAMA_CFLAGS[@]}" "$SOURCE_FILE" "${LLAMA_LIBS[@]}" -o "$BINARY_FILE" 2>&1)"; then
+COMPILE_ARGS=()
+if [[ "${#LLAMA_CFLAGS[@]}" -gt 0 ]]; then
+  COMPILE_ARGS+=("${LLAMA_CFLAGS[@]}")
+fi
+COMPILE_ARGS+=("$SOURCE_FILE")
+if [[ "${#LLAMA_LIBS[@]}" -gt 0 ]]; then
+  COMPILE_ARGS+=("${LLAMA_LIBS[@]}")
+fi
+COMPILE_ARGS+=("-o" "$BINARY_FILE")
+
+if ! COMPILE_OUTPUT="$(cc "${COMPILE_ARGS[@]}" 2>&1)"; then
   echo "$COMPILE_OUTPUT" >&2
   echo "llama.cpp link check failed. Fix pkg-config llama/ggml metadata or set AUTOCOMP_LLAMA_CFLAGS and AUTOCOMP_LLAMA_LIBS explicitly." >&2
   exit 1
@@ -82,5 +98,13 @@ else
 fi
 
 echo "llama.cpp link check passed using $SOURCE_DESCRIPTION"
-echo "cflags: ${LLAMA_CFLAGS[*]}"
-echo "libs: ${LLAMA_LIBS[*]}"
+printf 'cflags:'
+if [[ "${#LLAMA_CFLAGS[@]}" -gt 0 ]]; then
+  printf ' %s' "${LLAMA_CFLAGS[@]}"
+fi
+printf '\n'
+printf 'libs:'
+if [[ "${#LLAMA_LIBS[@]}" -gt 0 ]]; then
+  printf ' %s' "${LLAMA_LIBS[@]}"
+fi
+printf '\n'

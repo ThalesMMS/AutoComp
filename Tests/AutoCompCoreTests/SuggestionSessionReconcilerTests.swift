@@ -205,18 +205,4 @@ final class SuggestionSessionReconcilerTests: XCTestCase {
         )
     }
 
-    private func makeContext(
-        focusedElementID: String = "field-a",
-        textBeforeCursor: String,
-        textAfterCursor: String? = nil,
-        selectedRange: NSRange? = NSRange(location: 0, length: 0)
-    ) -> TextContext {
-        TextContext(
-            app: AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1),
-            focusedElementID: focusedElementID,
-            textBeforeCursor: textBeforeCursor,
-            textAfterCursor: textAfterCursor,
-            selectedRange: selectedRange
-        )
-    }
 }

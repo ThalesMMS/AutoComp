@@ -185,6 +185,6 @@ struct SuggestionPresentationPolicy: Sendable {
     }
 
     private func isGoogleDocs(_ context: TextContext) -> Bool {
-        context.domain?.contains("docs.google.com") == true
+        GoogleDocsContext.matches(bundleID: context.app.bundleID, domain: context.domain)
     }
 }

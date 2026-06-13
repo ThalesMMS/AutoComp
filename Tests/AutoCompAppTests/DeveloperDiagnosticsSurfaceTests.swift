@@ -58,6 +58,19 @@ final class DeveloperDiagnosticsSurfaceTests: XCTestCase {
         }
     }
 
+    func testDeveloperDebugLogExportUsesSharedControllerFlowAndRefreshesCount() throws {
+        let source = try developerSource()
+        let exportRange = try XCTUnwrap(source.range(of: "private func exportDebugLogs()"))
+        let nextFunctionRange = try XCTUnwrap(source.range(of: "\n    private func exportRedactedSettings", range: exportRange.upperBound..<source.endIndex))
+        let exportBody = String(source[exportRange.lowerBound..<nextFunctionRange.lowerBound])
+
+        XCTAssertTrue(exportBody.contains("controller.exportDebugLogsWithDirectoryPicker()"))
+        XCTAssertTrue(exportBody.contains("debugArtifactCount = controller.debugArtifactCount()"))
+        XCTAssertTrue(exportBody.contains("debugArtifactMessage = \"Debug logs exported to \\(exportURL.path).\""))
+        XCTAssertFalse(exportBody.contains("NSOpenPanel"))
+        XCTAssertFalse(exportBody.contains("withInteractionPipelineSuspended(reason: .settingsExport)"))
+    }
+
     func testCommonSettingsKeepDetailedDiagnosticsOutOfFirstLayer() throws {
         let modelSource = try sourceFile("Sources/AutoCompApp/Views/Settings/Sections/ModelSettingsView.swift")
         let privacySource = try sourceFile("Sources/AutoCompApp/Views/Settings/Sections/PrivacySettingsView.swift")
@@ -80,23 +93,18 @@ final class DeveloperDiagnosticsSurfaceTests: XCTestCase {
         XCTAssertFalse(menuSource.contains("MenuStatusSnapshot.make"))
     }
 
+    func testHealthDashboardObservesHealthSnapshotService() throws {
+        let healthSource = try sourceFile("Sources/AutoCompApp/Views/HealthDashboardView.swift")
+        let appSource = try sourceFile("Sources/AutoCompApp/App/AutoCompApp.swift")
+
+        XCTAssertTrue(healthSource.contains("@EnvironmentObject private var healthSnapshotService: HealthSnapshotService"))
+        XCTAssertTrue(healthSource.contains("healthSnapshotService.snapshot"))
+        XCTAssertTrue(healthSource.contains("healthSnapshotService.refresh()"))
+        XCTAssertTrue(appSource.contains(".environmentObject(controller.healthSnapshotService)"))
+    }
+
     private func developerSource() throws -> String {
         try sourceFile("Sources/AutoCompApp/Views/Settings/Sections/DeveloperSettingsView.swift")
     }
 
-    private func sourceFile(_ relativePath: String) throws -> String {
-        try String(contentsOf: try packageRoot().appendingPathComponent(relativePath), encoding: .utf8)
-    }
-
-    private func packageRoot() throws -> URL {
-        var url = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-        while url.path != "/" {
-            if FileManager.default.fileExists(atPath: url.appendingPathComponent("Package.swift").path) {
-                return url
-            }
-            url.deleteLastPathComponent()
-        }
-
-        throw XCTSkip("Unable to locate package root")
-    }
 }

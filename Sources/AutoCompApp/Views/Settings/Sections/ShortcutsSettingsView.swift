@@ -269,10 +269,62 @@ private struct ShortcutCaptureView: NSViewRepresentable {
     }
 }
 
+struct ShortcutRecorderState {
+    private var pendingModifierOnlyBinding: KeyboardShortcutBinding?
+    private var hasRecordedKeyDown = false
+
+    mutating func reset() {
+        pendingModifierOnlyBinding = nil
+        hasRecordedKeyDown = false
+    }
+
+    mutating func recordKeyDown(_ binding: KeyboardShortcutBinding) -> KeyboardShortcutBinding {
+        hasRecordedKeyDown = true
+        pendingModifierOnlyBinding = nil
+        return binding
+    }
+
+    mutating func recordFlagsChanged(_ binding: KeyboardShortcutBinding) -> KeyboardShortcutBinding? {
+        guard binding.trigger == .flagsChanged else {
+            return nil
+        }
+
+        guard !binding.modifiers.isEmpty else {
+            let pendingBinding = hasRecordedKeyDown ? nil : pendingModifierOnlyBinding
+            reset()
+            return pendingBinding
+        }
+
+        guard !hasRecordedKeyDown else {
+            return nil
+        }
+
+        if shouldReplacePendingModifierBinding(with: binding) {
+            pendingModifierOnlyBinding = binding
+        }
+        return nil
+    }
+
+    private func shouldReplacePendingModifierBinding(with binding: KeyboardShortcutBinding) -> Bool {
+        guard let pendingModifierOnlyBinding else {
+            return true
+        }
+
+        return binding.modifiers.rawValue.nonzeroBitCount >= pendingModifierOnlyBinding.modifiers.rawValue.nonzeroBitCount
+    }
+}
+
 private final class ShortcutCaptureNSView: NSView {
-    var isActive = false
+    var isActive = false {
+        didSet {
+            if !isActive {
+                recorderState.reset()
+            }
+        }
+    }
     var record: ((KeyboardShortcutBinding) -> Bool)?
     var cancel: (() -> Void)?
+    private var recorderState = ShortcutRecorderState()
 
     override var acceptsFirstResponder: Bool {
         true
@@ -287,18 +339,19 @@ private final class ShortcutCaptureNSView: NSView {
         let modifiers = KeyboardShortcutModifiers(nsEventFlags: event.modifierFlags)
         if event.keyCode == CapturedInputEventAdapter.escapeKeyCode,
            modifiers.isEmpty {
-            cancel?()
+            cancelRecording()
             return
         }
 
-        _ = record?(KeyboardShortcutBinding(event: event, trigger: .keyDown))
+        let binding = recorderState.recordKeyDown(KeyboardShortcutBinding(event: event, trigger: .keyDown))
+        _ = record?(binding)
     }
 
     override func mouseDown(with event: NSEvent) {
         // Clicking elsewhere in the window should cancel recording so we don't
         // leave the recorder in a stuck state.
         if isActive {
-            cancel?()
+            cancelRecording()
             return
         }
         super.mouseDown(with: event)
@@ -307,7 +360,7 @@ private final class ShortcutCaptureNSView: NSView {
     override func resignFirstResponder() -> Bool {
         let resigned = super.resignFirstResponder()
         if isActive {
-            cancel?()
+            cancelRecording()
         }
         return resigned
     }
@@ -315,7 +368,7 @@ private final class ShortcutCaptureNSView: NSView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         if window == nil, isActive {
-            cancel?()
+            cancelRecording()
         }
     }
 
@@ -324,7 +377,7 @@ private final class ShortcutCaptureNSView: NSView {
 
         // Losing the hosting window (settings closed) should cancel any in-flight recording.
         if newWindow == nil, isActive {
-            cancel?()
+            cancelRecording()
         }
     }
 
@@ -333,11 +386,14 @@ private final class ShortcutCaptureNSView: NSView {
             return
         }
 
-        let modifiers = KeyboardShortcutModifiers(nsEventFlags: event.modifierFlags)
-        guard !modifiers.isEmpty else {
-            return
+        let binding = KeyboardShortcutBinding(event: event, trigger: .flagsChanged)
+        if let recordedBinding = recorderState.recordFlagsChanged(binding) {
+            _ = record?(recordedBinding)
         }
+    }
 
-        _ = record?(KeyboardShortcutBinding(event: event, trigger: .flagsChanged))
+    private func cancelRecording() {
+        recorderState.reset()
+        cancel?()
     }
 }

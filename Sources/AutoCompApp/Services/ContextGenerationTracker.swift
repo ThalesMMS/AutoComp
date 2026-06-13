@@ -67,7 +67,7 @@ struct ContextGenerationTracker {
         _ signatureText: String,
         for candidate: StrictGenerationSignature
     ) -> Bool {
-        guard isWebLikeContext(candidate) else {
+        guard WebHostApps.isWebLike(candidate.app.bundleID) else {
             return false
         }
 
@@ -90,19 +90,6 @@ struct ContextGenerationTracker {
         return abs(candidateLocation - signatureLocation) <= max(1, lengthDelta)
     }
 
-    private func isWebLikeContext(_ signature: StrictGenerationSignature) -> Bool {
-        [
-            "com.openai.codex",
-            "com.apple.Safari",
-            "com.google.Chrome",
-            "com.brave.Browser",
-            "com.microsoft.edgemac",
-            "company.thebrowser.Browser",
-            "company.thebrowser.dia",
-            "com.todesktop.230313mzl4w4u92"
-        ].contains(signature.app.bundleID)
-    }
-
     private func isGoogleDocsScreenOCRFocusIdentityChurn(
         candidate: StrictGenerationSignature,
         signature: StrictGenerationSignature,
@@ -113,10 +100,8 @@ struct ContextGenerationTracker {
               selectionMatches,
               candidate.selectedRangeLength == 0,
               signature.selectedRangeLength == 0,
-              candidate.domain?.contains("docs.google.com") == true,
-              signature.domain?.contains("docs.google.com") == true,
-              isWebLikeContext(candidate),
-              isWebLikeContext(signature),
+              GoogleDocsContext.matches(bundleID: candidate.app.bundleID, domain: candidate.domain, appGate: .webLike),
+              GoogleDocsContext.matches(bundleID: signature.app.bundleID, domain: signature.domain, appGate: .webLike),
               candidate.focusIdentity.isScreenOCR || signature.focusIdentity.isScreenOCR else {
             return false
         }

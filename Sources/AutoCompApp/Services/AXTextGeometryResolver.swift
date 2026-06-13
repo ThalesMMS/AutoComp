@@ -134,8 +134,7 @@ struct AXTextGeometryResolver {
         snapshot: AXFocusSnapshot,
         geometry: AXTextGeometrySnapshot
     ) -> Bool {
-        guard AXTextMarkerGeometryFallback.isEligibleBrowser(bundleID: snapshot.bundleID),
-              snapshot.domain?.contains("docs.google.com") == true else {
+        guard GoogleDocsContext.matches(bundleID: snapshot.bundleID, domain: snapshot.domain, appGate: .browser) else {
             return false
         }
         guard snapshot.isGoogleDocsElement else {
@@ -215,8 +214,7 @@ struct AXTextGeometryResolver {
         snapshot: AXFocusSnapshot,
         geometry: AXTextGeometrySnapshot
     ) -> CGRect? {
-        guard snapshot.bundleID == "com.google.Chrome",
-              snapshot.domain?.contains("docs.google.com") == true,
+        guard GoogleDocsContext.matches(bundleID: snapshot.bundleID, domain: snapshot.domain, appGate: .chrome),
               snapshot.isGoogleDocsElement,
               let text = snapshot.textBeforeCursor,
               !isWeakText(text),

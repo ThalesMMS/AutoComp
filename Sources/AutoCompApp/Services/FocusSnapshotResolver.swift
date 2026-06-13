@@ -227,10 +227,6 @@ struct FocusSnapshotResolver {
         return domain
     }
 
-    private func isGoogleDocsDomain(_ domain: String?) -> Bool {
-        domain == "docs.google.com"
-    }
-
     private func isCodexComposerElement(_ element: AXUIElement, bundleID: String) -> Bool {
         guard bundleID == "com.openai.codex",
               axHelper.stringAttribute(kAXRoleAttribute, from: element) == "AXTextArea" else {

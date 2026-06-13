@@ -528,11 +528,3 @@ final class VisualContextSessionController: @unchecked Sendable {
         ].joined(separator: " ")
     }
 }
-
-private extension NSLock {
-    func withLock<T>(_ operation: () -> T) -> T {
-        lock()
-        defer { unlock() }
-        return operation()
-    }
-}

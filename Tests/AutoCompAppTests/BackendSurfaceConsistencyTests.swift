@@ -296,16 +296,6 @@ final class BackendSurfaceConsistencyTests: XCTestCase {
         return try JSONDecoder().decode([BackendSurfaceSnapshot].self, from: data)
     }
 
-    private func packageRoot() throws -> URL {
-        var url = URL(fileURLWithPath: #filePath)
-        while url.pathComponents.count > 1 {
-            url.deleteLastPathComponent()
-            if FileManager.default.fileExists(atPath: url.appendingPathComponent("Package.swift").path) {
-                return url
-            }
-        }
-        throw NSError(domain: "BackendSurfaceConsistencyTests", code: 1)
-    }
 }
 
 private struct BackendSurfaceSnapshot: Codable, Equatable {

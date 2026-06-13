@@ -157,6 +157,7 @@ final class SuggestionEngine: ObservableObject {
     private let personalizationRecorder: PersonalizationSampleRecorder?
     private let productivityMetrics: ProductivityMetricsRecording?
     private let eligibilityEvaluator: SuggestionEligibilityEvaluator
+    private let domainRuleResolver = DomainRuleResolver()
 
     private let providerServices: ProviderServices
     private let privacyServices: PrivacyServices
@@ -1482,7 +1483,7 @@ final class SuggestionEngine: ObservableObject {
                         "context=\(SuggestionPipelineLog.contextDescription(context))"
                     ])
                     var firedLatencySeed = latencySeed
-                    firedLatencySeed.debounceMs = debounceStartedAt.duration(to: .now).appMilliseconds
+                    firedLatencySeed.debounceMs = debounceStartedAt.duration(to: .now).milliseconds
                     engine.requestCompletion(
                         for: context,
                         invocation: .automatic,
@@ -1711,18 +1712,10 @@ final class SuggestionEngine: ObservableObject {
     }
 
     private func domainRuleRequiresVisualContext(for context: TextContext) -> Bool {
-        // Conservative host-only matching; only applies when we have a domain string.
-        guard let domain = context.domain?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !domain.isEmpty else {
-            return false
+        if case .visualContextRequired = domainRuleResolution(for: context).effectiveAction {
+            return true
         }
-
-        let canonical = DomainNormalization.canonicalDomainString(from: domain)
-
-        // Today, treat spreadsheet/presentation editors as requiring visual context in order to run
-        // in automatic mode. Google Docs itself remains governed by the compatibility catalog.
-        return canonical == "sheets.google.com"
-            || canonical == "slides.google.com"
+        return false
     }
 
     private func visualContextEligibilitySatisfied(for context: TextContext) -> Bool {
@@ -1764,31 +1757,32 @@ final class SuggestionEngine: ObservableObject {
         for context: TextContext,
         invocation: SuggestionEligibilityInvocation
     ) -> SuggestionEligibilitySkipReason? {
-        // Keep this conservative: only apply to contexts where we have a host-only domain.
-        // (AppIdentity currently does not expose a reliable "isBrowser" signal in this worktree.)
+        switch domainRuleResolution(for: context).effectiveAction {
+        case .allow, .visualContextRequired:
+            return nil
+        case .deny:
+            return .domainDenied
+        case .manualOnly:
+            return invocation == .manual ? nil : .domainManualOnly
+        }
+    }
 
-        guard let domain = context.domain?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !domain.isEmpty else {
+    private func domainRuleResolution(for context: TextContext) -> DomainRuleResolver.Resolution {
+        domainRuleResolver.resolve(
+            input: DomainRuleResolver.Input(
+                appBundleID: context.app.bundleID,
+                activeDomain: domainRuleActiveDomain(for: context)
+            ),
+            userRuleset: privacyStore.load().domainWebAppRules.ruleset,
+            fallbackRuleset: .autocompleteProductionDefaults
+        )
+    }
+
+    private func domainRuleActiveDomain(for context: TextContext) -> String? {
+        guard let domain = context.domain else {
             return nil
         }
-
-        // Compatibility overrides still apply; this is additional gating.
-        // For now, treat a small set of sensitive web apps as denied.
-        let canonical = DomainNormalization.canonicalDomainString(from: domain)
-
-        // Email web apps are denied by default (users can later override via rule UI).
-        if canonical == "mail.google.com" || canonical == "outlook.office.com" || canonical == "outlook.live.com" {
-            return .domainDenied
-        }
-
-        // Spreadsheet/presentation editors are manual-only unless invoked manually.
-        if invocation != .manual {
-            if canonical == "sheets.google.com" || canonical == "slides.google.com" {
-                return .domainManualOnly
-            }
-        }
-
-        return nil
+        return DomainNormalization.canonicalDomainString(from: domain)
     }
 
     private func applyIneligibleDecision(
@@ -1882,7 +1876,7 @@ final class SuggestionEngine: ObservableObject {
     }
 
     private func elapsedMs(since startedAt: ContinuousClock.Instant) -> Int {
-        max(0, startedAt.duration(to: .now).appMilliseconds)
+        max(0, startedAt.duration(to: .now).milliseconds)
     }
 
     private func recordCompletionLatency(_ report: CompletionLatencyReport) {
@@ -2015,7 +2009,7 @@ final class SuggestionEngine: ObservableObject {
             } else {
                 let visualContextStartedAt = ContinuousClock.now
                 visualContext = await engine.currentVisualContext(for: context)
-                latencyReport.visualContextMs = visualContextStartedAt.duration(to: .now).appMilliseconds
+                latencyReport.visualContextMs = visualContextStartedAt.duration(to: .now).milliseconds
             }
             guard !Task.isCancelled else {
                 await MainActor.run {
@@ -2173,7 +2167,7 @@ final class SuggestionEngine: ObservableObject {
                     for: context,
                     privacySettings: privacySettings
                 )
-                latencyReport.clipboardFilterMs = clipboardFilterStartedAt.duration(to: .now).appMilliseconds
+                latencyReport.clipboardFilterMs = clipboardFilterStartedAt.duration(to: .now).milliseconds
             }
             await MainActor.run {
                 guard engine.predictionController.isCurrent(workID) else {
@@ -2229,7 +2223,7 @@ final class SuggestionEngine: ObservableObject {
 
             let backendStartedAt = ContinuousClock.now
             let pipelineOutcome = await runner.run(context: &pipelineContext)
-            latencyReport.backendMs = backendStartedAt.duration(to: .now).appMilliseconds
+            latencyReport.backendMs = backendStartedAt.duration(to: .now).milliseconds
             await MainActor.run {
                 SuggestionPipelineLog.log("provider-finished", fields: [
                     "workID=\(workID)",
@@ -2660,19 +2654,6 @@ final class SuggestionEngine: ObservableObject {
         }
     }
 
-    private func isWebLikeApp(_ bundleID: String) -> Bool {
-        [
-            "com.openai.codex",
-            "com.apple.Safari",
-            "com.google.Chrome",
-            "com.brave.Browser",
-            "com.microsoft.edgemac",
-            "company.thebrowser.Browser",
-            "company.thebrowser.dia",
-            "com.todesktop.230313mzl4w4u92"
-        ].contains(bundleID)
-    }
-
     private func preserveSuggestionAcrossTransientFocusFailure(_ error: Error, now: Date = Date()) -> Bool {
         guard isTransientFocusReadError(error),
               let suggestion = currentSuggestion,
@@ -2710,8 +2691,7 @@ final class SuggestionEngine: ObservableObject {
     }
 
     private func isGoogleDocsContext(_ context: TextContext) -> Bool {
-        isWebLikeApp(context.app.bundleID)
-            && context.domain?.contains("docs.google.com") == true
+        GoogleDocsContext.matches(bundleID: context.app.bundleID, domain: context.domain, appGate: .webLike)
     }
 
     @discardableResult

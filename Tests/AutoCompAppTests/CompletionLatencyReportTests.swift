@@ -1,7 +1,14 @@
 @testable import AutoCompApp
+import AutoCompCore
 import XCTest
 
 final class CompletionLatencyReportTests: XCTestCase {
+    func testAppTargetUsesPublicCoreDurationMillisecondsHelper() {
+        let duration = Duration.seconds(2) + .milliseconds(5)
+
+        XCTAssertEqual(duration.milliseconds, 2_005)
+    }
+
     func testStageRowsExposeEveryLatencyMetricWithoutContent() {
         let report = CompletionLatencyReport(
             axCaptureMs: 3,

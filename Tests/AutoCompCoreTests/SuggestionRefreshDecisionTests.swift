@@ -187,27 +187,6 @@ final class SuggestionRefreshDecisionTests: XCTestCase {
 
 private extension TextContext {
     func replacingTextBeforeCursor(_ textBeforeCursor: String) -> TextContext {
-        TextContext(
-            id: id,
-            app: app,
-            domain: domain,
-            focusedElementID: focusedElementID,
-            stableFieldIdentity: stableFieldIdentity,
-            textBeforeCursor: textBeforeCursor,
-            textAfterCursor: textAfterCursor,
-            selectedText: selectedText,
-            fullTextWindow: fullTextWindow,
-            selectedRange: selectedRange,
-            caretRect: caretRect,
-            focusedElementRect: focusedElementRect,
-            previousGlyphRect: previousGlyphRect,
-            nextGlyphRect: nextGlyphRect,
-            lineReferenceRect: lineReferenceRect,
-            caretGeometryQuality: caretGeometryQuality,
-            observedCharacterWidth: observedCharacterWidth,
-            languageHint: languageHint,
-            captureSources: captureSources,
-            createdAt: createdAt
-        )
+        self.copy(textBeforeCursor: textBeforeCursor)
     }
 }

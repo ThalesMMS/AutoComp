@@ -68,8 +68,8 @@ struct PermissionHostApp: Equatable {
         executablePath: String,
         searchBaseURLs: [URL]
     ) -> URL? {
-        appBundleURL(from: bundleURL)
-            ?? appBundleURL(containingExecutablePath: executablePath)
+        AppBundleLocator.bundleURL(from: bundleURL)
+            ?? AppBundleLocator.bundleURL(containingExecutablePath: executablePath)
             ?? stagedAppBundleURL(nearExecutablePath: executablePath)
             ?? stagedAppBundleURL(inSearchBaseURLs: searchBaseURLs)
     }
@@ -91,63 +91,12 @@ struct PermissionHostApp: Equatable {
         }
     }
 
-    private static func appBundleURL(from url: URL?) -> URL? {
-        guard let standardizedURL = url?.standardizedFileURL,
-              standardizedURL.pathExtension.localizedCaseInsensitiveCompare("app") == .orderedSame else {
-            return nil
-        }
-
-        return standardizedURL
-    }
-
-    private static func appBundleURL(containingExecutablePath executablePath: String) -> URL? {
-        guard executablePath != "unknown",
-              !executablePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return nil
-        }
-
-        var candidate = URL(fileURLWithPath: executablePath).standardizedFileURL
-        while candidate.path != "/" {
-            if candidate.pathExtension.localizedCaseInsensitiveCompare("app") == .orderedSame {
-                return candidate
-            }
-            candidate.deleteLastPathComponent()
-        }
-
-        return nil
-    }
-
     private static func stagedAppBundleURL(nearExecutablePath executablePath: String) -> URL? {
-        guard executablePath != "unknown",
-              !executablePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        guard let executableDirectory = AppBundleLocator.directoryURL(nearPath: executablePath) else {
             return nil
         }
 
-        var candidate = URL(fileURLWithPath: executablePath).standardizedFileURL
-        if !candidate.hasDirectoryPath {
-            candidate.deleteLastPathComponent()
-        }
-
-        while candidate.path != "/" {
-            let directStagedApp = candidate
-                .appendingPathComponent("dist", isDirectory: true)
-                .appendingPathComponent("AutoComp.app", isDirectory: true)
-            if existingAppBundleURL(directStagedApp) != nil {
-                return directStagedApp.standardizedFileURL
-            }
-
-            let nestedStagedApp = candidate
-                .appendingPathComponent("AutoComp", isDirectory: true)
-                .appendingPathComponent("dist", isDirectory: true)
-                .appendingPathComponent("AutoComp.app", isDirectory: true)
-            if existingAppBundleURL(nestedStagedApp) != nil {
-                return nestedStagedApp.standardizedFileURL
-            }
-
-            candidate.deleteLastPathComponent()
-        }
-
-        return nil
+        return stagedAppBundleURL(near: executableDirectory)
     }
 
     private static func stagedAppBundleURL(inSearchBaseURLs searchBaseURLs: [URL]) -> URL? {
@@ -194,8 +143,7 @@ struct PermissionHostApp: Equatable {
     }
 
     private static func existingAppBundleURL(_ url: URL) -> URL? {
-        let standardizedURL = url.standardizedFileURL
-        guard standardizedURL.pathExtension.localizedCaseInsensitiveCompare("app") == .orderedSame else {
+        guard let standardizedURL = AppBundleLocator.bundleURL(from: url) else {
             return nil
         }
 

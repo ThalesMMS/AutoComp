@@ -48,13 +48,14 @@ final class ActivationIndicatorControllerTests: XCTestCase {
         let placement = ActivationIndicatorController.placement(
             mode: .caretAnchor,
             displayMode: .inline,
-            context: context(caretRect: CGRect(x: 100, y: 200, width: 2, height: 20))
+            context: context(caretRect: CGRect(x: 100, y: 200, width: 2, height: 20)),
+            mainScreenFrame: screenFrame
         )
 
         XCTAssertEqual(
             placement,
             ActivationIndicatorPlacement(
-                frame: CGRect(x: 106, y: 206, width: 8, height: 8),
+                frame: CGRect(x: 106, y: 786, width: 8, height: 8),
                 mode: .caretAnchor
             )
         )
@@ -67,13 +68,14 @@ final class ActivationIndicatorControllerTests: XCTestCase {
             context: context(
                 caretRect: CGRect(x: 100, y: 200, width: 2, height: 20),
                 focusedElementRect: CGRect(x: 80, y: 180, width: 260, height: 44)
-            )
+            ),
+            mainScreenFrame: screenFrame
         )
 
         XCTAssertEqual(
             placement,
             ActivationIndicatorPlacement(
-                frame: CGRect(x: 326, y: 186, width: 8, height: 8),
+                frame: CGRect(x: 326, y: 782, width: 8, height: 8),
                 mode: .fieldEdge
             )
         )
@@ -86,13 +88,14 @@ final class ActivationIndicatorControllerTests: XCTestCase {
             context: context(
                 caretRect: CGRect(x: 100, y: 200, width: 2, height: 20),
                 caretGeometryQuality: .glyph
-            )
+            ),
+            mainScreenFrame: screenFrame
         )
 
         XCTAssertEqual(
             placement,
             ActivationIndicatorPlacement(
-                frame: CGRect(x: 106, y: 201, width: 76, height: 18),
+                frame: CGRect(x: 106, y: 781, width: 76, height: 18),
                 mode: .debugGeometryQuality,
                 geometryQuality: .glyph
             )
@@ -107,13 +110,14 @@ final class ActivationIndicatorControllerTests: XCTestCase {
                 caretRect: nil,
                 focusedElementRect: CGRect(x: 80, y: 180, width: 260, height: 44),
                 caretGeometryQuality: .unavailable
-            )
+            ),
+            mainScreenFrame: screenFrame
         )
 
         XCTAssertEqual(
             placement,
             ActivationIndicatorPlacement(
-                frame: CGRect(x: 258, y: 186, width: 76, height: 18),
+                frame: CGRect(x: 258, y: 782, width: 76, height: 18),
                 mode: .debugGeometryQuality,
                 geometryQuality: .unavailable
             )
@@ -136,7 +140,8 @@ final class ActivationIndicatorControllerTests: XCTestCase {
             context: context(
                 focusedElementRect: CGRect(x: 80, y: 180, width: 260, height: 44),
                 caretGeometryQuality: .directCaret
-            )
+            ),
+            mainScreenFrame: screenFrame
         )
         let ocr = ActivationIndicatorController.placement(
             mode: .fieldEdge,
@@ -144,13 +149,31 @@ final class ActivationIndicatorControllerTests: XCTestCase {
             context: context(
                 focusedElementRect: CGRect(x: 80, y: 180, width: 260, height: 44),
                 caretGeometryQuality: .screenOCR
-            )
+            ),
+            mainScreenFrame: screenFrame
         )
 
-        XCTAssertEqual(direct?.frame, CGRect(x: 326, y: 186, width: 8, height: 8))
-        XCTAssertEqual(ocr?.frame, CGRect(x: 326, y: 186, width: 8, height: 8))
+        XCTAssertEqual(direct?.frame, CGRect(x: 326, y: 782, width: 8, height: 8))
+        XCTAssertEqual(ocr?.frame, CGRect(x: 326, y: 782, width: 8, height: 8))
         XCTAssertEqual(direct?.mode, .fieldEdge)
         XCTAssertEqual(ocr?.mode, .fieldEdge)
+    }
+
+    func testCaretAnchorPlacementPreservesSecondaryDisplayXAndConvertsY() {
+        let placement = ActivationIndicatorController.placement(
+            mode: .caretAnchor,
+            displayMode: .inline,
+            context: context(caretRect: CGRect(x: 1_520, y: 110, width: 2, height: 18)),
+            mainScreenFrame: screenFrame
+        )
+
+        XCTAssertEqual(
+            placement,
+            ActivationIndicatorPlacement(
+                frame: CGRect(x: 1_526, y: 877, width: 8, height: 8),
+                mode: .caretAnchor
+            )
+        )
     }
 
     func testPlacementCarriesStableFieldIdentity() throws {
@@ -185,6 +208,8 @@ final class ActivationIndicatorControllerTests: XCTestCase {
             context: context(selectedRange: NSRange(location: 3, length: 2))
         ))
     }
+
+    private let screenFrame = CGRect(x: 0, y: 0, width: 1_000, height: 1_000)
 
     private func context(
         caretRect: CGRect? = CGRect(x: 100, y: 200, width: 2, height: 20),

@@ -8,7 +8,7 @@ final class ModelBackendRedesignTests: XCTestCase {
         for requiredText in [
             "Section(\"Active backend\")",
             "Section(\"Provider\")",
-            "Section(\"Remote completion consent\")",
+            "RemoteConsentSectionView(",
             "Section(\"Connection and runtime test\")",
             "Section(\"Compatibility recommendation\")",
             "Section(\"Playground\")",
@@ -65,22 +65,23 @@ final class ModelBackendRedesignTests: XCTestCase {
         XCTAssertTrue(source.contains("Button(\"Open Developer Diagnostics\")"))
     }
 
+    func testModelDebugLogExportUsesSharedControllerFlow() throws {
+        let source = try modelSource()
+        let appControllerSource = try sourceFile("Sources/AutoCompApp/App/AppController.swift")
+        let exportRange = try XCTUnwrap(source.range(of: "private func exportDebugLogs()"))
+        let nextMemberRange = try XCTUnwrap(source.range(of: "\n    private var localMaxRAMBinding", range: exportRange.upperBound..<source.endIndex))
+        let exportBody = String(source[exportRange.lowerBound..<nextMemberRange.lowerBound])
+
+        XCTAssertTrue(appControllerSource.contains("enum DebugLogExportResult"))
+        XCTAssertTrue(appControllerSource.contains("func exportDebugLogsWithDirectoryPicker() -> DebugLogExportResult"))
+        XCTAssertTrue(exportBody.contains("controller.exportDebugLogsWithDirectoryPicker()"))
+        XCTAssertTrue(exportBody.contains("advancedMessage = \"Debug logs exported to \\(exportURL.path).\""))
+        XCTAssertFalse(exportBody.contains("NSOpenPanel"))
+        XCTAssertFalse(exportBody.contains("withInteractionPipelineSuspended(reason: .settingsExport)"))
+    }
+
     private func modelSource() throws -> String {
-        try String(
-            contentsOf: try packageRoot().appendingPathComponent("Sources/AutoCompApp/Views/Settings/Sections/ModelSettingsView.swift"),
-            encoding: .utf8
-        )
+        try sourceFile("Sources/AutoCompApp/Views/Settings/Sections/ModelSettingsView.swift")
     }
 
-    private func packageRoot() throws -> URL {
-        var url = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-        while url.path != "/" {
-            if FileManager.default.fileExists(atPath: url.appendingPathComponent("Package.swift").path) {
-                return url
-            }
-            url.deleteLastPathComponent()
-        }
-
-        throw XCTSkip("Unable to locate package root")
-    }
 }

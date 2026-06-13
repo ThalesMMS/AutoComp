@@ -253,6 +253,120 @@ extension SettingsInfoCard where Content == EmptyView {
     }
 }
 
+enum RemoteConsentSectionViewStyle {
+    case onboardingCard
+    case settingsSection
+}
+
+struct RemoteConsentSectionView: View {
+    let settings: CompletionBackendSettings
+    let style: RemoteConsentSectionViewStyle
+    let hasConsent: (RemoteCompletionConsentScope) -> Bool
+    let grantConsent: (RemoteCompletionConsentScope) -> Void
+    let resetConsent: () -> Void
+
+    var body: some View {
+        switch style {
+        case .onboardingCard:
+            onboardingCard
+        case .settingsSection:
+            settingsSection
+        }
+    }
+
+    private var onboardingCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Image(systemName: "network.badge.shield.half.filled")
+                    .foregroundStyle(.orange)
+                    .frame(width: 18)
+                Text("Remote completion consent")
+                    .font(.headline)
+                Spacer()
+            }
+
+            remoteEndpointRows
+            consentExplanation
+
+            ForEach(settings.remoteConsentRequirements) { requirement in
+                onboardingRequirementRow(requirement)
+            }
+
+            Button("Reset Remote Completion Consent", role: .destructive, action: resetConsent)
+        }
+        .padding(16)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    @ViewBuilder
+    private var settingsSection: some View {
+        Section("Remote completion consent") {
+            SectionFooterNote(text: "Consent is saved per endpoint before autocomplete text can leave this Mac.")
+            remoteEndpointRows
+
+            ForEach(settings.remoteConsentRequirements) { requirement in
+                settingsRequirementCard(requirement)
+            }
+
+            Button("Reset Remote Completion Consent", role: .destructive, action: resetConsent)
+        }
+    }
+
+    private var remoteEndpointRows: some View {
+        Group {
+            LabeledContent("Remote endpoint", value: settings.remoteBaseURL)
+            LabeledContent("Endpoint type", value: settings.remoteConsentEndpointKindTitle)
+        }
+    }
+
+    private var consentExplanation: some View {
+        Text("Before remote completion runs, choose whether text from the active field may be sent to this endpoint.")
+            .font(.callout)
+            .foregroundStyle(.secondary)
+    }
+
+    private func onboardingRequirementRow(_ requirement: RemoteCompletionConsentRequirement) -> some View {
+        let isAllowed = hasConsent(requirement.scope)
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(requirement.title)
+                    .font(.caption.weight(.medium))
+                Spacer()
+                Text(isAllowed ? "Allowed" : "Needs consent")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(isAllowed ? .green : .orange)
+            }
+            Text(requirement.detail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if !isAllowed {
+                Button(requirement.buttonTitle) {
+                    grantConsent(requirement.scope)
+                }
+            }
+        }
+    }
+
+    private func settingsRequirementCard(_ requirement: RemoteCompletionConsentRequirement) -> some View {
+        let isAllowed = hasConsent(requirement.scope)
+        return SettingsInfoCard(
+            title: requirement.title,
+            subtitle: requirement.detail,
+            state: isAllowed ? .ok : .warning,
+            statusTitle: isAllowed ? "Allowed" : "Needs consent",
+            systemImage: "lock.shield"
+        ) {
+            if isAllowed {
+                SectionFooterNote(text: "Consent is saved for this endpoint.")
+            } else {
+                Button(requirement.buttonTitle) {
+                    grantConsent(requirement.scope)
+                }
+            }
+        }
+    }
+}
+
 struct SettingsActionRow<Trailing: View>: View {
     let title: String
     let subtitle: String?

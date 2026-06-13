@@ -187,6 +187,63 @@ final class LocalModelManagementTests: XCTestCase {
     }
 
     @MainActor
+    func testPartialDownloadCleanupFailureUsesModelFilenameState() throws {
+        let directory = try makeTemporaryDirectory()
+        let partialURL = directory.appendingPathComponent("demo.gguf.staging-\(UUID().uuidString).gguf")
+        try Data("partial".utf8).write(to: partialURL)
+        let model = DownloadableLocalModel(
+            filename: "demo.gguf",
+            displayName: "Demo",
+            downloadURL: URL(string: "https://example.com/demo.gguf")!,
+            approximateSizeInGigabytes: 0.1
+        )
+        let manager = ModelDownloadManager(
+            catalog: LocalModelCatalog(downloadableModels: [model]),
+            modelsDirectoryURL: directory,
+            downloader: StubModelDownloader(temporaryURL: partialURL)
+        )
+
+        try makeDirectoryNonWritable(directory)
+        defer { try? restoreDirectoryPermissions(directory) }
+
+        let removedCount = manager.removePartialDownloads()
+
+        XCTAssertEqual(removedCount, 0)
+        guard case .failed(let message) = manager.state(for: model) else {
+            return XCTFail("Expected failed state, got \(manager.state(for: model))")
+        }
+        XCTAssertTrue(message.contains("partial download"))
+        XCTAssertNil(manager.modelStates[partialURL.lastPathComponent])
+    }
+
+    @MainActor
+    func testPartialDownloadCleanupFailureDropsUnmappedStagingState() throws {
+        let directory = try makeTemporaryDirectory()
+        let partialURL = directory.appendingPathComponent("orphan.gguf.staging-\(UUID().uuidString).gguf")
+        try Data("partial".utf8).write(to: partialURL)
+        let model = DownloadableLocalModel(
+            filename: "demo.gguf",
+            displayName: "Demo",
+            downloadURL: URL(string: "https://example.com/demo.gguf")!,
+            approximateSizeInGigabytes: 0.1
+        )
+        let manager = ModelDownloadManager(
+            catalog: LocalModelCatalog(downloadableModels: [model]),
+            modelsDirectoryURL: directory,
+            downloader: StubModelDownloader(temporaryURL: partialURL)
+        )
+
+        try makeDirectoryNonWritable(directory)
+        defer { try? restoreDirectoryPermissions(directory) }
+
+        let removedCount = manager.removePartialDownloads()
+
+        XCTAssertEqual(removedCount, 0)
+        XCTAssertEqual(manager.state(for: model), .idle)
+        XCTAssertNil(manager.modelStates[partialURL.lastPathComponent])
+    }
+
+    @MainActor
     func testRuntimeBootstrapStateReflectsScannedModels() throws {
         let directory = try makeTemporaryDirectory()
         let bootstrap = RuntimeBootstrapModel(
@@ -266,15 +323,20 @@ final class LocalModelManagementTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: externalURL.path))
     }
 
-    private func makeTemporaryDirectory() throws -> URL {
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("AutoCompLocalModelTests-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        addTeardownBlock {
-            try? FileManager.default.removeItem(at: directory)
-        }
-        return directory
-    }
+}
+
+private func makeDirectoryNonWritable(_ directory: URL) throws {
+    try FileManager.default.setAttributes(
+        [.posixPermissions: 0o500],
+        ofItemAtPath: directory.path
+    )
+}
+
+private func restoreDirectoryPermissions(_ directory: URL) throws {
+    try FileManager.default.setAttributes(
+        [.posixPermissions: 0o700],
+        ofItemAtPath: directory.path
+    )
 }
 
 private struct StubModelDownloader: ModelFileDownloading {

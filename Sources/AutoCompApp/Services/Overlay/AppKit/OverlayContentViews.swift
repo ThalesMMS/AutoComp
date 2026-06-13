@@ -36,8 +36,20 @@ private enum KeycapHintStyle {
     }
 }
 
+@MainActor
+private func makeOverlayBackgroundView() -> NSVisualEffectView {
+    let backgroundView = NSVisualEffectView()
+    backgroundView.material = .popover
+    backgroundView.blendingMode = .behindWindow
+    backgroundView.state = .active
+    backgroundView.wantsLayer = true
+    backgroundView.layer?.cornerRadius = 7
+    backgroundView.layer?.masksToBounds = true
+    return backgroundView
+}
+
 final class SimpleCaretPopupContentView: NSView {
-    private let backgroundView = NSVisualEffectView()
+    private let backgroundView = makeOverlayBackgroundView()
     private let suggestionLabel = NSTextField(labelWithString: "")
     private let acceptHintKeycapView = KeycapHintView()
     private let horizontalPadding: CGFloat = 10
@@ -86,13 +98,6 @@ final class SimpleCaretPopupContentView: NSView {
         layer?.backgroundColor = NSColor.clear.cgColor
         layer?.masksToBounds = true
 
-        backgroundView.material = .popover
-        backgroundView.blendingMode = .behindWindow
-        backgroundView.state = .active
-        backgroundView.wantsLayer = true
-        backgroundView.layer?.cornerRadius = 7
-        backgroundView.layer?.masksToBounds = true
-
         suggestionLabel.font = .systemFont(ofSize: 13)
         suggestionLabel.textColor = NSColor.labelColor.withAlphaComponent(0.82)
         suggestionLabel.lineBreakMode = .byTruncatingTail
@@ -105,7 +110,7 @@ final class SimpleCaretPopupContentView: NSView {
 }
 
 final class MultiSuggestionPopupContentView: NSView {
-    private let backgroundView = NSVisualEffectView()
+    private let backgroundView = makeOverlayBackgroundView()
     private let rowViews = (0..<3).map { _ in MultiSuggestionPopupRowView() }
     private let padding: CGFloat = 6
     private let rowHeight: CGFloat = 26
@@ -172,13 +177,6 @@ final class MultiSuggestionPopupContentView: NSView {
         wantsLayer = true
         layer?.backgroundColor = NSColor.clear.cgColor
         layer?.masksToBounds = true
-
-        backgroundView.material = .popover
-        backgroundView.blendingMode = .behindWindow
-        backgroundView.state = .active
-        backgroundView.wantsLayer = true
-        backgroundView.layer?.cornerRadius = 7
-        backgroundView.layer?.masksToBounds = true
 
         addSubview(backgroundView)
         for rowView in rowViews {
@@ -377,7 +375,7 @@ final class InlineGhostTextView: NSView {
 }
 
 final class MirrorSuggestionOverlayContentView: NSView {
-    private let backgroundView = NSVisualEffectView()
+    private let backgroundView = makeOverlayBackgroundView()
     private let appLabel = NSTextField(labelWithString: "")
     private let suggestionLabel = NSTextField(labelWithString: "")
     private let acceptHintKeycapView = KeycapHintView()
@@ -447,13 +445,6 @@ final class MirrorSuggestionOverlayContentView: NSView {
         wantsLayer = true
         layer?.backgroundColor = NSColor.clear.cgColor
         layer?.masksToBounds = true
-
-        backgroundView.material = .popover
-        backgroundView.blendingMode = .behindWindow
-        backgroundView.state = .active
-        backgroundView.wantsLayer = true
-        backgroundView.layer?.cornerRadius = 8
-        backgroundView.layer?.masksToBounds = true
 
         appLabel.font = .systemFont(ofSize: 11)
         appLabel.textColor = .secondaryLabelColor

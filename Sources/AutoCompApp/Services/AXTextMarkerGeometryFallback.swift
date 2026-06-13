@@ -28,14 +28,7 @@ struct AXTextMarkerGeometryFallback {
     }
 
     static func isEligibleBrowser(bundleID: String) -> Bool {
-        [
-            "com.apple.Safari",
-            "com.google.Chrome",
-            "com.brave.Browser",
-            "com.microsoft.edgemac",
-            "company.thebrowser.Browser",
-            "company.thebrowser.dia"
-        ].contains(bundleID)
+        WebHostApps.isBrowser(bundleID)
     }
 
     static func gate(

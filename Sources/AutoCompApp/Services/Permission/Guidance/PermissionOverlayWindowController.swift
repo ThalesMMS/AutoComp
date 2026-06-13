@@ -11,9 +11,16 @@ protocol PermissionOverlayPresenting: AnyObject {
 final class PermissionOverlayWindowController: PermissionOverlayPresenting {
     private var panel: PermissionOverlayPanel?
     private let onCancel: () -> Void
+    private let screenFrameProvider: @MainActor (CGRect?) -> CGRect
 
-    init(onCancel: @escaping () -> Void) {
+    init(
+        onCancel: @escaping () -> Void,
+        screenFrameProvider: @escaping @MainActor (CGRect?) -> CGRect = {
+            PermissionOverlayWindowController.visibleScreenFrame(containing: $0)
+        }
+    ) {
         self.onCancel = onCancel
+        self.screenFrameProvider = screenFrameProvider
     }
 
     func show(flow: PermissionGuidanceFlow, anchorFrame: CGRect?) {
@@ -52,8 +59,14 @@ final class PermissionOverlayWindowController: PermissionOverlayPresenting {
     }
 
     private func frame(for panel: NSPanel, anchorFrame: CGRect?) -> NSRect {
-        let size = panel.frame.size
-        let screenFrame = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        Self.frame(
+            size: panel.frame.size,
+            anchorFrame: anchorFrame,
+            screenFrame: screenFrameProvider(anchorFrame)
+        )
+    }
+
+    static func frame(size: CGSize, anchorFrame: CGRect?, screenFrame: CGRect) -> NSRect {
         let origin: CGPoint
 
         if let anchorFrame {
@@ -68,6 +81,20 @@ final class PermissionOverlayWindowController: PermissionOverlayPresenting {
         }
 
         return NSRect(origin: origin, size: size)
+    }
+
+    private static func visibleScreenFrame(containing anchorFrame: CGRect?) -> CGRect {
+        if let anchorFrame,
+           let screen = NSScreen.screens.first(where: { screen in
+               screen.frame.intersects(anchorFrame)
+                   || screen.frame.contains(CGPoint(x: anchorFrame.midX, y: anchorFrame.midY))
+           }) {
+            return screen.visibleFrame
+        }
+
+        return NSScreen.main?.visibleFrame
+            ?? NSScreen.screens.first?.visibleFrame
+            ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
     }
 }
 

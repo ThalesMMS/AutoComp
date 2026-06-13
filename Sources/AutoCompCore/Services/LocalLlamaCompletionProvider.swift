@@ -270,38 +270,6 @@ public struct LocalLlamaCompletionProvider: PersonalizationContextAwareCompletio
         self.runtimeStatusRecorder = runtimeStatusRecorder
     }
 
-    public func complete(context: TextContext) async throws -> Suggestion {
-        try await complete(context: context, privacySettings: PrivacySettings(), visualContext: nil)
-    }
-
-    public func complete(
-        context: TextContext,
-        privacySettings: PrivacySettings,
-        visualContext: VisualContextSnapshot?
-    ) async throws -> Suggestion {
-        try await complete(
-            context: context,
-            privacySettings: privacySettings,
-            visualContext: visualContext,
-            clipboardContext: nil
-        )
-    }
-
-    public func complete(
-        context: TextContext,
-        privacySettings: PrivacySettings,
-        visualContext: VisualContextSnapshot?,
-        clipboardContext: ClipboardContextSnapshot?
-    ) async throws -> Suggestion {
-        try await complete(
-            context: context,
-            privacySettings: privacySettings,
-            visualContext: visualContext,
-            clipboardContext: clipboardContext,
-            personalizationSamples: []
-        )
-    }
-
     public func complete(
         context: TextContext,
         privacySettings: PrivacySettings,

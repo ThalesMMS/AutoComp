@@ -18,20 +18,6 @@ public enum DomainWebAppRuleAction: String, Codable, Sendable {
     case visualContextRequired
 }
 
-/// The kind of target a rule applies to.
-///
-/// - Note: This is distinct from the UI "preset" concept. Presets can expand into multiple
-///   `DomainWebAppRule` entries and are tracked via `presetId`.
-public enum DomainWebAppRuleTarget: Codable, Sendable, Equatable {
-    /// A specific domain pattern.
-    case domain(DomainPattern)
-
-    /// A logical web-app preset (e.g., "Google Docs") that expands into one or more domain patterns.
-    ///
-    /// This is stored for provenance; matching is still evaluated using the expanded domain patterns.
-    case preset(id: String)
-}
-
 /// A single persisted rule entry.
 public struct DomainWebAppRule: Codable, Sendable, Identifiable, Equatable {
     public var id: UUID
@@ -87,4 +73,53 @@ public struct DomainWebAppRules: Codable, Sendable, Equatable {
     public init(ruleset: DomainWebAppRuleset = DomainWebAppRuleset(rules: [])) {
         self.ruleset = ruleset
     }
+}
+
+public extension DomainWebAppRuleset {
+    /// Built-in autocomplete gates that preserve the production behavior that predated
+    /// the persisted domain/web-app rule builder.
+    static let autocompleteProductionDefaults = DomainWebAppRuleset(rules: [
+        DomainWebAppRule(
+            id: UUID(uuidString: "21000000-0000-0000-0000-000000000001")!,
+            pattern: .exactHost("mail.google.com"),
+            action: .deny,
+            createdAt: Date(timeIntervalSince1970: 0),
+            updatedAt: Date(timeIntervalSince1970: 0)
+        ),
+        DomainWebAppRule(
+            id: UUID(uuidString: "21000000-0000-0000-0000-000000000002")!,
+            pattern: .exactHost("outlook.office.com"),
+            action: .deny,
+            createdAt: Date(timeIntervalSince1970: 0),
+            updatedAt: Date(timeIntervalSince1970: 0)
+        ),
+        DomainWebAppRule(
+            id: UUID(uuidString: "21000000-0000-0000-0000-000000000003")!,
+            pattern: .exactHost("outlook.live.com"),
+            action: .deny,
+            createdAt: Date(timeIntervalSince1970: 0),
+            updatedAt: Date(timeIntervalSince1970: 0)
+        ),
+        DomainWebAppRule(
+            id: UUID(uuidString: "21000000-0000-0000-0000-000000000006")!,
+            pattern: .exactHost("docs.google.com"),
+            action: .visualContextRequired,
+            createdAt: Date(timeIntervalSince1970: 0),
+            updatedAt: Date(timeIntervalSince1970: 0)
+        ),
+        DomainWebAppRule(
+            id: UUID(uuidString: "21000000-0000-0000-0000-000000000004")!,
+            pattern: .exactHost("sheets.google.com"),
+            action: .manualOnly,
+            createdAt: Date(timeIntervalSince1970: 0),
+            updatedAt: Date(timeIntervalSince1970: 0)
+        ),
+        DomainWebAppRule(
+            id: UUID(uuidString: "21000000-0000-0000-0000-000000000005")!,
+            pattern: .exactHost("slides.google.com"),
+            action: .manualOnly,
+            createdAt: Date(timeIntervalSince1970: 0),
+            updatedAt: Date(timeIntervalSince1970: 0)
+        )
+    ])
 }

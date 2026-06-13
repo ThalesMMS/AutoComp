@@ -111,21 +111,6 @@ final class CompatibilityCatalogTests: XCTestCase {
     func testTerminalEnablementIsManualOnlyUnlessAutomaticOverrideIsExplicit() {
         let catalog = CompatibilityCatalog()
 
-        let legacyEnabled = catalog.decision(
-            bundleID: "com.apple.Terminal",
-            domain: nil,
-            userEnabledOverrides: ["com.apple.Terminal": true]
-        )
-        XCTAssertTrue(legacyEnabled.enabled)
-        XCTAssertEqual(legacyEnabled.mode, .mirrorWindow)
-        XCTAssertEqual(legacyEnabled.overrideMode, .manualOnly)
-        XCTAssertFalse(legacyEnabled.allowsAutomaticSuggestions)
-        XCTAssertEqual(
-            legacyEnabled.warningMessage,
-            "Terminal enablement defaults to Manual only unless Automatic is selected explicitly."
-        )
-        XCTAssertNil(legacyEnabled.setupMessage)
-
         let manualOnly = catalog.decision(
             bundleID: "com.apple.Terminal",
             domain: nil,
@@ -287,18 +272,6 @@ final class CompatibilityCatalogTests: XCTestCase {
 
         XCTAssertEqual(decoded.defaultActivationMode, .manualOnly)
         XCTAssertTrue(String(decoding: data, as: UTF8.self).contains("enabledByDefault"))
-    }
-
-    func testLegacyEnabledOverridesStillControlDecision() {
-        let decision = CompatibilityCatalog().decision(
-            bundleID: "com.apple.TextEdit",
-            domain: nil,
-            userEnabledOverrides: ["com.apple.TextEdit": false]
-        )
-
-        XCTAssertFalse(decision.enabled)
-        XCTAssertEqual(decision.mode, .disabled)
-        XCTAssertEqual(decision.overrideMode, .disabled)
     }
 
     func testGoogleDocsRequiresSetupButSheetsAreUnsupported() {

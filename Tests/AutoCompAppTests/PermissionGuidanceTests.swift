@@ -153,6 +153,55 @@ final class PermissionGuidanceTests: XCTestCase {
         XCTAssertFalse(source.contains(".onDrag"))
     }
 
+    func testSystemSettingsWindowBoundsConvertFromCGToAppKitCoordinates() {
+        let mainScreenFrame = CGRect(x: 0, y: 0, width: 1_000, height: 1_000)
+
+        XCTAssertEqual(
+            SystemSettingsWindowLocator.appKitFrame(
+                cgWindowBounds: CGRect(x: 120, y: 80, width: 700, height: 600),
+                mainScreenFrame: mainScreenFrame
+            ),
+            CGRect(x: 120, y: 320, width: 700, height: 600)
+        )
+        XCTAssertEqual(
+            SystemSettingsWindowLocator.appKitFrame(
+                cgWindowBounds: CGRect(x: 1_120, y: 80, width: 700, height: 500),
+                mainScreenFrame: mainScreenFrame
+            ),
+            CGRect(x: 1_120, y: 420, width: 700, height: 500)
+        )
+    }
+
+    func testOverlayFrameUsesConvertedAnchorInProvidedScreenFrame() {
+        let frame = PermissionOverlayWindowController.frame(
+            size: CGSize(width: 360, height: 176),
+            anchorFrame: CGRect(x: 120, y: 320, width: 700, height: 600),
+            screenFrame: CGRect(x: 0, y: 0, width: 1_000, height: 1_000)
+        )
+
+        XCTAssertEqual(frame, CGRect(x: 436, y: 656, width: 360, height: 176))
+    }
+
+    func testOverlayFrameClampsToSecondaryScreenContainingAnchor() {
+        let frame = PermissionOverlayWindowController.frame(
+            size: CGSize(width: 360, height: 176),
+            anchorFrame: CGRect(x: 1_120, y: 420, width: 700, height: 500),
+            screenFrame: CGRect(x: 1_000, y: 0, width: 900, height: 1_000)
+        )
+
+        XCTAssertEqual(frame, CGRect(x: 1_436, y: 656, width: 360, height: 176))
+    }
+
+    func testOverlayFrameFallbackWithoutAnchorIsUnchanged() {
+        let frame = PermissionOverlayWindowController.frame(
+            size: CGSize(width: 360, height: 176),
+            anchorFrame: nil,
+            screenFrame: CGRect(x: 0, y: 0, width: 1_000, height: 1_000)
+        )
+
+        XCTAssertEqual(frame, CGRect(x: 616, y: 752, width: 360, height: 176))
+    }
+
     func testPermissionHostAppDoesNotOfferExecutableForSwiftPMDebugRuns() {
         let hostApp = PermissionHostApp(
             displayName: "AutoComp",
@@ -255,6 +304,23 @@ final class PermissionGuidanceTests: XCTestCase {
         XCTAssertEqual(hostApp.identityDetail, "/Users/test/GitHub/AutoComp/dist/AutoComp.app")
     }
 
+    func testPermissionAndInstallationUseSharedAppBundleLocator() throws {
+        let root = try packageRoot()
+        let locatorURL = root.appendingPathComponent("Sources/AutoCompApp/Services/AppBundleLocator.swift")
+        let locatorSource = (try? String(contentsOf: locatorURL, encoding: .utf8)) ?? ""
+        let permissionSource = try sourceFile("Sources/AutoCompApp/Services/Permission/Guidance/PermissionHostApp.swift")
+        let installationSource = try sourceFile("Sources/AutoCompApp/Services/InstallationLocationService.swift")
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: locatorURL.path))
+        XCTAssertTrue(locatorSource.contains("enum AppBundleLocator"))
+        XCTAssertTrue(permissionSource.contains("AppBundleLocator.bundleURL(containingExecutablePath: executablePath)"))
+        XCTAssertTrue(installationSource.contains("AppBundleLocator.bundleURL(containingExecutablePath: executablePath)"))
+        XCTAssertFalse(permissionSource.contains("private static func appBundleURL(containingExecutablePath"))
+        XCTAssertFalse(installationSource.contains("private static func appBundleURL(containingExecutablePath"))
+        XCTAssertTrue(permissionSource.contains("return stagedAppBundleURL(near: executableDirectory)"))
+        XCTAssertEqual(permissionSource.components(separatedBy: ".appendingPathComponent(\"dist\", isDirectory: true)").count - 1, 2)
+    }
+
     func testGuidedInputMonitoringCopyKeepsDragFallbackVisible() {
         XCTAssertTrue(PermissionKind.inputMonitoring.guidanceActionTitle.contains("drag AutoComp"))
         XCTAssertTrue(PermissionKind.inputMonitoring.guidanceFallbackText.contains("drag AutoComp"))
@@ -311,17 +377,6 @@ final class PermissionGuidanceTests: XCTestCase {
         )
     }
 
-    private func packageRoot() throws -> URL {
-        var url = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-        while url.path != "/" {
-            if FileManager.default.fileExists(atPath: url.appendingPathComponent("Package.swift").path) {
-                return url
-            }
-            url.deleteLastPathComponent()
-        }
-
-        throw XCTSkip("Unable to locate package root")
-    }
 }
 
 @MainActor

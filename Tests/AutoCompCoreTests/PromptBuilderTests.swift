@@ -305,6 +305,7 @@ final class PromptBuilderTests: XCTestCase {
 
         let prompt = builder.prompt(
             for: context,
+            privacySettings: PrivacySettings(localPersonalizationEnabled: true, personalizationStrength: 1),
             personalizationSamples: samples
         )
 
@@ -313,5 +314,64 @@ final class PromptBuilderTests: XCTestCase {
         XCTAssertTrue(prompt.contains("- second sam"))
         XCTAssertFalse(prompt.contains("third sample"))
         XCTAssertFalse(prompt.contains("longer than budget"))
+    }
+
+    func testPersonalizationStrengthControlsRenderedPromptSamples() {
+        let context = TextContext(
+            app: AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1),
+            focusedElementID: "field",
+            textBeforeCursor: "Please continue"
+        )
+        let samples = [
+            PersonalizationSample(
+                excerpt: "first local writing example",
+                appBundleID: "com.apple.TextEdit",
+                domain: nil,
+                languageHint: nil,
+                createdAt: Date(timeIntervalSince1970: 1)
+            ),
+            PersonalizationSample(
+                excerpt: "second local writing example",
+                appBundleID: "com.apple.TextEdit",
+                domain: nil,
+                languageHint: nil,
+                createdAt: Date(timeIntervalSince1970: 2)
+            ),
+            PersonalizationSample(
+                excerpt: "third local writing example",
+                appBundleID: "com.apple.TextEdit",
+                domain: nil,
+                languageHint: nil,
+                createdAt: Date(timeIntervalSince1970: 3)
+            )
+        ]
+
+        let disabledPrompt = PromptBuilder().prompt(
+            for: context,
+            privacySettings: PrivacySettings(localPersonalizationEnabled: true, personalizationStrength: 0),
+            personalizationSamples: samples
+        )
+        let mediumPrompt = PromptBuilder().prompt(
+            for: context,
+            privacySettings: PrivacySettings(localPersonalizationEnabled: true, personalizationStrength: 0.35),
+            personalizationSamples: samples
+        )
+        let fullPrompt = PromptBuilder().prompt(
+            for: context,
+            privacySettings: PrivacySettings(localPersonalizationEnabled: true, personalizationStrength: 1),
+            personalizationSamples: samples
+        )
+        let optOutPrompt = PromptBuilder().prompt(
+            for: context,
+            privacySettings: PrivacySettings(localPersonalizationEnabled: false, personalizationStrength: 1),
+            personalizationSamples: samples
+        )
+
+        XCTAssertFalse(disabledPrompt.contains("Local writing examples:"))
+        XCTAssertFalse(optOutPrompt.contains("Local writing examples:"))
+        XCTAssertTrue(mediumPrompt.contains("first local writing example"))
+        XCTAssertTrue(mediumPrompt.contains("second local writing example"))
+        XCTAssertFalse(mediumPrompt.contains("third local writing example"))
+        XCTAssertTrue(fullPrompt.contains("third local writing example"))
     }
 }

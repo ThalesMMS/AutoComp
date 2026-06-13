@@ -480,14 +480,6 @@ final class RemoteCompletionProviderTests: XCTestCase {
         return try Data(contentsOf: fixturesDirectory.appendingPathComponent(name))
     }
 
-    private func makeContext() -> TextContext {
-        TextContext(
-            app: AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1),
-            focusedElementID: "field",
-            textBeforeCursor: "Can you "
-        )
-    }
-
     private func remoteError(for underlyingError: Error) async throws -> RemoteCompletionError {
         let provider = RemoteCompletionProvider(
             configuration: RemoteCompletionConfiguration(

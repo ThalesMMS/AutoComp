@@ -78,31 +78,15 @@ final class InstallationLocationService: ObservableObject {
     }
 
     private static func resolvedCurrentURL(bundleURL: URL, executablePath: String) -> URL {
-        if let appBundle = appBundleURL(containingExecutablePath: executablePath) {
+        if let appBundle = AppBundleLocator.bundleURL(containingExecutablePath: executablePath) {
             return appBundle
         }
 
-        if !executablePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return URL(fileURLWithPath: executablePath).standardizedFileURL
+        if let executableURL = AppBundleLocator.standardizedURL(forPath: executablePath) {
+            return executableURL
         }
 
         return bundleURL.standardizedFileURL
-    }
-
-    private static func appBundleURL(containingExecutablePath executablePath: String) -> URL? {
-        guard !executablePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return nil
-        }
-
-        var candidate = URL(fileURLWithPath: executablePath).standardizedFileURL
-        while candidate.path != "/" {
-            if candidate.pathExtension.localizedCaseInsensitiveCompare("app") == .orderedSame {
-                return candidate
-            }
-            candidate.deleteLastPathComponent()
-        }
-
-        return nil
     }
 
     private static func isInsideApplicationsDirectory(

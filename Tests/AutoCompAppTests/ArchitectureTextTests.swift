@@ -1,6 +1,25 @@
 import XCTest
 
 final class ArchitectureTextTests: XCTestCase {
+    func testLockingSourcesUseFoundationNSLockWithLock() throws {
+        let root = try packageRoot()
+
+        for relativePath in [
+            "Sources/AutoCompApp/Services/AsyncTimeout.swift",
+            "Sources/AutoCompApp/Services/InputSourceMonitor.swift",
+            "Sources/AutoCompApp/Services/InteractionPipelineSuspensionController.swift",
+            "Sources/AutoCompApp/Services/VisualContextCoordinator.swift",
+            "Sources/AutoCompApp/Services/VisualContextPipeline.swift"
+        ] {
+            let source = try String(
+                contentsOf: root.appendingPathComponent(relativePath),
+                encoding: .utf8
+            )
+            XCTAssertFalse(source.contains("private extension NSLock"), relativePath)
+            XCTAssertFalse(source.contains("private func withLock<T>"), relativePath)
+        }
+    }
+
     func testArchitectureDocumentMapsPipelineAndContributorEntryPoints() throws {
         let root = try packageRoot()
         let document = try String(
@@ -53,12 +72,4 @@ final class ArchitectureTextTests: XCTestCase {
         XCTAssertTrue(document.contains("Write bugs:"))
     }
 
-    private func packageRoot() throws -> URL {
-        var url = URL(fileURLWithPath: #filePath)
-        while url.lastPathComponent != "Tests" {
-            url.deleteLastPathComponent()
-        }
-        url.deleteLastPathComponent()
-        return url
-    }
 }

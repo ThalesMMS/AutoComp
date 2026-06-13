@@ -302,29 +302,14 @@ struct DeveloperSettingsView: View {
     }
 
     private func exportDebugLogs() {
-        controller.withInteractionPipelineSuspended(reason: .settingsExport) {
-            let panel = NSOpenPanel()
-            panel.canChooseFiles = false
-            panel.canChooseDirectories = true
-            panel.canCreateDirectories = true
-            panel.allowsMultipleSelection = false
-            panel.prompt = "Export"
-            panel.message = "Choose where to save the local debug log export."
-
-            let response = controller.withInteractionPipelineSuspended(reason: .openPanel) {
-                panel.runModal()
-            }
-            guard response == .OK, let directory = panel.url else {
-                return
-            }
-
-            do {
-                let exportURL = try controller.exportDebugLogs(to: directory)
-                debugArtifactCount = controller.debugArtifactCount()
-                debugArtifactMessage = "Debug logs exported to \(exportURL.path)."
-            } catch {
-                debugArtifactMessage = "Unable to export debug logs: \(error.localizedDescription)"
-            }
+        switch controller.exportDebugLogsWithDirectoryPicker() {
+        case .cancelled:
+            return
+        case .exported(let exportURL):
+            debugArtifactCount = controller.debugArtifactCount()
+            debugArtifactMessage = "Debug logs exported to \(exportURL.path)."
+        case .failed(let error):
+            debugArtifactMessage = "Unable to export debug logs: \(error.localizedDescription)"
         }
     }
 

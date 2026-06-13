@@ -287,26 +287,18 @@ public struct SuggestionEligibilityEvaluator: Sendable {
         from previousContext: TextContext
     ) -> Bool {
         guard context.domain == previousContext.domain,
-              context.domain?.contains("docs.google.com") == true,
-              isGoogleDocsCapableBrowser(context.app.bundleID),
-              isGoogleDocsCapableBrowser(previousContext.app.bundleID),
+              GoogleDocsContext.matches(bundleID: context.app.bundleID, domain: context.domain, appGate: .browser),
+              GoogleDocsContext.matches(
+                bundleID: previousContext.app.bundleID,
+                domain: previousContext.domain,
+                appGate: .browser
+              ),
               context.textBeforeCursor != previousContext.textBeforeCursor,
               context.textBeforeCursor.count > previousContext.textBeforeCursor.count else {
             return false
         }
 
         return true
-    }
-
-    private func isGoogleDocsCapableBrowser(_ bundleID: String) -> Bool {
-        [
-            "com.apple.Safari",
-            "com.google.Chrome",
-            "com.brave.Browser",
-            "com.microsoft.edgemac",
-            "company.thebrowser.Browser",
-            "company.thebrowser.dia"
-        ].contains(bundleID)
     }
 
 }

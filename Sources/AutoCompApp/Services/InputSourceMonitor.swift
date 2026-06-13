@@ -39,12 +39,12 @@ final class InputSourceMonitor: @unchecked Sendable {
     }
 
     var currentState: InputMethodState {
-        withLock { state }
+        lock.withLock { state }
     }
 
     func refresh() {
         let updatedState = Self.readCurrentInputMethodState()
-        withLock {
+        lock.withLock {
             state = updatedState
         }
         GeometryDebug.log("input-source state=\(updatedState.diagnosticSummary) id=\(updatedState.currentInputSourceID ?? "nil")")
@@ -98,10 +98,4 @@ final class InputSourceMonitor: @unchecked Sendable {
         return CFBooleanGetValue(value)
     }
 
-    @discardableResult
-    private func withLock<T>(_ body: () -> T) -> T {
-        lock.lock()
-        defer { lock.unlock() }
-        return body()
-    }
 }

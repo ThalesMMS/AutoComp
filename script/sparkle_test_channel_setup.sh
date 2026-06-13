@@ -130,14 +130,31 @@ python3 "$SCRIPT_DIR/release_appcast.py" \
 if [[ "$CHANNEL" != "stable" ]]; then
     /usr/bin/python3 - "$APPCAST_XML" "$CHANNEL" <<'PY'
 import pathlib
-import re
 import sys
+import xml.etree.ElementTree as ET
 
+SPARKLE_NS = "http://www.andymatuschak.org/xml-namespaces/sparkle"
+ET.register_namespace("sparkle", SPARKLE_NS)
 path = pathlib.Path(sys.argv[1])
 channel = sys.argv[2]
-text = path.read_text(encoding="utf-8")
-text = re.sub(r"(<enclosure\b)", rf'\1 sparkle:channel="{channel}"', text, count=1)
-path.write_text(text, encoding="utf-8")
+tree = ET.parse(path)
+root = tree.getroot()
+item = root.find("./channel/item")
+if item is None:
+    raise SystemExit("appcast does not contain an item")
+
+channel_tag = f"{{{SPARKLE_NS}}}channel"
+channel_element = item.find(channel_tag)
+if channel_element is None:
+    channel_element = ET.Element(channel_tag)
+    item_children = list(item)
+    enclosure_index = next(
+        (index for index, child in enumerate(item_children) if child.tag == "enclosure"),
+        len(item_children),
+    )
+    item.insert(enclosure_index, channel_element)
+channel_element.text = channel
+tree.write(path, encoding="utf-8", xml_declaration=True)
 PY
 fi
 

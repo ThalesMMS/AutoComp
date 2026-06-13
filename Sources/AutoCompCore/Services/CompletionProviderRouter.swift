@@ -99,42 +99,6 @@ public struct CompletionProviderRouter: MultiplePersonalizationContextAwareCompl
         }
     }
 
-    public func complete(context: TextContext) async throws -> Suggestion {
-        try await complete(
-            context: context,
-            privacySettings: PrivacySettings(),
-            visualContext: nil
-        )
-    }
-
-    public func complete(
-        context: TextContext,
-        privacySettings: PrivacySettings,
-        visualContext: VisualContextSnapshot?
-    ) async throws -> Suggestion {
-        try await complete(
-            context: context,
-            privacySettings: privacySettings,
-            visualContext: visualContext,
-            clipboardContext: nil
-        )
-    }
-
-    public func complete(
-        context: TextContext,
-        privacySettings: PrivacySettings,
-        visualContext: VisualContextSnapshot?,
-        clipboardContext: ClipboardContextSnapshot?
-    ) async throws -> Suggestion {
-        try await complete(
-            context: context,
-            privacySettings: privacySettings,
-            visualContext: visualContext,
-            clipboardContext: clipboardContext,
-            personalizationSamples: []
-        )
-    }
-
     public func complete(
         context: TextContext,
         privacySettings: PrivacySettings,
@@ -174,13 +138,14 @@ public struct CompletionProviderRouter: MultiplePersonalizationContextAwareCompl
             )
             return routed(suggestion, deliveredBy: activeKind)
         } catch {
+            let primaryError = error
             guard let fallbackProvider = fallbackProvider() else {
-                throw error
+                throw primaryError
             }
 
             // When local loading fails, capture context for user-facing diagnostics.
             if activeKind == .localLlama {
-                await LocalModelFailureDiagnosticsSink.shared.record(error: error)
+                await LocalModelFailureDiagnosticsSink.shared.record(error: primaryError)
             }
 
             // Remote fallback is explicitly opt-in and only attempted after a local failure.
@@ -188,7 +153,7 @@ public struct CompletionProviderRouter: MultiplePersonalizationContextAwareCompl
             do {
                 try requireRemoteConsent(for: fallbackKind, scope: .remoteFallback)
             } catch {
-                throw error
+                throw primaryError
             }
 
             let suggestion = try await complete(
@@ -199,25 +164,8 @@ public struct CompletionProviderRouter: MultiplePersonalizationContextAwareCompl
                 clipboardContext: clipboardContext,
                 personalizationSamples: personalizationSamples
             )
-            return routed(suggestion, deliveredBy: fallbackKind ?? activeKind, primaryError: error)
+            return routed(suggestion, deliveredBy: fallbackKind ?? activeKind, primaryError: primaryError)
         }
-    }
-
-    public func complete(
-        context: TextContext,
-        privacySettings: PrivacySettings,
-        visualContext: VisualContextSnapshot?,
-        clipboardContext: ClipboardContextSnapshot?,
-        options: CompletionOptions
-    ) async throws -> [Suggestion] {
-        try await complete(
-            context: context,
-            privacySettings: privacySettings,
-            visualContext: visualContext,
-            clipboardContext: clipboardContext,
-            personalizationSamples: [],
-            options: options
-        )
     }
 
     public func complete(
@@ -262,13 +210,14 @@ public struct CompletionProviderRouter: MultiplePersonalizationContextAwareCompl
             )
             return routed(suggestions, deliveredBy: activeKind)
         } catch {
+            let primaryError = error
             guard let fallbackProvider = fallbackProvider() else {
-                throw error
+                throw primaryError
             }
 
             // When local loading fails, capture context for user-facing diagnostics.
             if activeKind == .localLlama {
-                await LocalModelFailureDiagnosticsSink.shared.record(error: error)
+                await LocalModelFailureDiagnosticsSink.shared.record(error: primaryError)
             }
 
             // Remote fallback is explicitly opt-in and only attempted after a local failure.
@@ -276,7 +225,7 @@ public struct CompletionProviderRouter: MultiplePersonalizationContextAwareCompl
             do {
                 try requireRemoteConsent(for: fallbackKind, scope: .remoteFallback)
             } catch {
-                throw error
+                throw primaryError
             }
 
             let suggestions = try await completeMultiple(
@@ -288,7 +237,7 @@ public struct CompletionProviderRouter: MultiplePersonalizationContextAwareCompl
                 personalizationSamples: personalizationSamples,
                 options: options
             )
-            return routed(suggestions, deliveredBy: fallbackKind ?? activeKind, primaryError: error)
+            return routed(suggestions, deliveredBy: fallbackKind ?? activeKind, primaryError: primaryError)
         }
     }
 

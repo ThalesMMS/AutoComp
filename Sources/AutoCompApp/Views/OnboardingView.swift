@@ -141,8 +141,9 @@ struct OnboardingView: View {
             }
 
             if !settings.remoteConsentRequirements.isEmpty {
-                RemoteConsentCard(
+                RemoteConsentSectionView(
                     settings: settings,
+                    style: .onboardingCard,
                     hasConsent: { scope in
                         controller.hasRemoteCompletionConsent(
                             for: scope,
@@ -532,58 +533,6 @@ private struct GuidedSetupPrimaryActionButton: View {
         case .none:
             break
         }
-    }
-}
-
-private struct RemoteConsentCard: View {
-    let settings: CompletionBackendSettings
-    let hasConsent: (RemoteCompletionConsentScope) -> Bool
-    let grantConsent: (RemoteCompletionConsentScope) -> Void
-    let resetConsent: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Image(systemName: "network.badge.shield.half.filled")
-                    .foregroundStyle(.orange)
-                    .frame(width: 18)
-                Text("Remote completion consent")
-                    .font(.headline)
-                Spacer()
-            }
-
-            LabeledContent("Remote endpoint", value: settings.remoteBaseURL)
-            LabeledContent("Endpoint type", value: settings.remoteConsentEndpointKindTitle)
-            Text("Before remote completion runs, choose whether text from the active field may be sent to this endpoint.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-
-            ForEach(settings.remoteConsentRequirements) { requirement in
-                let isAllowed = hasConsent(requirement.scope)
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack {
-                        Text(requirement.title)
-                            .font(.caption.weight(.medium))
-                        Spacer()
-                        Text(isAllowed ? "Allowed" : "Needs consent")
-                            .font(.caption.weight(.medium))
-                            .foregroundStyle(isAllowed ? .green : .orange)
-                    }
-                    Text(requirement.detail)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    if !isAllowed {
-                        Button(requirement.buttonTitle) {
-                            grantConsent(requirement.scope)
-                        }
-                    }
-                }
-            }
-
-            Button("Reset Remote Completion Consent", role: .destructive, action: resetConsent)
-        }
-        .padding(16)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
     }
 }
 

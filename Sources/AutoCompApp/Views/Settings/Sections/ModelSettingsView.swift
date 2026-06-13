@@ -214,38 +214,27 @@ struct ModelSettingsView: View {
 
     @ViewBuilder
     private var remoteConsentSection: some View {
-        Section("Remote completion consent") {
-            let requirements = draft.remoteConsentRequirements
-            SectionFooterNote(text: "Consent is saved per endpoint before autocomplete text can leave this Mac.")
-            LabeledContent("Remote endpoint", value: draft.remoteBaseURL)
-            LabeledContent("Endpoint type", value: draft.remoteConsentEndpointKindTitle)
-
-            ForEach(requirements) { requirement in
-                let hasConsent = controller.hasRemoteCompletionConsent(
-                    for: requirement.scope,
+        RemoteConsentSectionView(
+            settings: draft,
+            style: .settingsSection,
+            hasConsent: { scope in
+                controller.hasRemoteCompletionConsent(
+                    for: scope,
                     settings: draft
                 )
-                SettingsInfoCard(
-                    title: requirement.title,
-                    subtitle: requirement.detail,
-                    state: hasConsent ? .ok : .warning,
-                    statusTitle: hasConsent ? "Allowed" : "Needs consent",
-                    systemImage: "lock.shield"
-                ) {
-                    if hasConsent {
-                        SectionFooterNote(text: "Consent is saved for this endpoint.")
-                    } else {
-                        Button(requirement.buttonTitle) {
-                            controller.grantRemoteCompletionConsent(
-                                for: requirement.scope,
-                                settings: draft
-                            )
-                            remoteConsentRevision += 1
-                        }
-                    }
-                }
+            },
+            grantConsent: { scope in
+                controller.grantRemoteCompletionConsent(
+                    for: scope,
+                    settings: draft
+                )
+                remoteConsentRevision += 1
+            },
+            resetConsent: {
+                isConfirmingRemoteConsentReset = true
             }
-        }
+        )
+        .id(remoteConsentRevision)
     }
 
     @ViewBuilder
@@ -499,18 +488,13 @@ struct ModelSettingsView: View {
             SectionFooterNote(text: "Operational actions for provider recovery and debug handoff.")
             DangerZoneView(
                 title: "Provider recovery",
-                message: "Use these only when a provider is stuck or consent must be re-granted."
+                message: "Use this only when the local provider is stuck."
             ) {
-                HStack {
-                    Button("Unload Local Runtime") {
-                        controller.unloadLocalLlamaRuntime()
-                        advancedMessage = "Local runtime unload requested."
-                    }
-                    .disabled(controller.completionBackendSettings.engineKind != .localLlama)
-                    Button("Reset Remote Completion Consent", role: .destructive) {
-                        isConfirmingRemoteConsentReset = true
-                    }
+                Button("Unload Local Runtime") {
+                    controller.unloadLocalLlamaRuntime()
+                    advancedMessage = "Local runtime unload requested."
                 }
+                .disabled(controller.completionBackendSettings.engineKind != .localLlama)
             }
             HStack {
                 Button("Export Debug Logs...") {
@@ -661,28 +645,13 @@ struct ModelSettingsView: View {
     }
 
     private func exportDebugLogs() {
-        controller.withInteractionPipelineSuspended(reason: .settingsExport) {
-            let panel = NSOpenPanel()
-            panel.canChooseFiles = false
-            panel.canChooseDirectories = true
-            panel.canCreateDirectories = true
-            panel.allowsMultipleSelection = false
-            panel.prompt = "Export"
-            panel.message = "Choose where to save the local debug log export."
-
-            let response = controller.withInteractionPipelineSuspended(reason: .openPanel) {
-                panel.runModal()
-            }
-            guard response == .OK, let directory = panel.url else {
-                return
-            }
-
-            do {
-                let exportURL = try controller.exportDebugLogs(to: directory)
-                advancedMessage = "Debug logs exported to \(exportURL.path)."
-            } catch {
-                advancedMessage = "Unable to export debug logs: \(error.localizedDescription)"
-            }
+        switch controller.exportDebugLogsWithDirectoryPicker() {
+        case .cancelled:
+            return
+        case .exported(let exportURL):
+            advancedMessage = "Debug logs exported to \(exportURL.path)."
+        case .failed(let error):
+            advancedMessage = "Unable to export debug logs: \(error.localizedDescription)"
         }
     }
 

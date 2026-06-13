@@ -55,7 +55,7 @@ final class SuggestionPublicationController {
     ) -> SuggestionPublicationResult {
         let normalizationStartedAt = ContinuousClock.now
         let normalizedSuggestion = self.normalizedSuggestion(suggestion, for: context)
-        let normalizationMs = normalizationStartedAt.duration(to: .now).appMilliseconds
+        let normalizationMs = normalizationStartedAt.duration(to: .now).milliseconds
         guard !normalizedSuggestion.visibleText.isEmpty else {
             presenter.hide()
             return SuggestionPublicationResult(
@@ -77,7 +77,7 @@ final class SuggestionPublicationController {
 
         let overlayStartedAt = ContinuousClock.now
         presenter.show(normalizedSuggestion, for: context, mode: displayMode)
-        let overlayMs = overlayStartedAt.duration(to: .now).appMilliseconds
+        let overlayMs = overlayStartedAt.duration(to: .now).milliseconds
         var statusParts = ["Suggesting in \(context.app.displayName)"]
         if normalizedSuggestion.hasMultipleAlternatives {
             statusParts.append("alternative \(normalizedSuggestion.selectedAlternativeIndex + 1) of \(normalizedSuggestion.alternatives.count)")
@@ -110,12 +110,12 @@ final class SuggestionPublicationController {
         }
 
         var normalized = suggestion
-        normalized.visibleText = droppingLeadingWhitespace(from: normalized.visibleText)
-        normalized.remainingText = droppingLeadingWhitespace(from: normalized.remainingText)
+        normalized.visibleText = droppingLeadingWhitespaceAndNewlines(from: normalized.visibleText)
+        normalized.remainingText = droppingLeadingWhitespaceAndNewlines(from: normalized.remainingText)
         return normalized
     }
 
-    private func droppingLeadingWhitespace(from text: String) -> String {
+    private func droppingLeadingWhitespaceAndNewlines(from text: String) -> String {
         let firstNonWhitespace = text.unicodeScalars.firstIndex {
             !CharacterSet.whitespacesAndNewlines.contains($0)
         }

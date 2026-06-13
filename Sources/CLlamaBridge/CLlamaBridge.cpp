@@ -1,6 +1,7 @@
 #include "CLlamaBridge.h"
 
 #include <llama.h>
+#include <limits.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -354,7 +355,7 @@ static char *autocomp_llama_detokenize_to_string(
         tokens,
         n_tokens,
         text,
-        text_capacity,
+        text_capacity - 1,
         false,
         false,
         &detokenized,
@@ -378,7 +379,7 @@ static char *autocomp_llama_detokenize_to_string(
             tokens,
             n_tokens,
             text,
-            text_capacity,
+            text_capacity - 1,
             false,
             false,
             &detokenized,
@@ -427,6 +428,130 @@ static int32_t autocomp_llama_find_stop_sequence_offset(
     }
 
     return earliest_offset;
+}
+
+static int32_t autocomp_llama_max_stop_sequence_length(
+    const char * const *stop_sequences,
+    int32_t stop_sequence_count
+) {
+    if (stop_sequences == NULL || stop_sequence_count <= 0) {
+        return 0;
+    }
+
+    int32_t max_length = 0;
+    for (int32_t i = 0; i < stop_sequence_count; i++) {
+        const char *stop_sequence = stop_sequences[i];
+        if (stop_sequence == NULL || stop_sequence[0] == '\0') {
+            continue;
+        }
+
+        size_t length = strlen(stop_sequence);
+        if (length > (size_t)INT32_MAX) {
+            return INT32_MAX;
+        }
+        if ((int32_t)length > max_length) {
+            max_length = (int32_t)length;
+        }
+    }
+
+    return max_length;
+}
+
+static int32_t autocomp_llama_find_stop_sequence_offset_in_tail(
+    const char *text,
+    int32_t previous_text_length,
+    int32_t max_stop_sequence_length,
+    const char * const *stop_sequences,
+    int32_t stop_sequence_count
+) {
+    if (
+        text == NULL ||
+        stop_sequences == NULL ||
+        stop_sequence_count <= 0 ||
+        max_stop_sequence_length <= 0
+    ) {
+        return -1;
+    }
+
+    int32_t search_start = previous_text_length;
+    if (max_stop_sequence_length > 1) {
+        int32_t overlap_length = max_stop_sequence_length - 1;
+        search_start = previous_text_length > overlap_length
+            ? previous_text_length - overlap_length
+            : 0;
+    }
+
+    int32_t earliest_offset = -1;
+    const char *search_text = text + search_start;
+    for (int32_t i = 0; i < stop_sequence_count; i++) {
+        const char *stop_sequence = stop_sequences[i];
+        if (stop_sequence == NULL || stop_sequence[0] == '\0') {
+            continue;
+        }
+
+        const char *match = strstr(search_text, stop_sequence);
+        if (match == NULL) {
+            continue;
+        }
+
+        int32_t offset = search_start + (int32_t)(match - search_text);
+        if (earliest_offset < 0 || offset < earliest_offset) {
+            earliest_offset = offset;
+        }
+    }
+
+    return earliest_offset;
+}
+
+static bool autocomp_llama_append_token_text(
+    const struct llama_vocab *vocab,
+    llama_token token,
+    char **text,
+    int32_t *text_length,
+    int32_t *text_capacity,
+    AutoCompLlamaError *error
+) {
+    char *piece = autocomp_llama_detokenize_to_string(vocab, &token, 1, error);
+    if (piece == NULL) {
+        return false;
+    }
+
+    size_t piece_length_size = strlen(piece);
+    if (
+        piece_length_size > (size_t)INT32_MAX ||
+        (int32_t)piece_length_size > INT32_MAX - *text_length - 1
+    ) {
+        free(piece);
+        autocomp_llama_set_error(error, 24, "Generated text is too large.");
+        return false;
+    }
+
+    int32_t piece_length = (int32_t)piece_length_size;
+    int32_t required_capacity = *text_length + piece_length + 1;
+    if (required_capacity > *text_capacity) {
+        int32_t new_capacity = *text_capacity > 0 ? *text_capacity : 1;
+        while (new_capacity < required_capacity) {
+            if (new_capacity > INT32_MAX / 2) {
+                new_capacity = required_capacity;
+                break;
+            }
+            new_capacity *= 2;
+        }
+
+        char *larger_text = (char *)realloc(*text, (size_t)new_capacity);
+        if (larger_text == NULL) {
+            free(piece);
+            autocomp_llama_set_error(error, 25, "Could not grow generated text buffer.");
+            return false;
+        }
+        *text = larger_text;
+        *text_capacity = new_capacity;
+    }
+
+    memcpy(*text + *text_length, piece, (size_t)piece_length + 1);
+    *text_length += piece_length;
+    free(piece);
+    return true;
 }
 
 AutoCompLlamaCacheDecision autocomp_llama_prompt_cache_decision(
@@ -766,10 +891,27 @@ char *autocomp_llama_model_generate(
         return NULL;
     }
 
+    int32_t incremental_text_capacity = 1;
+    int32_t incremental_text_length = 0;
+    int32_t max_stop_sequence_length = autocomp_llama_max_stop_sequence_length(
+        stop_sequences,
+        stop_sequence_count
+    );
+    char *incremental_text = (char *)malloc((size_t)incremental_text_capacity);
+    if (incremental_text == NULL) {
+        free(generated_tokens);
+        llama_sampler_free(sampler);
+        autocomp_llama_clear_cache(model, true);
+        autocomp_llama_set_error(error, 27, "Could not allocate generated text.");
+        return NULL;
+    }
+    incremental_text[0] = '\0';
+
     int32_t generated_count = 0;
     for (int32_t i = 0; i < max_tokens; i++) {
         llama_token token = 0;
         if (!autocomp_llama_sample(sampler, ctx, &token, error)) {
+            free(incremental_text);
             free(generated_tokens);
             llama_sampler_free(sampler);
             autocomp_llama_clear_cache(model, true);
@@ -779,23 +921,33 @@ char *autocomp_llama_model_generate(
             break;
         }
 
-        llama_sampler_accept(sampler, token);
+        // llama_sampler_sample already accepts the sampled token per llama.h.
+        // Calling llama_sampler_accept here would double-advance stateful samplers.
         generated_tokens[generated_count] = token;
         generated_count += 1;
 
-        char *partial_text = autocomp_llama_detokenize_to_string(vocab, generated_tokens, generated_count, error);
-        if (partial_text == NULL) {
+        int32_t previous_incremental_text_length = incremental_text_length;
+        if (!autocomp_llama_append_token_text(
+            vocab,
+            token,
+            &incremental_text,
+            &incremental_text_length,
+            &incremental_text_capacity,
+            error
+        )) {
+            free(incremental_text);
             free(generated_tokens);
             llama_sampler_free(sampler);
             autocomp_llama_clear_cache(model, true);
             return NULL;
         }
-        int32_t stop_offset = autocomp_llama_find_stop_sequence_offset(
-            partial_text,
+        int32_t stop_offset = autocomp_llama_find_stop_sequence_offset_in_tail(
+            incremental_text,
+            previous_incremental_text_length,
+            max_stop_sequence_length,
             stop_sequences,
             stop_sequence_count
         );
-        free(partial_text);
         if (stop_offset >= 0) {
             break;
         }
@@ -806,12 +958,14 @@ char *autocomp_llama_model_generate(
 
         struct llama_batch next_batch = llama_batch_get_one(&token, 1);
         if (!autocomp_llama_decode(ctx, next_batch, &decode_result, error, 17)) {
+            free(incremental_text);
             free(generated_tokens);
             llama_sampler_free(sampler);
             autocomp_llama_clear_cache(model, true);
             return NULL;
         }
         if (decode_result != 0) {
+            free(incremental_text);
             free(generated_tokens);
             llama_sampler_free(sampler);
             autocomp_llama_clear_cache(model, true);
@@ -821,6 +975,7 @@ char *autocomp_llama_model_generate(
     }
 
     if (generated_count == 0) {
+        free(incremental_text);
         free(generated_tokens);
         llama_sampler_free(sampler);
         autocomp_llama_clear_cache(model, true);
@@ -830,11 +985,13 @@ char *autocomp_llama_model_generate(
 
     char *text = autocomp_llama_detokenize_to_string(vocab, generated_tokens, generated_count, error);
     if (text == NULL) {
+        free(incremental_text);
         free(generated_tokens);
         llama_sampler_free(sampler);
         autocomp_llama_clear_cache(model, true);
         return NULL;
     }
+    free(incremental_text);
     free(generated_tokens);
     llama_sampler_free(sampler);
 

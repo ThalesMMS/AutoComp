@@ -59,9 +59,9 @@ final class SettingsMicrocopyDensityTests: XCTestCase {
         .joined(separator: "\n")
 
         for requiredText in [
-            "summary: \"Suggestions cannot attach yet.\"",
-            "summary: \"Shortcut acceptance cannot run yet.\"",
-            "summary: \"Visual context is off.\"",
+            "Suggestions cannot attach yet.",
+            "Shortcut acceptance cannot run yet.",
+            "Visual context is off.",
             "summary: \"Completions may fail until it responds.\"",
             "summary = \"Automatic suggestions are on here.\"",
             "Technical cause:"
@@ -70,15 +70,4 @@ final class SettingsMicrocopyDensityTests: XCTestCase {
         }
     }
 
-    private func packageRoot() throws -> URL {
-        var url = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-        while url.path != "/" {
-            if FileManager.default.fileExists(atPath: url.appendingPathComponent("Package.swift").path) {
-                return url
-            }
-            url.deleteLastPathComponent()
-        }
-
-        throw XCTSkip("Unable to locate package root")
-    }
 }

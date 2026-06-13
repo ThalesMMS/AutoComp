@@ -334,19 +334,6 @@ final class LocalLlamaCompletionProviderTests: XCTestCase {
         XCTAssertEqual(modelChanged, .modelChanged)
     }
 
-    private func makeContext(
-        focusedElementID: String = "field",
-        textBeforeCursor: String = "Can you ",
-        textAfterCursor: String? = nil
-    ) -> TextContext {
-        TextContext(
-            app: AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1),
-            focusedElementID: focusedElementID,
-            textBeforeCursor: textBeforeCursor,
-            textAfterCursor: textAfterCursor
-        )
-    }
-
     private func makeTemporaryModelFile() throws -> URL {
         let url = temporaryDirectory().appendingPathComponent("\(UUID().uuidString).gguf")
         try Data("fake model".utf8).write(to: url)

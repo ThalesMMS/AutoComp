@@ -13,6 +13,7 @@ final class InputSuppressionController {
     private var lastConsumedShortcutEventTimestamp: CGEventTimestamp?
     private var suppressedKeyReleases: [UInt16: Date] = [:]
     private var syntheticInputBudget = SyntheticInputBudget()
+    private var consumedSyntheticInputEvents: [SyntheticInputEventIdentity: Date] = [:]
 
     init(
         shortcutGraceInterval: TimeInterval = 0.9,
@@ -67,6 +68,7 @@ final class InputSuppressionController {
         lastConsumedShortcutEventTimestamp = nil
         suppressedKeyReleases = [:]
         syntheticInputBudget = SyntheticInputBudget()
+        consumedSyntheticInputEvents = [:]
         lock.unlock()
     }
 
@@ -132,8 +134,20 @@ final class InputSuppressionController {
             return false
         }
 
+        let identity = SyntheticInputEventIdentity(type: type, event: event)
+
         lock.lock()
         let currentDate = now()
+        pruneExpiredConsumedSyntheticInputEvents(now: currentDate)
+        if let identity,
+           let suppressUntil = consumedSyntheticInputEvents[identity],
+           currentDate <= suppressUntil {
+            lock.unlock()
+            let keyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
+            GeometryDebug.log("suppressed-synthetic-input duplicate type=\(type.debugName) keyCode=\(keyCode)")
+            return true
+        }
+
         guard currentDate <= syntheticInputBudget.expiresAt else {
             syntheticInputBudget = SyntheticInputBudget()
             lock.unlock()
@@ -154,6 +168,9 @@ final class InputSuppressionController {
 
         let remainingKeyDown = syntheticInputBudget.expectedKeyDownCount
         let remainingKeyUp = syntheticInputBudget.expectedKeyUpCount
+        if consumed, let identity {
+            consumedSyntheticInputEvents[identity] = currentDate.addingTimeInterval(syntheticInputSuppressionInterval)
+        }
         if remainingKeyDown == 0 && remainingKeyUp == 0 {
             syntheticInputBudget = SyntheticInputBudget()
         }
@@ -171,12 +188,35 @@ final class InputSuppressionController {
     private func pruneExpiredSuppressedKeyReleases(now: Date) {
         suppressedKeyReleases = suppressedKeyReleases.filter { $0.value >= now }
     }
+
+    private func pruneExpiredConsumedSyntheticInputEvents(now: Date) {
+        consumedSyntheticInputEvents = consumedSyntheticInputEvents.filter { $0.value >= now }
+    }
 }
 
 private struct SyntheticInputBudget {
     var expectedKeyDownCount = 0
     var expectedKeyUpCount = 0
     var expiresAt: Date = .distantPast
+}
+
+private struct SyntheticInputEventIdentity: Hashable {
+    let typeRawValue: UInt32
+    let timestamp: CGEventTimestamp
+    let keyCode: Int64
+    let flagsRawValue: UInt64
+
+    init?(type: CGEventType, event: CGEvent) {
+        let timestamp = event.timestamp
+        guard timestamp > 0 else {
+            return nil
+        }
+
+        self.typeRawValue = type.rawValue
+        self.timestamp = timestamp
+        self.keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+        self.flagsRawValue = event.flags.rawValue
+    }
 }
 
 private extension CGEventType {

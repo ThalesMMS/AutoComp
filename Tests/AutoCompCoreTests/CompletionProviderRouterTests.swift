@@ -145,7 +145,8 @@ final class CompletionProviderRouterTests: XCTestCase {
         XCTAssertEqual(callCount, 0)
     }
 
-    func testRemoteFallbackRequiresSeparateConsentBeforeCallingProvider() async {
+    func testRemoteFallbackMissingConsentSurfacesOriginalLocalErrorBeforeCallingProvider() async {
+        _ = await LocalModelFailureDiagnosticsSink.shared.consumeSnapshot()
         let remoteProvider = CountingCompletionProvider(text: "remote fallback")
         let router = CompletionProviderRouter(
             activeKind: .localLlama,
@@ -159,13 +160,42 @@ final class CompletionProviderRouterTests: XCTestCase {
 
         do {
             _ = try await router.complete(context: makeContext())
-            XCTFail("Expected remote fallback consent error")
-        } catch let error as CompletionProviderRouterError {
-            XCTAssertEqual(error, .remoteConsentRequired(.remoteFallback))
-            XCTAssertEqual(
-                error.errorDescription,
-                "Remote fallback requires explicit consent before autocomplete text is sent."
+            XCTFail("Expected original local provider error")
+        } catch let error as LocalLlamaError {
+            XCTAssertEqual(error, .modelNotFound("/tmp/missing.gguf"))
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        let remoteCallCount = await remoteProvider.callCount()
+        XCTAssertEqual(remoteCallCount, 0)
+        let snapshot = await LocalModelFailureDiagnosticsSink.shared.consumeSnapshot()
+        XCTAssertEqual(snapshot?.errorDescription, "Local model was not found at /tmp/missing.gguf.")
+    }
+
+    func testRemoteFallbackMissingConsentSurfacesOriginalLocalErrorForMultipleSuggestions() async {
+        let remoteProvider = CountingCompletionProvider(text: "remote fallback")
+        let router = CompletionProviderRouter(
+            activeKind: .localLlama,
+            fallbackKind: .remote,
+            providers: [
+                .localLlama: ThrowingCompletionProvider(error: LocalLlamaError.allocationFailed("limit exceeded")),
+                .remote: remoteProvider
+            ],
+            remoteConsentChecker: FixedRemoteConsentChecker(allowedScopes: [.remoteBackend])
+        )
+
+        do {
+            _ = try await router.complete(
+                context: makeContext(),
+                privacySettings: PrivacySettings(),
+                visualContext: nil,
+                clipboardContext: nil,
+                options: CompletionOptions(suggestionCount: 3)
             )
+            XCTFail("Expected original local provider error")
+        } catch let error as LocalLlamaError {
+            XCTAssertEqual(error, .allocationFailed("limit exceeded"))
         } catch {
             XCTFail("Unexpected error: \(error)")
         }
@@ -242,13 +272,6 @@ final class CompletionProviderRouterTests: XCTestCase {
         XCTAssertTrue(recordedSamples.isEmpty)
     }
 
-    private func makeContext() -> TextContext {
-        TextContext(
-            app: AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1),
-            focusedElementID: "field",
-            textBeforeCursor: "Can you "
-        )
-    }
 }
 
 private actor StaticCompletionProvider: CompletionProvider {
@@ -334,10 +357,6 @@ private actor RecordingVisualCompletionProvider: VisualContextAwareCompletionPro
         storedVisualContext
     }
 
-    func complete(context: TextContext) async throws -> Suggestion {
-        try await complete(context: context, privacySettings: PrivacySettings(), visualContext: nil)
-    }
-
     func complete(
         context: TextContext,
         privacySettings: PrivacySettings,
@@ -358,38 +377,6 @@ private actor RecordingPersonalizationCompletionProvider: PersonalizationContext
 
     func recordedPersonalizationSamples() -> [PersonalizationSample] {
         storedPersonalizationSamples
-    }
-
-    func complete(context: TextContext) async throws -> Suggestion {
-        try await complete(context: context, privacySettings: PrivacySettings(), visualContext: nil)
-    }
-
-    func complete(
-        context: TextContext,
-        privacySettings: PrivacySettings,
-        visualContext: VisualContextSnapshot?
-    ) async throws -> Suggestion {
-        try await complete(
-            context: context,
-            privacySettings: privacySettings,
-            visualContext: visualContext,
-            clipboardContext: nil
-        )
-    }
-
-    func complete(
-        context: TextContext,
-        privacySettings: PrivacySettings,
-        visualContext: VisualContextSnapshot?,
-        clipboardContext: ClipboardContextSnapshot?
-    ) async throws -> Suggestion {
-        try await complete(
-            context: context,
-            privacySettings: privacySettings,
-            visualContext: visualContext,
-            clipboardContext: clipboardContext,
-            personalizationSamples: []
-        )
     }
 
     func complete(

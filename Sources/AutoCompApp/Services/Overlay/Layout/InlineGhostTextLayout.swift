@@ -85,7 +85,8 @@ internal struct InlineGhostTextLayout: Equatable {
             desiredOrigin = CGPoint(x: x, y: anchorFrame.minY - panelHeight - 2)
             reason = .wrappedLine
         case .leftToRight:
-            desiredOrigin = CGPoint(x: anchorFrame.minX, y: anchorFrame.minY)
+            let y = lines.count > 1 ? anchorFrame.maxY - panelHeight : anchorFrame.minY
+            desiredOrigin = CGPoint(x: anchorFrame.minX, y: y)
             reason = lines.count > 1 ? .wrappedLine : .sameLine
         case .rightToLeft:
             desiredOrigin = CGPoint(x: anchorFrame.maxX - measuredWidth, y: anchorFrame.minY)

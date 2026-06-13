@@ -110,7 +110,7 @@ public final class PersonalizationSampleRecorder: @unchecked Sendable {
     public func promptSamples(
         for context: TextContext,
         privacySettings: PrivacySettings,
-        limit: Int = PersonalizationSampleRecorder.defaultPromptSampleLimit
+        limit: Int? = nil
     ) -> [PersonalizationSample] {
         guard privacySettings.localPersonalizationEnabled,
               privacySettings.collectionDecision(
@@ -120,11 +120,16 @@ public final class PersonalizationSampleRecorder: @unchecked Sendable {
             return []
         }
 
+        let resolvedLimit = limit ?? privacySettings.personalizationPromptSampleLimit
+        guard resolvedLimit > 0 else {
+            return []
+        }
+
         return (try? store.promptSamples(
             appBundleID: context.app.bundleID,
             domain: context.domain,
             languageHint: context.languageHint,
-            limit: limit
+            limit: resolvedLimit
         )) ?? []
     }
 

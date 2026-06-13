@@ -113,7 +113,7 @@ public enum SuggestionRefreshDecisionEngine {
     }
 
     private static func isWebWhitespaceNormalizationDrift(context: TextContext, previousContext: TextContext) -> Bool {
-        guard isWebLikeApp(context.app.bundleID),
+        guard WebHostApps.isWebLike(context.app.bundleID),
               InteractionTargetMatcher.matches(context, as: previousContext),
               textEndsWithSuggestionTriggerWhitespace(previousContext.textBeforeCursor),
               droppingTrailingWhitespace(from: previousContext.textBeforeCursor) == context.textBeforeCursor else {
@@ -145,43 +145,10 @@ public enum SuggestionRefreshDecisionEngine {
         return String(scalars)
     }
 
-    private static func isWebLikeApp(_ bundleID: String) -> Bool {
-        [
-            "com.openai.codex",
-            "com.apple.Safari",
-            "com.google.Chrome",
-            "com.brave.Browser",
-            "com.microsoft.edgemac",
-            "company.thebrowser.Browser",
-            "company.thebrowser.dia",
-            "com.todesktop.230313mzl4w4u92"
-        ].contains(bundleID)
-    }
 }
 
 private extension TextContext {
     func replacingTextBeforeCursor(_ textBeforeCursor: String) -> TextContext {
-        TextContext(
-            id: id,
-            app: app,
-            domain: domain,
-            focusedElementID: focusedElementID,
-            stableFieldIdentity: stableFieldIdentity,
-            textBeforeCursor: textBeforeCursor,
-            textAfterCursor: textAfterCursor,
-            selectedText: selectedText,
-            fullTextWindow: fullTextWindow,
-            selectedRange: selectedRange,
-            caretRect: caretRect,
-            focusedElementRect: focusedElementRect,
-            previousGlyphRect: previousGlyphRect,
-            nextGlyphRect: nextGlyphRect,
-            lineReferenceRect: lineReferenceRect,
-            caretGeometryQuality: caretGeometryQuality,
-            observedCharacterWidth: observedCharacterWidth,
-            languageHint: languageHint,
-            captureSources: captureSources,
-            createdAt: createdAt
-        )
+        self.copy(textBeforeCursor: textBeforeCursor)
     }
 }

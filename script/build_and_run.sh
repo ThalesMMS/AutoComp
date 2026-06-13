@@ -21,6 +21,8 @@ APP_ICON_NAME="AutoComp.icns"
 SPARKLE_FEED_URL="${AUTOCOMP_SPARKLE_FEED_URL:-}"
 SPARKLE_PUBLIC_KEY="${AUTOCOMP_SPARKLE_PUBLIC_KEY:-}"
 SPARKLE_FRAMEWORK_PATH="${AUTOCOMP_SPARKLE_FRAMEWORK_PATH:-}"
+ENV_RESOURCE_NAME="autocomp.env"
+EMBED_ENV_LOCAL="${AUTOCOMP_EMBED_ENV_LOCAL:-1}"
 
 if [[ -z "$SIGNING_IDENTITY" ]]; then
   SIGNING_IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null | awk -F '"' '/Apple Development/ { print $2; exit }')"
@@ -87,6 +89,17 @@ copy_sparkle_framework() {
   /usr/bin/ditto "$framework_path" "$APP_FRAMEWORKS/Sparkle.framework"
 }
 
+should_embed_env_local() {
+  case "$EMBED_ENV_LOCAL" in
+    0|false|FALSE|no|NO)
+      return 1
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+}
+
 if [[ -n "$SPARKLE_FEED_URL" || -n "$SPARKLE_PUBLIC_KEY" || -n "$SPARKLE_FRAMEWORK_PATH" ]]; then
   if [[ -z "$SPARKLE_FEED_URL" || -z "$SPARKLE_PUBLIC_KEY" ]]; then
     echo "Set both AUTOCOMP_SPARKLE_FEED_URL and AUTOCOMP_SPARKLE_PUBLIC_KEY for local update testing." >&2
@@ -102,7 +115,14 @@ fi
 stage_app_icon
 
 if [[ -f "$ROOT_DIR/.env.local" ]]; then
-  cp "$ROOT_DIR/.env.local" "$APP_RESOURCES/autocomp.env"
+  if should_embed_env_local; then
+    echo "WARNING: embedding local environment file into $APP_RESOURCES/$ENV_RESOURCE_NAME" >&2
+    echo "WARNING: autocomp.env may contain local credentials; do not share this dev-staged app bundle." >&2
+    echo "Set AUTOCOMP_EMBED_ENV_LOCAL=0 to stage a shareable dev bundle without embedded local defaults." >&2
+    cp "$ROOT_DIR/.env.local" "$APP_RESOURCES/$ENV_RESOURCE_NAME"
+  else
+    echo "Skipping .env.local embedding because AUTOCOMP_EMBED_ENV_LOCAL=$EMBED_ENV_LOCAL." >&2
+  fi
 fi
 
 cat >"$INFO_PLIST" <<PLIST

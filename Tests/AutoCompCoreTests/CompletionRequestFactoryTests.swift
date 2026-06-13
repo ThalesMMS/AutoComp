@@ -423,22 +423,4 @@ final class CompletionRequestFactoryTests: XCTestCase {
         XCTAssertEqual(fim.stopSequences, ["<|fim_suffix|>"])
     }
 
-    private func makeContext(
-        textBeforeCursor: String,
-        textAfterCursor: String? = nil,
-        selectedText: String? = nil,
-        fullTextWindow: String? = nil,
-        captureSources: Set<TextCaptureSource> = [.accessibility]
-    ) -> TextContext {
-        TextContext(
-            app: AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1),
-            domain: "example.com",
-            focusedElementID: "field",
-            textBeforeCursor: textBeforeCursor,
-            textAfterCursor: textAfterCursor,
-            selectedText: selectedText,
-            fullTextWindow: fullTextWindow,
-            captureSources: captureSources
-        )
-    }
 }

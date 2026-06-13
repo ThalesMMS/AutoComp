@@ -4,6 +4,13 @@ import XCTest
 
 @MainActor
 final class PermissionRecoveryTests: XCTestCase {
+    func testRelaunchLaunchServicesConfigurationForcesNewApplicationInstance() throws {
+        let configuration = AppController.relaunchOpenConfiguration()
+
+        XCTAssertTrue(configuration.createsNewApplicationInstance)
+        XCTAssertFalse(configuration.allowsRunningApplicationSubstitution)
+    }
+
     func testGrantingInputMonitoringTwiceKeepsExistingKeyboardTapSet() {
         let installer = RecordingKeyboardShortcutTapInstaller()
         let service = KeyboardShortcutService(tapInstaller: installer)

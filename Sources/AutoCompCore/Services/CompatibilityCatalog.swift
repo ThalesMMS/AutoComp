@@ -57,13 +57,17 @@ public struct CompatibilityCatalog: Sendable {
     public func decision(
         bundleID: String,
         domain: String?,
-        userEnabledOverrides: [String: Bool] = [:],
         userModeOverrides: [String: CompatibilityOverrideMode] = [:]
     ) -> CompatibilityDecision {
         var profile = profile(for: bundleID)
         let hostCategory = RiskyHostAppPolicy.category(bundleID: bundleID, domain: domain)
 
-        if let domain, Self.unsupportedGoogleWorkspaceDomains.contains(where: domain.contains) {
+        if let domain,
+           GoogleDocsContext.matches(
+            bundleID: bundleID,
+            domain: domain,
+            allowedSurfaces: [.spreadsheet, .presentation]
+           ) {
             profile = AppCompatibilityProfile(
                 bundleID: bundleID,
                 displayName: profile.displayName,
@@ -73,7 +77,8 @@ public struct CompatibilityCatalog: Sendable {
                 notes: "Google Sheets and Slides are unsupported in the MVP.",
                 defaultActivationMode: .disabled
             )
-        } else if let domain, domain.contains("docs.google.com") {
+        } else if let domain,
+                  GoogleDocsContext.matches(bundleID: bundleID, domain: domain) {
             profile = AppCompatibilityProfile(
                 bundleID: bundleID,
                 displayName: profile.displayName,
@@ -82,6 +87,8 @@ public struct CompatibilityCatalog: Sendable {
                 requiresSetup: true,
                 domains: [domain],
                 notes: "Enable screen reader support and braille support in Google Docs, and disable Smart Compose.",
+                // Keep activation inherited here; production domain rules require visual context
+                // before automatic Google Docs suggestions.
                 defaultActivationMode: profile.defaultActivationMode
             )
         } else if let domain, hostCategory == .chat {
@@ -97,26 +104,22 @@ public struct CompatibilityCatalog: Sendable {
         }
 
         let defaultOverrideMode = profile.defaultActivationMode
-        let legacyOverrideMode = userEnabledOverrides[profile.bundleID].map { $0 ? CompatibilityOverrideMode.automatic : .disabled }
         let domainOverrideMode = domain.flatMap { Self.modeOverride(forDomain: $0, in: userModeOverrides) }
         let appOverrideMode = userModeOverrides[profile.bundleID]
         let explicitOverrideMode = domainOverrideMode ?? appOverrideMode
         let ruleSource: CompatibilityDecision.RuleSource
         if domainOverrideMode != nil {
             ruleSource = .domainRule
-        } else if appOverrideMode != nil || legacyOverrideMode != nil {
+        } else if appOverrideMode != nil {
             ruleSource = .appRule
         } else {
             ruleSource = .default
         }
-        var overrideMode = explicitOverrideMode ?? legacyOverrideMode ?? defaultOverrideMode
+        let overrideMode = explicitOverrideMode ?? defaultOverrideMode
         var riskWarning: String?
         if hostCategory == .terminal {
             if explicitOverrideMode == .automatic {
                 riskWarning = "Warning: automatic terminal suggestions can execute commands. Prefer Manual only unless this override is intentional."
-            } else if legacyOverrideMode == .automatic {
-                overrideMode = .manualOnly
-                riskWarning = "Terminal enablement defaults to Manual only unless Automatic is selected explicitly."
             }
         }
         let enabled = profile.status != .unsupported && overrideMode != .disabled
@@ -162,11 +165,6 @@ public struct CompatibilityCatalog: Sendable {
 }
 
 public extension CompatibilityCatalog {
-    static let unsupportedGoogleWorkspaceDomains = [
-        "docs.google.com/spreadsheets",
-        "docs.google.com/presentation"
-    ]
-
     static let defaultProfiles: [AppCompatibilityProfile] = [
         AppCompatibilityProfile(bundleID: "com.apple.TextEdit", displayName: "TextEdit", status: .works, defaultMode: .inline),
         AppCompatibilityProfile(bundleID: "com.apple.Notes", displayName: "Notes", status: .works, defaultMode: .inline),

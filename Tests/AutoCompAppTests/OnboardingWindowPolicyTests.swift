@@ -62,6 +62,8 @@ final class OnboardingWindowPolicyTests: XCTestCase {
         XCTAssertTrue(source.contains("window.contentMaxSize = maxSize"))
         XCTAssertTrue(source.contains("func closeOnboardingWindow()"))
         XCTAssertTrue(source.contains("existingWindow.isVisible"))
+        XCTAssertTrue(source.contains("existingWindow.isMiniaturized"))
+        XCTAssertTrue(source.contains("existingWindow.deminiaturize(nil)"))
         XCTAssertTrue(source.contains("onboardingWindow = nil"))
     }
 
@@ -81,15 +83,4 @@ final class OnboardingWindowPolicyTests: XCTestCase {
         )
     }
 
-    private func packageRoot() throws -> URL {
-        var url = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-        while url.path != "/" {
-            if FileManager.default.fileExists(atPath: url.appendingPathComponent("Package.swift").path) {
-                return url
-            }
-            url.deleteLastPathComponent()
-        }
-
-        throw XCTSkip("Unable to locate package root")
-    }
 }

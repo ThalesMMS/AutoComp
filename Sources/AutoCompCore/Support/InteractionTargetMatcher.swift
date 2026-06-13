@@ -93,8 +93,7 @@ public enum InteractionTargetMatcher {
         _ lhs: CGRect?,
         _ rhs: CGRect?
     ) -> Bool {
-        guard app.bundleID == "com.google.Chrome",
-              domain?.contains("docs.google.com") == true,
+        guard GoogleDocsContext.matches(bundleID: app.bundleID, domain: domain, appGate: .chrome),
               let lhs,
               let rhs else {
             return false

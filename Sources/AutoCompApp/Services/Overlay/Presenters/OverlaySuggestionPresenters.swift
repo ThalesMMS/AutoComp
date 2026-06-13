@@ -197,15 +197,20 @@ final class VisualInlineOverlayPresenter: VisualInlineSuggestionPresenting {
     private var styleResolver = OverlayTextStyleResolver()
     private let maxWidth: CGFloat = 520
     private let shortcutHintResolver: OverlayShortcutHintResolver
+    private let screenContextProvider: @MainActor (TextContext) -> OverlayPresenterGeometry.ScreenContext?
 
     init(
         shortcutSettingsStore: KeyboardShortcutSettingsStore,
-        hintsProvider: OverlayShortcutHintsProvider
+        hintsProvider: OverlayShortcutHintsProvider,
+        screenContextProvider: @escaping @MainActor (TextContext) -> OverlayPresenterGeometry.ScreenContext? = {
+            OverlayPresenterGeometry.screenContext(for: $0)
+        }
     ) {
         self.shortcutHintResolver = OverlayShortcutHintResolver(
             shortcutSettingsStore: shortcutSettingsStore,
             hintsProvider: hintsProvider
         )
+        self.screenContextProvider = screenContextProvider
         self.panelHost = OverlayPanelHost(
             contentRect: NSRect(x: 0, y: 0, width: 120, height: 18)
         ) { panel in
@@ -293,11 +298,13 @@ final class VisualInlineOverlayPresenter: VisualInlineSuggestionPresenting {
             && context.nextGlyphRect == nil
             && context.lineReferenceRect == nil
             && context.focusedElementRect != nil
+        let screenContext = screenContextProvider(context)
         if !usesFocusedElementFallback {
+            let trustGeometry = Self.trustGeometry(for: context, screenContext: screenContext)
             let trustDecision = CaretGeometryTrustEvaluator.default.evaluate(
-                caretRect: context.caretRect,
-                focusedElementRect: context.focusedElementRect,
-                screenBounds: NSScreen.main?.frame,
+                caretRect: trustGeometry.caretRect,
+                focusedElementRect: trustGeometry.focusedElementRect,
+                screenBounds: trustGeometry.screenBounds,
                 quality: context.caretGeometryQuality
             )
             switch trustDecision {
@@ -310,7 +317,7 @@ final class VisualInlineOverlayPresenter: VisualInlineSuggestionPresenting {
             }
         }
 
-        guard let screenContext = OverlayPresenterGeometry.screenContext(for: context) else {
+        guard let screenContext else {
             return InlinePreviewResolution(rejectionReason: "missing-inline-anchor")
         }
 
@@ -345,6 +352,38 @@ final class VisualInlineOverlayPresenter: VisualInlineSuggestionPresenting {
             inputFrame: layout.inputFrame,
             ghostTextLayout: ghostLayout
         ).resolution
+    }
+
+    private static func trustGeometry(
+        for context: TextContext,
+        screenContext: OverlayPresenterGeometry.ScreenContext?
+    ) -> (caretRect: CGRect?, focusedElementRect: CGRect?, screenBounds: CGRect?) {
+        guard let screenContext else {
+            return (context.caretRect, context.focusedElementRect, nil)
+        }
+
+        let caretRect = context.caretRect.map {
+            OverlayGeometry.appKitRect(accessibilityRect: $0, screenFrame: screenContext.mainScreenFrame)
+        }
+        let focusedElementRect = context.focusedElementRect.map {
+            OverlayGeometry.appKitRect(accessibilityRect: $0, screenFrame: screenContext.mainScreenFrame)
+        }
+        let trustScreenBounds: CGRect?
+        if let caretRect {
+            trustScreenBounds = screenBounds(containing: caretRect, screenContext: screenContext)
+        } else {
+            trustScreenBounds = nil
+        }
+        return (caretRect, focusedElementRect, trustScreenBounds)
+    }
+
+    private static func screenBounds(
+        containing caretRect: CGRect,
+        screenContext: OverlayPresenterGeometry.ScreenContext
+    ) -> CGRect {
+        screenContext.screenFrames.first { screenFrame in
+            screenFrame.intersects(caretRect)
+        } ?? screenContext.screenFrames.first ?? screenContext.visibleFrame
     }
 
     private func preferredSize(for text: String, context: TextContext, resolvedFont: NSFont) -> NSSize {

@@ -113,7 +113,7 @@ final class StartupPrivacyRegressionTests: XCTestCase {
         XCTAssertEqual(recordedClipboardContexts, [clipboardSnapshot])
     }
 
-    func testControllerStartupKeepsRemoteProbeAndTelemetryCaptureOutOfStart() throws {
+    func testControllerDoesNotBuildOrCaptureTelemetryWhilePolicyDisablesTelemetry() throws {
         let source = try String(
             contentsOf: try packageRoot().appendingPathComponent("Sources/AutoCompApp/App/AppController.swift"),
             encoding: .utf8
@@ -132,9 +132,11 @@ final class StartupPrivacyRegressionTests: XCTestCase {
         XCTAssertFalse(startBody.contains("testRemoteConnection"))
         XCTAssertFalse(startBody.contains("telemetryClient.capture"))
         XCTAssertEqual(source.occurrenceCount(of: "RemoteBackendProbe().testConnection"), 1)
-        XCTAssertEqual(source.occurrenceCount(of: "telemetryClient.capture"), 1)
+        XCTAssertFalse(source.contains("TelemetryEventInput"))
+        XCTAssertFalse(source.contains("recordRemoteProbeTelemetry"))
+        XCTAssertFalse(source.contains("telemetryClient.capture"))
+        XCTAssertFalse(source.contains("telemetryClient.setEnabled"))
         XCTAssertTrue(source.contains("func testRemoteConnection(settings: CompletionBackendSettings) async -> RemoteBackendProbeResult"))
-        XCTAssertTrue(source.contains("private func recordRemoteProbeTelemetry"))
         XCTAssertTrue(environmentSource.contains("let telemetryClient = DisabledTelemetryClient()"))
         XCTAssertFalse(environmentSource.contains("RedactingTelemetryClient"))
     }
@@ -179,17 +181,6 @@ final class StartupPrivacyRegressionTests: XCTestCase {
         return remaining[..<endRange.lowerBound]
     }
 
-    private func packageRoot() throws -> URL {
-        var url = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-        while url.path != "/" {
-            if FileManager.default.fileExists(atPath: url.appendingPathComponent("Package.swift").path) {
-                return url
-            }
-            url.deleteLastPathComponent()
-        }
-
-        throw XCTSkip("Unable to locate package root")
-    }
 }
 
 private final class RecordingClipboardContextProvider: ClipboardContextProvider, @unchecked Sendable {

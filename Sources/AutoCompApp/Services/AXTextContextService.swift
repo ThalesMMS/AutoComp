@@ -28,27 +28,3 @@ enum AXTextContextError: LocalizedError {
         }
     }
 }
-
-final class AXTextContextService: TextContextProvider, @unchecked Sendable {
-    private let focusTrackingModel: FocusTrackingModel
-
-    init(
-        axHelper: AXHelper = AXHelper(),
-        browserResolver: BrowserContextResolver = BrowserContextResolver(),
-        screenOCRGeometryFallbackResolver: ScreenOCRGeometryFallbackResolver = ScreenOCRGeometryFallbackResolver()
-    ) {
-        self.focusTrackingModel = FocusTrackingModel(
-            axHelper: axHelper,
-            focusSnapshotResolver: FocusSnapshotResolver(
-                axHelper: axHelper,
-                browserResolver: browserResolver
-            ),
-            textGeometryResolver: AXTextGeometryResolver(axHelper: axHelper),
-            screenOCRGeometryFallbackResolver: screenOCRGeometryFallbackResolver
-        )
-    }
-
-    func currentContext() async throws -> TextContext {
-        try await focusTrackingModel.currentContext()
-    }
-}

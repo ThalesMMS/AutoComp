@@ -4,12 +4,13 @@ import SwiftUI
 
 struct HealthDashboardView: View {
     @EnvironmentObject private var controller: AppController
+    @EnvironmentObject private var healthSnapshotService: HealthSnapshotService
 
     @State private var expandedCheckIDs: Set<String> = []
     @State private var instructionsToShow: HealthRemediationAction?
 
     private var snapshot: HealthSnapshot {
-        controller.healthSnapshotService.snapshot
+        healthSnapshotService.snapshot
     }
 
     private var groupedChecks: [(status: HealthStatus, checks: [HealthCheck])] {
@@ -80,7 +81,7 @@ struct HealthDashboardView: View {
             Spacer()
 
             Button("Refresh") {
-                controller.healthSnapshotService.refresh()
+                healthSnapshotService.refresh()
             }
             .keyboardShortcut("r")
         }
@@ -295,17 +296,17 @@ struct HealthDashboardView: View {
 
     private func performRetry(payload: String?) {
         guard let payload else {
-            controller.healthSnapshotService.refresh()
+            healthSnapshotService.refresh()
             return
         }
 
         switch payload {
         case "backend.test-connection":
             controller.selectedSettingsSection = .model
-            controller.healthSnapshotService.refresh()
+            healthSnapshotService.refresh()
 
         default:
-            controller.healthSnapshotService.refresh()
+            healthSnapshotService.refresh()
         }
     }
 }

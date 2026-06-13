@@ -626,7 +626,7 @@ final class AcceptanceSessionController {
     }
 
     private func isSameGoogleDocsTextTarget(context: TextContext, state: AcceptanceState) -> Bool {
-        guard isGoogleDocsChromeContext(app: state.session.target.app, domain: state.session.target.domain),
+        guard isGoogleDocsWebLikeContext(app: state.session.target.app, domain: state.session.target.domain),
               context.app == state.session.target.app,
               context.domain == state.session.target.domain,
               isSelectionCompatible(context.selectedText, state.session.target.selectedText) else {
@@ -641,7 +641,7 @@ final class AcceptanceSessionController {
         context: TextContext,
         state: CompletedAcceptAllState
     ) -> Bool {
-        guard isGoogleDocsChromeContext(app: state.app, domain: state.domain),
+        guard isGoogleDocsWebLikeContext(app: state.app, domain: state.domain),
               context.app == state.app,
               context.domain == state.domain else {
             return false
@@ -651,9 +651,8 @@ final class AcceptanceSessionController {
             || isCompletedAcceptAllPotentialDelayedEcho(context.textBeforeCursor, state: state)
     }
 
-    private func isGoogleDocsChromeContext(app: AppIdentity, domain: String?) -> Bool {
-        app.bundleID == "com.google.Chrome"
-            && domain?.contains("docs.google.com") == true
+    private func isGoogleDocsWebLikeContext(app: AppIdentity, domain: String?) -> Bool {
+        GoogleDocsContext.matches(bundleID: app.bundleID, domain: domain, appGate: .webLike)
     }
 
     private func isSelectionCompatible(_ lhs: String?, _ rhs: String?) -> Bool {
@@ -713,27 +712,6 @@ private enum LeakedShortcutAction {
 
 extension TextContext {
     func replacingTextBeforeCursor(_ textBeforeCursor: String) -> TextContext {
-        TextContext(
-            id: id,
-            app: app,
-            domain: domain,
-            focusedElementID: focusedElementID,
-            stableFieldIdentity: stableFieldIdentity,
-            textBeforeCursor: textBeforeCursor,
-            textAfterCursor: textAfterCursor,
-            selectedText: selectedText,
-            fullTextWindow: fullTextWindow,
-            selectedRange: selectedRange,
-            caretRect: caretRect,
-            focusedElementRect: focusedElementRect,
-            previousGlyphRect: previousGlyphRect,
-            nextGlyphRect: nextGlyphRect,
-            lineReferenceRect: lineReferenceRect,
-            caretGeometryQuality: caretGeometryQuality,
-            observedCharacterWidth: observedCharacterWidth,
-            languageHint: languageHint,
-            captureSources: captureSources,
-            createdAt: createdAt
-        )
+        self.copy(textBeforeCursor: textBeforeCursor)
     }
 }

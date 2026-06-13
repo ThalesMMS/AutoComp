@@ -152,6 +152,37 @@ final class PrivacySettingsTests: XCTestCase {
         XCTAssertEqual(loaded.perDomainRules["docs.google.com"], false)
     }
 
+    func testPersonalizationStrengthControlsPromptSampleLimit() {
+        XCTAssertEqual(
+            PrivacySettings(localPersonalizationEnabled: false, personalizationStrength: 1).personalizationPromptSampleLimit,
+            0
+        )
+        XCTAssertEqual(
+            PrivacySettings(localPersonalizationEnabled: true, personalizationStrength: -0.2).personalizationPromptSampleLimit,
+            0
+        )
+        XCTAssertEqual(
+            PrivacySettings(localPersonalizationEnabled: true, personalizationStrength: 0).personalizationPromptSampleLimit,
+            0
+        )
+        XCTAssertEqual(
+            PrivacySettings(localPersonalizationEnabled: true, personalizationStrength: 0.01).personalizationPromptSampleLimit,
+            1
+        )
+        XCTAssertEqual(
+            PrivacySettings(localPersonalizationEnabled: true, personalizationStrength: 0.35).personalizationPromptSampleLimit,
+            2
+        )
+        XCTAssertEqual(
+            PrivacySettings(localPersonalizationEnabled: true, personalizationStrength: 1).personalizationPromptSampleLimit,
+            PersonalizationSampleRecorder.defaultPromptSampleLimit
+        )
+        XCTAssertEqual(
+            PrivacySettings(localPersonalizationEnabled: true, personalizationStrength: 1.4).personalizationPromptSampleLimit,
+            PersonalizationSampleRecorder.defaultPromptSampleLimit
+        )
+    }
+
     func testDecodingLegacySettingsDefaultsWritingPreferences() throws {
         let data = Data("""
         {

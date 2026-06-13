@@ -173,7 +173,10 @@ public struct PromptBuilder: Sendable {
         )
         let allowedClipboardContext = truncatedClipboardContext(privacyAllowedClipboardContext)
         let writingPreferences = writingPreferencesBlock(privacySettings.writingPreferences)
-        let personalizationSamples = personalizationSamplesBlock(personalizationSamples)
+        let personalizationSamples = personalizationSamplesBlock(
+            personalizationSamples,
+            privacySettings: privacySettings
+        )
         let sourceDescription = allowedContextSources
             .union(allowedVisualContext?.captureSources ?? [])
             .union(allowedClipboardContext?.captureSources ?? [])
@@ -278,9 +281,20 @@ public struct PromptBuilder: Sendable {
         """
     }
 
-    private func personalizationSamplesBlock(_ samples: [PersonalizationSample]) -> String {
+    private func personalizationSamplesBlock(
+        _ samples: [PersonalizationSample],
+        privacySettings: PrivacySettings
+    ) -> String {
+        let sampleCount = min(
+            max(0, budgets.personalizationSampleCount),
+            privacySettings.personalizationPromptSampleLimit
+        )
+        guard sampleCount > 0 else {
+            return ""
+        }
+
         let excerpts = samples
-            .prefix(max(0, budgets.personalizationSampleCount))
+            .prefix(sampleCount)
             .map { sample in
                 String(sample.excerpt.prefix(nonNegativeLimit(budgets.personalizationSampleCharacters)))
                     .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)

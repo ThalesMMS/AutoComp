@@ -153,6 +153,8 @@ final class KeyboardShortcutService: @unchecked Sendable {
     private let tapInstaller: KeyboardShortcutTapInstalling
     private var shortcutSettings: KeyboardShortcutSettings
     private var passthroughReplay: (keyCode: UInt16, expiresAt: Date)?
+    private var forwardedInputEventIdentities: Set<ForwardedInputEventIdentity> = []
+    private var forwardedInputEventIdentityOrder: [ForwardedInputEventIdentity] = []
     private var isInteractionPipelineSuspended = false
     private var isEmojiPickerActive = false
     private let shortcutOwnershipEvaluator = ShortcutOwnershipEvaluator()
@@ -224,6 +226,7 @@ final class KeyboardShortcutService: @unchecked Sendable {
             if !eventTaps.isEmpty {
                 removeEventTaps()
                 passthroughReplay = nil
+                resetForwardedInputEventDeduplication()
                 inputSuppressionController.reset()
             }
             NSLog("AutoComp cannot monitor keyboard shortcuts until Input Monitoring permission is enabled.")
@@ -292,6 +295,7 @@ final class KeyboardShortcutService: @unchecked Sendable {
         onEmojiCommand = nil
         shortcutOwnershipDecision = { _ in .consume(reason: "default") }
         passthroughReplay = nil
+        resetForwardedInputEventDeduplication()
         isInteractionPipelineSuspended = false
         isEmojiPickerActive = false
         inputSuppressionController.reset()
@@ -341,6 +345,7 @@ final class KeyboardShortcutService: @unchecked Sendable {
         isInteractionPipelineSuspended = suspended
         if suspended {
             passthroughReplay = nil
+            resetForwardedInputEventDeduplication()
             inputSuppressionController.reset()
         }
         GeometryDebug.log("shortcut-pipeline-suspension suspended=\(suspended) reason=\(reason)")
@@ -487,7 +492,7 @@ final class KeyboardShortcutService: @unchecked Sendable {
             return nil
         }
         if matchedCommand == nil, let inputEvent {
-            dispatchInputEventIfNeeded(inputEvent, inputMethodState: inputMethodState)
+            dispatchInputEventIfNeeded(inputEvent, inputMethodState: inputMethodState, type: type, event: event)
         }
         if isShortcutKey {
             let modifiersOK = hasNoTabModifiers(event)
@@ -526,7 +531,12 @@ final class KeyboardShortcutService: @unchecked Sendable {
 
         guard let matchedCommand else {
             if let inputEvent {
-                dispatchInputEventIfNeeded(inputEvent, inputMethodState: inputMethodStateProvider())
+                dispatchInputEventIfNeeded(
+                    inputEvent,
+                    inputMethodState: inputMethodStateProvider(),
+                    type: .flagsChanged,
+                    event: event
+                )
             }
             return Unmanaged.passUnretained(event)
         }
@@ -657,9 +667,16 @@ final class KeyboardShortcutService: @unchecked Sendable {
 
     private func dispatchInputEventIfNeeded(
         _ inputEvent: CapturedInputEvent,
-        inputMethodState: InputMethodState
+        inputMethodState: InputMethodState,
+        type: CGEventType,
+        event: CGEvent
     ) {
         guard shouldForwardInputEvent(inputEvent, inputMethodState: inputMethodState) else {
+            return
+        }
+
+        guard shouldForwardUniqueInputEvent(type: type, event: event) else {
+            GeometryDebug.log("input-event-duplicate-suppressed eventKind=\(inputEvent.eventKind.rawValue) kind=\(inputEvent.debugName)")
             return
         }
 
@@ -690,8 +707,40 @@ final class KeyboardShortcutService: @unchecked Sendable {
             return false
         }
 
-        dispatchInputEventIfNeeded(inputEvent, inputMethodState: inputMethodStateProvider())
+        dispatchInputEventIfNeeded(inputEvent, inputMethodState: inputMethodStateProvider(), type: type, event: event)
         return true
+    }
+
+    private func shouldForwardUniqueInputEvent(type: CGEventType, event: CGEvent) -> Bool {
+        guard let identity = ForwardedInputEventIdentity(type: type, event: event) else {
+            return true
+        }
+
+        if forwardedInputEventIdentities.contains(identity) {
+            return false
+        }
+
+        forwardedInputEventIdentities.insert(identity)
+        forwardedInputEventIdentityOrder.append(identity)
+        pruneForwardedInputEventIdentities()
+        return true
+    }
+
+    private func pruneForwardedInputEventIdentities() {
+        let identityLimit = 32
+        guard forwardedInputEventIdentityOrder.count > identityLimit else {
+            return
+        }
+
+        while forwardedInputEventIdentityOrder.count > identityLimit {
+            let oldest = forwardedInputEventIdentityOrder.removeFirst()
+            forwardedInputEventIdentities.remove(oldest)
+        }
+    }
+
+    private func resetForwardedInputEventDeduplication() {
+        forwardedInputEventIdentities = []
+        forwardedInputEventIdentityOrder = []
     }
 
     private func shouldPassPassthroughReplay(type: CGEventType, event: CGEvent) -> Bool {
@@ -715,6 +764,36 @@ final class KeyboardShortcutService: @unchecked Sendable {
         }
         GeometryDebug.log("shortcut-passthrough-replay-pass type=\(type.rawValue) keyCode=\(keyCode)")
         return true
+    }
+}
+
+private struct ForwardedInputEventIdentity: Hashable {
+    let typeRawValue: UInt32
+    let timestamp: CGEventTimestamp
+    let keyCode: Int64
+    let flagsRawValue: UInt64
+    let mouseButtonNumber: Int64
+
+    init?(type: CGEventType, event: CGEvent) {
+        let timestamp = event.timestamp
+        guard timestamp > 0 else {
+            return nil
+        }
+
+        self.typeRawValue = type.rawValue
+        self.timestamp = timestamp
+        self.flagsRawValue = event.flags.rawValue
+        switch type {
+        case .keyDown, .keyUp, .flagsChanged:
+            self.keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+            self.mouseButtonNumber = -1
+        case .leftMouseDown, .rightMouseDown, .otherMouseDown:
+            self.keyCode = -1
+            self.mouseButtonNumber = event.getIntegerValueField(.mouseEventButtonNumber)
+        default:
+            self.keyCode = -1
+            self.mouseButtonNumber = -1
+        }
     }
 }
 

@@ -4,17 +4,22 @@ import XCTest
 
 final class BrowserContextResolverTests: XCTestCase {
     func testKnownBrowserDomainNormalizesWorkspacePathsWithoutFullURL() {
-        let resolver = BrowserContextResolver { script in
-            XCTAssertTrue(script.contains("Google Chrome"))
-            return .success("https://docs.google.com/spreadsheets/d/private-sheet?gid=0")
+        for (url, expectedDomain) in [
+            ("https://docs.google.com/spreadsheets/d/private-sheet?gid=0", "docs.google.com/spreadsheets"),
+            ("https://docs.google.com/presentation/d/private-deck#slide=id.p", "docs.google.com/presentation")
+        ] {
+            let resolver = BrowserContextResolver { script in
+                XCTAssertTrue(script.contains("Google Chrome"))
+                return .success(url)
+            }
+
+            let resolution = resolver.activeDomainResolution(for: "com.google.Chrome")
+
+            XCTAssertEqual(resolution.status, .known)
+            XCTAssertEqual(resolution.domain, expectedDomain)
+            XCTAssertEqual(resolution.diagnosticValue, expectedDomain)
+            XCTAssertFalse(resolution.diagnosticValue.contains("private"), url)
         }
-
-        let resolution = resolver.activeDomainResolution(for: "com.google.Chrome")
-
-        XCTAssertEqual(resolution.status, .known)
-        XCTAssertEqual(resolution.domain, "docs.google.com/spreadsheets")
-        XCTAssertEqual(resolution.diagnosticValue, "docs.google.com/spreadsheets")
-        XCTAssertFalse(resolution.diagnosticValue.contains("private-sheet"))
     }
 
     func testAppleEventsDeniedReportsStructuredStateAndLeavesAutocompleteAppEligible() {

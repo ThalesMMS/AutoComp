@@ -76,7 +76,8 @@ final class ActivationIndicatorController: ActivationIndicatorPresenting {
         mode: ActivationIndicatorMode,
         displayMode: SuggestionDisplayMode,
         context: TextContext,
-        size: CGSize? = nil
+        size: CGSize? = nil,
+        mainScreenFrame: CGRect? = nil
     ) -> ActivationIndicatorPlacement? {
         let resolvedSize = size ?? Self.size(for: mode)
         guard mode != .hidden,
@@ -89,39 +90,43 @@ final class ActivationIndicatorController: ActivationIndicatorPresenting {
         case .hidden:
             return nil
         case .caretAnchor:
-            guard let anchor = caretAnchor(for: context) else {
+            guard let accessibilityAnchor = caretAnchor(for: context) else {
                 return nil
             }
+            let appKitAnchor = appKitAnchor(from: accessibilityAnchor, mainScreenFrame: mainScreenFrame)
             return ActivationIndicatorPlacement(
-                frame: caretFrame(anchor: anchor, size: resolvedSize),
+                frame: caretFrame(appKitAnchor: appKitAnchor, size: resolvedSize),
                 mode: mode,
                 geometryQuality: context.caretGeometryQuality,
                 stableFieldIdentity: context.stableFieldIdentity
             )
         case .fieldEdge:
-            guard let anchor = context.focusedElementRect ?? context.caretRect else {
+            guard let accessibilityAnchor = context.focusedElementRect ?? context.caretRect else {
                 return nil
             }
+            let appKitAnchor = appKitAnchor(from: accessibilityAnchor, mainScreenFrame: mainScreenFrame)
             return ActivationIndicatorPlacement(
-                frame: fieldEdgeFrame(anchor: anchor, size: resolvedSize),
+                frame: fieldEdgeFrame(appKitAnchor: appKitAnchor, size: resolvedSize),
                 mode: mode,
                 geometryQuality: context.caretGeometryQuality,
                 stableFieldIdentity: context.stableFieldIdentity
             )
         case .debugGeometryQuality:
-            if let anchor = caretAnchor(for: context) {
+            if let accessibilityAnchor = caretAnchor(for: context) {
+                let appKitAnchor = appKitAnchor(from: accessibilityAnchor, mainScreenFrame: mainScreenFrame)
                 return ActivationIndicatorPlacement(
-                    frame: caretFrame(anchor: anchor, size: resolvedSize),
+                    frame: caretFrame(appKitAnchor: appKitAnchor, size: resolvedSize),
                     mode: mode,
                     geometryQuality: context.caretGeometryQuality,
                     stableFieldIdentity: context.stableFieldIdentity
                 )
             }
-            guard let anchor = context.focusedElementRect else {
+            guard let accessibilityAnchor = context.focusedElementRect else {
                 return nil
             }
+            let appKitAnchor = appKitAnchor(from: accessibilityAnchor, mainScreenFrame: mainScreenFrame)
             return ActivationIndicatorPlacement(
-                frame: fieldEdgeFrame(anchor: anchor, size: resolvedSize),
+                frame: fieldEdgeFrame(appKitAnchor: appKitAnchor, size: resolvedSize),
                 mode: mode,
                 geometryQuality: context.caretGeometryQuality,
                 stableFieldIdentity: context.stableFieldIdentity
@@ -179,7 +184,18 @@ final class ActivationIndicatorController: ActivationIndicatorPresenting {
             ?? context.lineReferenceRect
     }
 
-    private static func caretFrame(anchor: CGRect, size: CGSize) -> CGRect {
+    private static func appKitAnchor(from accessibilityAnchor: CGRect, mainScreenFrame: CGRect?) -> CGRect {
+        let conversionScreenFrame: CGRect
+        if let mainScreenFrame {
+            conversionScreenFrame = mainScreenFrame
+        } else {
+            let screen = OverlayGeometry.screen(containingAccessibilityRect: accessibilityAnchor)
+            conversionScreenFrame = NSScreen.screens.first?.frame ?? screen.frame
+        }
+        return OverlayGeometry.appKitRect(accessibilityRect: accessibilityAnchor, screenFrame: conversionScreenFrame)
+    }
+
+    private static func caretFrame(appKitAnchor anchor: CGRect, size: CGSize) -> CGRect {
         CGRect(
             x: anchor.maxX + 4,
             y: anchor.minY + max(0, (anchor.height - size.height) / 2),
@@ -188,7 +204,7 @@ final class ActivationIndicatorController: ActivationIndicatorPresenting {
         )
     }
 
-    private static func fieldEdgeFrame(anchor: CGRect, size: CGSize) -> CGRect {
+    private static func fieldEdgeFrame(appKitAnchor anchor: CGRect, size: CGSize) -> CGRect {
         CGRect(
             x: anchor.maxX - size.width - 6,
             y: anchor.minY + 6,

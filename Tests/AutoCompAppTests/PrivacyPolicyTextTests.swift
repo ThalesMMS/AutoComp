@@ -25,6 +25,8 @@ final class PrivacyPolicyTextTests: XCTestCase {
         XCTAssertTrue(settingsSource.contains("Clear language hints"))
         XCTAssertTrue(settingsSource.contains("WritingPreferences.suggestedLanguageHints"))
         XCTAssertTrue(settingsSource.contains("Preference prompt block"))
+        XCTAssertTrue(settingsSource.contains("Prompt examples"))
+        XCTAssertTrue(settingsSource.contains("personalizationPromptSampleLimit"))
     }
 
     func testPrivacyDocumentationCoversSourceLimitsAndDeletion() throws {
@@ -44,6 +46,7 @@ final class PrivacyPolicyTextTests: XCTestCase {
         XCTAssertTrue(document.contains("| Debug logs | Sensitive content off | Diagnostics | No |"))
         XCTAssertTrue(document.contains("| Productivity metrics | On | Local value feedback and redacted latency reports | No |"))
         XCTAssertTrue(document.contains("numeric counters and stage latency values only"))
+        XCTAssertTrue(document.contains("Personalization strength controls how many local writing examples can be included in a prompt."))
         XCTAssertTrue(document.contains("Domain privacy rules do not silently change the selected completion backend."))
         XCTAssertTrue(document.contains("domain as unknown"))
         XCTAssertTrue(document.contains("unavailable-appleevents-denied"))
@@ -51,15 +54,4 @@ final class PrivacyPolicyTextTests: XCTestCase {
         XCTAssertTrue(readme.contains("local productivity metrics"))
     }
 
-    private func packageRoot() throws -> URL {
-        var url = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-        while url.path != "/" {
-            if FileManager.default.fileExists(atPath: url.appendingPathComponent("Package.swift").path) {
-                return url
-            }
-            url.deleteLastPathComponent()
-        }
-
-        throw XCTSkip("Unable to locate package root")
-    }
 }

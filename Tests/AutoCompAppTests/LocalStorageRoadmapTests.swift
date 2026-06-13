@@ -30,15 +30,4 @@ final class LocalStorageRoadmapTests: XCTestCase {
         XCTAssertTrue(roadmap.contains("do not add Zstandard to Package.swift"))
     }
 
-    private func packageRoot() throws -> URL {
-        var url = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-        while url.path != "/" {
-            if FileManager.default.fileExists(atPath: url.appendingPathComponent("Package.swift").path) {
-                return url
-            }
-            url.deleteLastPathComponent()
-        }
-
-        throw XCTSkip("Unable to locate package root")
-    }
 }

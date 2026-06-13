@@ -43,7 +43,6 @@ final class AppController: ObservableObject {
     private let debugArtifactStore: DebugArtifactStore
     private let suggestionDebugLogger: SuggestionDebugLogger
     private let localPrivacyDataResetService: LocalPrivacyDataResetService
-    private let telemetryClient: any TelemetryClient
     private let activationPolicyController: AppActivationPolicyController
     private let settingsWindowResizeDelegate = MinimumContentSizeWindowDelegate(
         minContentSize: AppController.settingsWindowMinimumContentSize
@@ -55,6 +54,12 @@ final class AppController: ObservableObject {
     private var windowCloseObserver: NSObjectProtocol?
     private var pipelineSuspensionHandlerID: UUID?
     private var hasStarted = false
+
+    enum DebugLogExportResult {
+        case cancelled
+        case exported(URL)
+        case failed(Error)
+    }
 
     convenience init() {
         self.init(environment: AutoCompAppEnvironment())
@@ -96,7 +101,6 @@ final class AppController: ObservableObject {
             pasteboardRecoveryStore: environment.pasteboardRecoveryStore
         )
         self.installationLocationService = environment.installationLocationService
-        self.telemetryClient = environment.telemetryClient
         self.activationPolicyController = AppActivationPolicyController()
         self.usesInlinePreviewTestProvider = environment.usesInlinePreviewTestProvider
         self.completionBackendSettings = environment.initialCompletionBackendSettings
@@ -295,13 +299,23 @@ final class AppController: ObservableObject {
     }
 
     func relaunch() {
-        let configuration = NSWorkspace.OpenConfiguration()
+        let configuration = Self.relaunchOpenConfiguration()
         NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: configuration) { _, error in
-            guard error == nil else { return }
+            if let error {
+                NSLog("AutoComp relaunch failed: \(error.localizedDescription)")
+                return
+            }
             Task { @MainActor in
                 NSApp.terminate(nil)
             }
         }
+    }
+
+    static func relaunchOpenConfiguration() -> NSWorkspace.OpenConfiguration {
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.createsNewApplicationInstance = true
+        configuration.allowsRunningApplicationSubstitution = false
+        return configuration
     }
 
     func deletePersonalizationData() {
@@ -315,7 +329,6 @@ final class AppController: ObservableObject {
 
     func savePrivacySettings(_ settings: PrivacySettings) {
         try? privacySettingsStore.save(settings)
-        telemetryClient.setEnabled(false)
         productivityMetricsStore.reload()
     }
 
@@ -395,6 +408,31 @@ final class AppController: ObservableObject {
         )
     }
 
+    func exportDebugLogsWithDirectoryPicker() -> DebugLogExportResult {
+        withInteractionPipelineSuspended(reason: .settingsExport) {
+            let panel = NSOpenPanel()
+            panel.canChooseFiles = false
+            panel.canChooseDirectories = true
+            panel.canCreateDirectories = true
+            panel.allowsMultipleSelection = false
+            panel.prompt = "Export"
+            panel.message = "Choose where to save the local debug log export."
+
+            let response = withInteractionPipelineSuspended(reason: .openPanel) {
+                panel.runModal()
+            }
+            guard response == .OK, let directory = panel.url else {
+                return .cancelled
+            }
+
+            do {
+                return .exported(try exportDebugLogs(to: directory))
+            } catch {
+                return .failed(error)
+            }
+        }
+    }
+
     func redactedSettingsExportFilename(now: Date = Date()) -> String {
         RedactedSettingsTransfer.exportFilename(now: now)
     }
@@ -438,7 +476,6 @@ final class AppController: ObservableObject {
             to: privacySettingsStore.load()
         )
         try privacySettingsStore.save(updatedPrivacySettings)
-        telemetryClient.setEnabled(false)
         productivityMetricsStore.reload()
 
         saveKeyboardShortcutSettings(package.shortcuts)
@@ -506,34 +543,7 @@ final class AppController: ObservableObject {
     func testRemoteConnection(settings: CompletionBackendSettings) async -> RemoteBackendProbeResult {
         let result = await RemoteBackendProbe().testConnection(configuration: settings.remoteConfiguration)
         suggestionEngine.recordBackendProbeResult(result)
-        recordRemoteProbeTelemetry(result, settings: settings)
         return result
-    }
-
-    private func recordRemoteProbeTelemetry(
-        _ result: RemoteBackendProbeResult,
-        settings: CompletionBackendSettings
-    ) {
-        guard result.status == .failed else {
-            return
-        }
-
-        telemetryClient.capture(TelemetryEventInput(
-            name: "remote-backend-probe-failed",
-            appVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown",
-            buildNumber: Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown",
-            backendKind: settings.engineKind,
-            technicalError: TelemetryTechnicalError(
-                category: "remote-backend-probe",
-                code: result.issue?.logValue ?? "unknown"
-            ),
-            permissionStatuses: [
-                .accessibility: permissionService.accessibilityTrusted ? .granted : .denied,
-                .inputMonitoring: permissionService.inputMonitoringAllowed ? .granted : .denied,
-                .screenRecording: permissionService.screenRecordingAllowed ? .granted : .denied
-            ],
-            bundleID: permissionService.runtimeBundleID
-        ))
     }
 
     var isPlaygroundUITestMode: Bool {
@@ -573,7 +583,10 @@ final class AppController: ObservableObject {
 
     func showOnboardingWindow() {
         let window: NSWindow
-        if let existingWindow = onboardingWindow, existingWindow.isVisible {
+        if let existingWindow = onboardingWindow, existingWindow.isVisible || existingWindow.isMiniaturized {
+            if existingWindow.isMiniaturized {
+                existingWindow.deminiaturize(nil)
+            }
             window = existingWindow
         } else {
             window = makeWindow(

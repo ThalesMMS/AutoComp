@@ -15,8 +15,6 @@ final class CompatibilitySettingsStoreTests: XCTestCase {
 
         XCTAssertEqual(store.loadModeOverrides()["com.example.Writer"], .manualOnly)
         XCTAssertEqual(store.loadModeOverrides()["com.example.Chat"], .disabled)
-        XCTAssertEqual(store.loadOverrides()["com.example.Writer"], true)
-        XCTAssertEqual(store.loadOverrides()["com.example.Chat"], false)
     }
 
     func testRemovingOverrideRestoresDefaultLookup() {
@@ -83,6 +81,5 @@ final class CompatibilitySettingsStoreTests: XCTestCase {
         store.resetOverrides()
 
         XCTAssertTrue(store.loadModeOverrides().isEmpty)
-        XCTAssertTrue(store.loadOverrides().isEmpty)
     }
 }

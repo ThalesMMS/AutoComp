@@ -294,23 +294,6 @@ struct AutoCompAppEnvironment {
 private actor InlinePreviewTestCompletionProvider: ClipboardContextAwareCompletionProvider {
     private let requestFactory = CompletionRequestFactory()
 
-    func complete(context: TextContext) async throws -> Suggestion {
-        try await complete(context: context, privacySettings: PrivacySettings(), visualContext: nil)
-    }
-
-    func complete(
-        context: TextContext,
-        privacySettings: PrivacySettings,
-        visualContext: VisualContextSnapshot?
-    ) async throws -> Suggestion {
-        try await complete(
-            context: context,
-            privacySettings: privacySettings,
-            visualContext: visualContext,
-            clipboardContext: nil
-        )
-    }
-
     func complete(
         context: TextContext,
         privacySettings: PrivacySettings,

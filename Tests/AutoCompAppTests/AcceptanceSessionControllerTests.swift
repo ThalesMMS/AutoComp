@@ -521,6 +521,45 @@ final class AcceptanceSessionControllerTests: XCTestCase {
         )
     }
 
+    func testGoogleDocsSafariOCRLineMetricDriftStillAllowsAcceptanceValidation() {
+        let controller = AcceptanceSessionController()
+        let app = AppIdentity(bundleID: "com.apple.Safari", displayName: "Safari", processID: 1)
+        let publishedContext = textContext(
+            textBeforeCursor: "Please ",
+            app: app,
+            domain: "docs.google.com",
+            focusedElementID: "docs-ocr-line-a",
+            focusedElementRect: CGRect(x: 360, y: 430, width: 520, height: 34)
+        )
+        let suggestion = Suggestion(
+            baseContextID: publishedContext.id,
+            visibleText: "continue this",
+            latencyMs: 20
+        )
+        controller.recordPublication(
+            context: publishedContext,
+            suggestion: suggestion,
+            now: now
+        )
+
+        let driftedContext = textContext(
+            textBeforeCursor: "Please ",
+            app: app,
+            domain: "docs.google.com",
+            focusedElementID: "docs-ocr-line-b",
+            focusedElementRect: CGRect(x: 360, y: 476, width: 640, height: 38)
+        )
+
+        XCTAssertEqual(
+            controller.validateAcceptance(
+                context: driftedContext,
+                currentSuggestion: suggestion,
+                now: now.addingTimeInterval(0.5)
+            ),
+            .valid
+        )
+    }
+
     func testGoogleDocsDirectToOCRIdentityDriftStillAllowsAcceptanceValidation() {
         let controller = AcceptanceSessionController()
         let app = AppIdentity(bundleID: "com.google.Chrome", displayName: "Chrome", processID: 1)

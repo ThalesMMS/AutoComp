@@ -25,6 +25,11 @@ struct SystemSettingsWindowLocator: SystemSettingsWindowLocating {
         }
         return rawWindows
     }
+    var mainScreenFrame: () -> CGRect = {
+        NSScreen.screens.first?.frame
+            ?? NSScreen.main?.frame
+            ?? CGRect(x: 0, y: 0, width: 1440, height: 900)
+    }
 
     func locateSystemSettingsWindow() -> SystemSettingsWindow? {
         let settingsPIDs = Set(runningApplications().compactMap { app -> pid_t? in
@@ -41,8 +46,12 @@ struct SystemSettingsWindowLocator: SystemSettingsWindowLocating {
                   let layer = (window[kCGWindowLayer as String] as? NSNumber)?.intValue,
                   layer == 0,
                   let bounds = window[kCGWindowBounds as String] as? [String: Any],
-                  let frame = CGRect(dictionaryRepresentation: bounds as CFDictionary),
-                  frame.width > 200,
+                  let cgFrame = CGRect(dictionaryRepresentation: bounds as CFDictionary) else {
+                continue
+            }
+
+            let frame = Self.appKitFrame(cgWindowBounds: cgFrame, mainScreenFrame: mainScreenFrame())
+            guard frame.width > 200,
                   frame.height > 160 else {
                 continue
             }
@@ -55,6 +64,15 @@ struct SystemSettingsWindowLocator: SystemSettingsWindowLocating {
         }
 
         return nil
+    }
+
+    static func appKitFrame(cgWindowBounds bounds: CGRect, mainScreenFrame: CGRect) -> CGRect {
+        CGRect(
+            x: bounds.minX,
+            y: mainScreenFrame.maxY - bounds.maxY,
+            width: bounds.width,
+            height: bounds.height
+        )
     }
 
     private func isSystemSettings(_ app: NSRunningApplication) -> Bool {

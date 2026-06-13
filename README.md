@@ -38,6 +38,14 @@ The app defaults to the remote OpenAI-compatible backend configured in Settings 
 
 Current development defaults point at `http://100.98.1.45:8000` with `default`.
 
+When `.env.local` exists, `./script/build_and_run.sh` embeds it into the staged development app as `Contents/Resources/autocomp.env` and prints a warning. Do not share a dev-staged `dist/AutoComp.app` that contains that file. To stage a shareable development bundle without embedded local defaults, run:
+
+```sh
+AUTOCOMP_EMBED_ENV_LOCAL=0 ./script/build_and_run.sh --verify
+```
+
+Release packaging refuses bundles that contain `Contents/Resources/autocomp.env`; use `script/release_build.sh` for distribution artifacts.
+
 Backend modes:
 
 - Remote OpenAI-compatible sends autocomplete text to the configured endpoint.

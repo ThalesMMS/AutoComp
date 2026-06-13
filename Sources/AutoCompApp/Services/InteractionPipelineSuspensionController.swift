@@ -194,14 +194,6 @@ private struct StateChangeNotification {
     let snapshot: StateSnapshot
 }
 
-private extension NSLock {
-    func withLock<T>(_ operation: () -> T) -> T {
-        lock()
-        defer { unlock() }
-        return operation()
-    }
-}
-
 private extension Set where Element == InteractionPipelineSuspensionReason {
     var debugSummary: String {
         map(\.rawValue).sorted().joined(separator: ",")

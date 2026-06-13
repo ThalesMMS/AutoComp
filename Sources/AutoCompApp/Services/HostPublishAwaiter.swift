@@ -117,7 +117,7 @@ final class HostPublishAwaiter {
     }
 
     private func elapsedMs(since startedAt: ContinuousClock.Instant) -> Int {
-        max(0, startedAt.duration(to: .now).appMilliseconds)
+        max(0, startedAt.duration(to: .now).milliseconds)
     }
 
     private static func hasPublishedChange(from baseline: TextContext?, to context: TextContext) -> Bool {

@@ -590,11 +590,15 @@ public final class ModelDownloadManager: ObservableObject {
 
         var removedCount = 0
         for file in files where isPartialDownloadFile(file) {
+            let partialFilename = file.lastPathComponent
+            modelStates[partialFilename] = nil
             do {
                 try FileManager.default.removeItem(at: file)
                 removedCount += 1
             } catch {
-                modelStates[file.lastPathComponent] = .failed("Could not remove partial download.")
+                if let filename = catalogFilename(forPartialDownloadFilename: partialFilename) {
+                    modelStates[filename] = .failed("Could not remove partial download.")
+                }
             }
         }
         refreshModelStates()
@@ -715,6 +719,26 @@ public final class ModelDownloadManager: ObservableObject {
         return filename.contains(".staging-")
             || filename.hasSuffix(".download")
             || filename.hasSuffix(".partial")
+    }
+
+    private func catalogFilename(forPartialDownloadFilename filename: String) -> String? {
+        let candidate: String?
+        if let stagingRange = filename.range(of: ".staging-") {
+            candidate = String(filename[..<stagingRange.lowerBound])
+        } else if filename.hasSuffix(".download") {
+            candidate = String(filename.dropLast(".download".count))
+        } else if filename.hasSuffix(".partial") {
+            candidate = String(filename.dropLast(".partial".count))
+        } else {
+            candidate = nil
+        }
+
+        guard let candidate else {
+            return nil
+        }
+        return catalog.downloadableModels.first { model in
+            model.allKnownFilenames.contains(candidate)
+        }?.filename
     }
 }
 

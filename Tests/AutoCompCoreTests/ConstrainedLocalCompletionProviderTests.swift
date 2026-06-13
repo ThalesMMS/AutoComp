@@ -123,18 +123,6 @@ final class ConstrainedLocalCompletionProviderTests: XCTestCase {
         )
     }
 
-    private func makeContext(
-        textBeforeCursor: String = "Can you ",
-        textAfterCursor: String? = nil
-    ) -> TextContext {
-        TextContext(
-            app: AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1),
-            focusedElementID: "field",
-            textBeforeCursor: textBeforeCursor,
-            textAfterCursor: textAfterCursor
-        )
-    }
-
     private func makeProfile(
         vocabularySize: Int = 32_000,
         supportsFillInMiddle: Bool = true

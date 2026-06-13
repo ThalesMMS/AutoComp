@@ -19,6 +19,7 @@ final class SettingsVisualDesignSystemTests: XCTestCase {
             "struct SettingsActionRow<Trailing: View>: View",
             "struct KeycapView: View",
             "struct KeyRecorderRow<Recorder: View>: View",
+            "struct RemoteConsentSectionView: View",
             "struct SectionFooterNote: View",
             "struct DangerZoneView<Content: View>: View",
             ".accessibilityLabel(\"\\(state.title): \\(title)\")",
@@ -43,7 +44,7 @@ final class SettingsVisualDesignSystemTests: XCTestCase {
         for requiredText in [
             "PermissionCard(permission:",
             "SettingsVisualState.backend",
-            "statusTitle: hasConsent ? \"Allowed\"",
+            "statusTitle: isAllowed ? \"Allowed\"",
             "SettingsVisualState.modelDownload",
             "KeyRecorderRow(",
             "KeycapView(binding:",
@@ -57,6 +58,26 @@ final class SettingsVisualDesignSystemTests: XCTestCase {
         XCTAssertTrue(healthSource.contains("DisclosureGroup("))
         XCTAssertFalse(healthSource.contains("statusIndicator(for:"))
         XCTAssertTrue(menuSource.contains("StatusDot("))
+    }
+
+    func testRemoteConsentUIUsesSharedSectionComponent() throws {
+        let root = try packageRoot()
+        let settingsComponentsSource = try settingsSourceContents(packageRoot: root)
+        let onboardingSource = try source(
+            root: root,
+            path: "Sources/AutoCompApp/Views/OnboardingView.swift"
+        )
+
+        XCTAssertTrue(settingsComponentsSource.contains("struct RemoteConsentSectionView: View"))
+        XCTAssertTrue(settingsComponentsSource.contains("RemoteConsentSectionViewStyle"))
+        XCTAssertTrue(settingsComponentsSource.contains("Allowed"))
+        XCTAssertTrue(settingsComponentsSource.contains("Needs consent"))
+        XCTAssertTrue(settingsComponentsSource.contains("Reset Remote Completion Consent"))
+        XCTAssertTrue(settingsComponentsSource.contains("SettingsInfoCard("))
+
+        XCTAssertTrue(settingsComponentsSource.contains("RemoteConsentSectionView("))
+        XCTAssertTrue(onboardingSource.contains("RemoteConsentSectionView("))
+        XCTAssertFalse(onboardingSource.contains("struct RemoteConsentCard"))
     }
 
     func testTechnicalDetailsUseDisclosureOrFooterNotes() throws {
@@ -75,19 +96,4 @@ final class SettingsVisualDesignSystemTests: XCTestCase {
         XCTAssertTrue(healthSource.contains("DisclosureGroup("))
     }
 
-    private func source(root: URL, path: String) throws -> String {
-        try String(contentsOf: root.appendingPathComponent(path), encoding: .utf8)
-    }
-
-    private func packageRoot() throws -> URL {
-        var url = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-        while url.path != "/" {
-            if FileManager.default.fileExists(atPath: url.appendingPathComponent("Package.swift").path) {
-                return url
-            }
-            url.deleteLastPathComponent()
-        }
-
-        throw XCTSkip("Unable to locate package root")
-    }
 }

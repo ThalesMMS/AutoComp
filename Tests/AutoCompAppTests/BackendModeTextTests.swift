@@ -71,7 +71,12 @@ final class BackendModeTextTests: XCTestCase {
             encoding: .utf8
         )
         let providerRange = try XCTUnwrap(settingsSource.range(of: "Section(\"Provider\")"))
-        let consentRange = try XCTUnwrap(settingsSource.range(of: "Section(\"Remote completion consent\")"))
+        let consentRange = try XCTUnwrap(
+            settingsSource.range(
+                of: "RemoteConsentSectionView(",
+                range: providerRange.upperBound..<settingsSource.endIndex
+            )
+        )
         let providerBlock = String(settingsSource[providerRange.lowerBound..<consentRange.lowerBound])
 
         XCTAssertTrue(providerBlock.contains("Picker(\"Selected backend\""))
@@ -92,15 +97,4 @@ final class BackendModeTextTests: XCTestCase {
         XCTAssertTrue(settingsSource.contains("Privacy controls limit optional local context"))
     }
 
-    private func packageRoot() throws -> URL {
-        var url = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-        while url.path != "/" {
-            if FileManager.default.fileExists(atPath: url.appendingPathComponent("Package.swift").path) {
-                return url
-            }
-            url.deleteLastPathComponent()
-        }
-
-        throw XCTSkip("Unable to locate package root")
-    }
 }

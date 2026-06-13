@@ -320,6 +320,25 @@ final class OverlayGeometryTests: XCTestCase {
         XCTAssertTrue(layout.lines.allSatisfy { $0.width <= layout.panelFrame.width })
     }
 
+    func testInlineGhostTextLayoutAlignsSameLineWrappedTextWithCaretLine() {
+        let anchor = NSRect(x: 120, y: 500, width: 2, height: 18)
+        let layout = InlineGhostTextLayout.resolve(
+            text: "continue with a longer inline suggestion",
+            font: NSFont.systemFont(ofSize: 14),
+            textDirection: .leftToRight,
+            anchorFrame: anchor,
+            inputFrame: NSRect(x: 100, y: 460, width: 360, height: 80),
+            visibleFrame: NSRect(x: 0, y: 0, width: 520, height: 900),
+            observedCharacterWidth: 8,
+            geometryQuality: .directCaret,
+            maxPanelWidth: 120
+        )
+
+        XCTAssertGreaterThan(layout.lines.count, 1)
+        XCTAssertEqual(layout.placementReason, .wrappedLine)
+        XCTAssertEqual(layout.panelFrame.maxY, anchor.maxY)
+    }
+
     func testInlineGhostTextLayoutExposesKeycapHintPositionWhenSpaceAllows() {
         let layout = InlineGhostTextLayout.resolve(
             text: "continue",
@@ -334,6 +353,7 @@ final class OverlayGeometryTests: XCTestCase {
         )
 
         XCTAssertNotNil(layout.keycapHintFrame)
+        XCTAssertEqual(layout.panelFrame.minY, 500)
         XCTAssertGreaterThan(layout.keycapHintFrame?.minX ?? 0, layout.panelFrame.minX)
         XCTAssertLessThanOrEqual(layout.keycapHintFrame?.maxX ?? 0, layout.panelFrame.maxX)
     }
@@ -560,6 +580,42 @@ final class OverlayGeometryTests: XCTestCase {
         XCTAssertEqual(layout?.source, .exactAX)
         XCTAssertEqual(layout?.origin.x, 770)
         XCTAssertEqual(layout?.origin.y, 604)
+    }
+
+    func testSafariFocusedElementFallbackUsesWebLikeInlinePadding() {
+        let focusedRect = CGRect(x: 120, y: 500, width: 520, height: 48)
+        let safariLayout = inlinePreviewLayout(
+            bundleID: "com.apple.Safari",
+            displayName: "Safari",
+            focusedElementRect: focusedRect
+        )
+        let chromeLayout = inlinePreviewLayout(
+            bundleID: "com.google.Chrome",
+            displayName: "Google Chrome",
+            focusedElementRect: focusedRect
+        )
+
+        XCTAssertEqual(safariLayout?.source, .textBoxEstimate)
+        XCTAssertEqual(safariLayout, chromeLayout)
+    }
+
+    private func inlinePreviewLayout(
+        bundleID: String,
+        displayName: String,
+        focusedElementRect: CGRect
+    ) -> InlinePreviewLayout? {
+        InlinePreviewGeometry.layout(
+            context: textContext(
+                app: AppIdentity(bundleID: bundleID, displayName: displayName, processID: 42),
+                textBeforeCursor: "Vamos tentar",
+                selectedRange: NSRange(location: 12, length: 0),
+                caretRect: nil,
+                focusedElementRect: focusedElementRect
+            ),
+            contentSize: NSSize(width: 160, height: 18),
+            screenFrame: CGRect(x: 0, y: 0, width: 1_000, height: 1_000),
+            visibleFrame: CGRect(x: 0, y: 0, width: 1_000, height: 1_000)
+        )
     }
 
     func testWideAccessibilityCaretUsesPreviousGlyphInsertionPoint() {

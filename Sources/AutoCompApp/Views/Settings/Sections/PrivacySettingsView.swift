@@ -24,6 +24,10 @@ struct PrivacySettingsView: View {
                 Slider(value: personalizationStrengthBinding, in: 0...1) {
                     Text("Personalization strength")
                 }
+                LabeledContent(
+                    "Prompt examples",
+                    value: "\(settings.personalizationPromptSampleLimit)/\(PersonalizationSampleRecorder.defaultPromptSampleLimit)"
+                )
             }
 
             Section("Local personalization") {

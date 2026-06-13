@@ -89,17 +89,6 @@ final class AppleFoundationCompletionProviderTests: XCTestCase {
         XCTAssertEqual(suggestion.visibleText, "review this today")
     }
 
-    private func makeContext(
-        textBeforeCursor: String = "Can you ",
-        textAfterCursor: String? = nil
-    ) -> TextContext {
-        TextContext(
-            app: AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1),
-            focusedElementID: "field",
-            textBeforeCursor: textBeforeCursor,
-            textAfterCursor: textAfterCursor
-        )
-    }
 }
 
 private struct FakeAppleFoundationModelBackend: AppleFoundationModelBackend {

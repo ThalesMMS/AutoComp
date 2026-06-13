@@ -141,7 +141,10 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ "$BETA_GATE" == "1" ]]; then
-  exec "$ROOT_DIR/script/beta_gate.sh" "${BETA_GATE_ARGS[@]}"
+  if [[ "${#BETA_GATE_ARGS[@]}" -gt 0 ]]; then
+    exec "$ROOT_DIR/script/beta_gate.sh" "${BETA_GATE_ARGS[@]}"
+  fi
+  exec "$ROOT_DIR/script/beta_gate.sh"
 fi
 
 if [[ -z "$VERSION" || -z "$BUILD_NUMBER" ]]; then
@@ -277,7 +280,9 @@ collect_llama_linker_flags() {
   if [[ -n "${AUTOCOMP_LLAMA_LIBS:-}" ]]; then
     # shellcheck disable=SC2206
     local manual_libs=($AUTOCOMP_LLAMA_LIBS)
-    printf '%s\n' "${manual_libs[@]}"
+    if [[ "${#manual_libs[@]}" -gt 0 ]]; then
+      printf '%s\n' "${manual_libs[@]}"
+    fi
     return
   fi
 
@@ -291,7 +296,9 @@ collect_llama_linker_flags() {
   for package in "${packages[@]}"; do
     # shellcheck disable=SC2207
     local package_libs=($(pkg-config --libs "$package"))
-    printf '%s\n' "${package_libs[@]}"
+    if [[ "${#package_libs[@]}" -gt 0 ]]; then
+      printf '%s\n' "${package_libs[@]}"
+    fi
   done
 }
 

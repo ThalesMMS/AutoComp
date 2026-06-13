@@ -161,6 +161,174 @@ final class ReleasePipelineTests: XCTestCase {
         }
     }
 
+    func testReleaseDmgRefusesAppBundleWithEmbeddedLocalEnv() throws {
+        let root = try packageRoot()
+        let tempRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("autocomp-release-dmg-env-\(UUID().uuidString)")
+        defer {
+            try? FileManager.default.removeItem(at: tempRoot)
+        }
+
+        let appBundle = tempRoot.appendingPathComponent("AutoComp.app", isDirectory: true)
+        let resources = appBundle.appendingPathComponent("Contents/Resources", isDirectory: true)
+        try FileManager.default.createDirectory(at: resources, withIntermediateDirectories: true)
+        try "AUTOCOMP_REMOTE_API_KEY=secret\n".write(
+            to: resources.appendingPathComponent("autocomp.env"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let result = try runProcess(
+            executable: "/bin/bash",
+            arguments: [
+                "script/release_dmg.sh",
+                "--app-path",
+                appBundle.path,
+                "--output-path",
+                tempRoot.appendingPathComponent("AutoComp.dmg").path
+            ],
+            currentDirectory: root
+        )
+
+        XCTAssertEqual(result.status, 1, result.output)
+        XCTAssertTrue(
+            result.output.contains("Refusing to package app bundle containing embedded local environment file"),
+            result.output
+        )
+        XCTAssertTrue(result.output.contains("AUTOCOMP_EMBED_ENV_LOCAL=0"), result.output)
+    }
+
+    func testReleaseBuildBetaGateHandlesEmptyForwardedArgsUnderStockBash() throws {
+        let root = try packageRoot()
+        let tempRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("autocomp-beta-gate-empty-\(UUID().uuidString)")
+        defer {
+            try? FileManager.default.removeItem(at: tempRoot)
+        }
+        let scriptDirectory = tempRoot.appendingPathComponent("script")
+        try FileManager.default.createDirectory(at: scriptDirectory, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(
+            at: root.appendingPathComponent("script/release_build.sh"),
+            to: scriptDirectory.appendingPathComponent("release_build.sh")
+        )
+        let betaGateStub = scriptDirectory.appendingPathComponent("beta_gate.sh")
+        try """
+        #!/bin/bash
+        set -eu
+        printf 'stub-beta-gate args=%s\\n' "$#"
+        """.write(to: betaGateStub, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: betaGateStub.path)
+
+        let result = try runProcess(
+            executable: "/bin/bash",
+            arguments: ["script/release_build.sh", "--beta-gate"],
+            currentDirectory: tempRoot
+        )
+
+        XCTAssertEqual(result.status, 0, result.output)
+        XCTAssertTrue(result.output.contains("stub-beta-gate args=0"), result.output)
+        XCTAssertFalse(result.output.contains("unbound variable"), result.output)
+    }
+
+    func testLlamaPkgConfigLinkCheckHandlesEmptyCFlagsUnderStockBash() throws {
+        let root = try packageRoot()
+        let tempRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("autocomp-llama-pkg-config-empty-\(UUID().uuidString)")
+        defer {
+            try? FileManager.default.removeItem(at: tempRoot)
+        }
+        let binDirectory = tempRoot.appendingPathComponent("bin")
+        let libDirectory = tempRoot.appendingPathComponent("lib")
+        try FileManager.default.createDirectory(at: binDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: libDirectory, withIntermediateDirectories: true)
+
+        let pkgConfigStub = binDirectory.appendingPathComponent("pkg-config")
+        try """
+        #!/bin/bash
+        set -eu
+        case "$1" in
+          --exists)
+            exit 0
+            ;;
+          --cflags)
+            exit 0
+            ;;
+          --libs)
+            printf -- '-L%s -lllama\\n' "\(libDirectory.path)"
+            exit 0
+            ;;
+        esac
+        exit 2
+        """.write(to: pkgConfigStub, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: pkgConfigStub.path)
+
+        let ccStub = binDirectory.appendingPathComponent("cc")
+        try """
+        #!/bin/bash
+        set -eu
+        output=""
+        while [ "$#" -gt 0 ]; do
+          if [ "$1" = "-o" ]; then
+            shift
+            output="$1"
+          fi
+          shift || true
+        done
+        if [ -z "$output" ]; then
+          exit 2
+        fi
+        {
+          echo '#!/bin/bash'
+          echo 'exit 0'
+        } >"$output"
+        chmod +x "$output"
+        """.write(to: ccStub, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: ccStub.path)
+
+        let result = try runProcess(
+            executable: "/bin/bash",
+            arguments: ["script/check_llama_pkg_config.sh"],
+            currentDirectory: root,
+            environment: [
+                "PATH": "\(binDirectory.path):/usr/bin:/bin:/usr/sbin:/sbin",
+                "TMPDIR": FileManager.default.temporaryDirectory.path
+            ]
+        )
+
+        XCTAssertEqual(result.status, 0, result.output)
+        XCTAssertTrue(result.output.contains("llama.cpp link check passed using pkg-config"), result.output)
+        XCTAssertFalse(result.output.contains("unbound variable"), result.output)
+    }
+
+    func testAppcastValidatorPreservesNoItemsExitCodeUnderStockBash() throws {
+        let root = try packageRoot()
+        let tempRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("autocomp-appcast-empty-\(UUID().uuidString)")
+        defer {
+            try? FileManager.default.removeItem(at: tempRoot)
+        }
+        try FileManager.default.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        let appcast = tempRoot.appendingPathComponent("appcast.xml")
+        try """
+        <?xml version="1.0" encoding="utf-8"?>
+        <rss version="2.0">
+          <channel>
+            <title>AutoComp appcast</title>
+          </channel>
+        </rss>
+        """.write(to: appcast, atomically: true, encoding: .utf8)
+
+        let result = try runProcess(
+            executable: "/bin/bash",
+            arguments: ["script/release_validate_appcast.sh", "--appcast", appcast.path],
+            currentDirectory: root
+        )
+
+        XCTAssertEqual(result.status, 3, result.output)
+        XCTAssertTrue(result.output.contains("No <item> entries found in appcast"), result.output)
+        XCTAssertFalse(result.output.contains("unbound variable"), result.output)
+    }
+
     func testAppLoadsSparkleAndExposesUpdateMenuItem() throws {
         let root = try packageRoot()
         let package = try String(
@@ -507,21 +675,37 @@ final class ReleasePipelineTests: XCTestCase {
 
         XCTAssertTrue(valid.contains("http://127.0.0.1:8765/release-notes.html"))
         XCTAssertFalse(valid.contains("https://example.invalid/autocomp-test-channel"))
+        XCTAssertTrue(valid.contains("<sparkle:channel>beta</sparkle:channel>"))
+        XCTAssertFalse(valid.contains("sparkle:channel=\"beta\""))
         XCTAssertTrue(invalidSignature.contains("sparkle:edSignature=\"INVALID\""))
         XCTAssertTrue(missingFile.contains("missing-file-does-not-exist.dmg"))
         XCTAssertTrue(downgrade.contains("sparkle:shortVersionString=\"0.0.0\""))
         XCTAssertTrue(downgrade.contains("sparkle:version=\"0\""))
     }
 
-    private func packageRoot() throws -> URL {
-        var url = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-        while url.path != "/" {
-            if FileManager.default.fileExists(atPath: url.appendingPathComponent("Package.swift").path) {
-                return url
-            }
-            url.deleteLastPathComponent()
-        }
+    private func runProcess(
+        executable: String,
+        arguments: [String],
+        currentDirectory: URL,
+        environment: [String: String]? = nil
+    ) throws -> (status: Int32, output: String) {
+        let process = Process()
+        process.currentDirectoryURL = currentDirectory
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        process.environment = environment
 
-        throw XCTSkip("Unable to locate package root")
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = output
+        try process.run()
+        process.waitUntilExit()
+
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        return (
+            process.terminationStatus,
+            String(data: data, encoding: .utf8) ?? ""
+        )
     }
+
 }

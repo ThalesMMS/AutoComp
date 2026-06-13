@@ -19,18 +19,9 @@ enum AcceptanceInsertionStrategy: Equatable {
 struct AcceptanceInsertionPolicy: Equatable {
     var singleUnicodeFastPathEnabled = true
     var keyboardEventUTF16Limit = 64
-    var singleUnicodeIncompatibleBundleIDs = Self.browserBundleIDs
+    var singleUnicodeIncompatibleBundleIDs = WebHostApps.browserBundleIDs
     var clipboardPreferredBundleIDs: Set<String> = []
     var returnBlockedBundleIDs = RiskyHostAppPolicy.chatBundleIDs
-
-    static let browserBundleIDs: Set<String> = [
-        "com.apple.Safari",
-        "com.google.Chrome",
-        "com.brave.Browser",
-        "com.microsoft.edgemac",
-        "company.thebrowser.Browser",
-        "company.thebrowser.dia"
-    ]
 
     static var productionDefault: AcceptanceInsertionPolicy {
         AcceptanceInsertionPolicy(

@@ -4,9 +4,10 @@ import Foundation
 
 public final class LlamaCppRuntimeBackend: LocalLlamaRuntimeBackend, @unchecked Sendable {
     private let loadVocabularyOnly: Bool
+    private let backendLifecycle: LlamaBackendGlobalLifecycle
     private let lock = NSLock()
     private var loadedModel: OpaquePointer?
-    private var backendInitialized = false
+    private var backendRetained = false
 
     public static func runtimeSystemInfo() -> String {
         guard let info = autocomp_llama_system_info() else {
@@ -21,15 +22,18 @@ public final class LlamaCppRuntimeBackend: LocalLlamaRuntimeBackend, @unchecked 
 
     public init(loadVocabularyOnly: Bool = false) {
         self.loadVocabularyOnly = loadVocabularyOnly
+        self.backendLifecycle = .shared
+    }
+
+    init(loadVocabularyOnly: Bool, backendLifecycle: LlamaBackendGlobalLifecycle) {
+        self.loadVocabularyOnly = loadVocabularyOnly
+        self.backendLifecycle = backendLifecycle
     }
 
     deinit {
         lock.withLock {
             unloadLocked()
-            if backendInitialized {
-                autocomp_llama_backend_free()
-                backendInitialized = false
-            }
+            releaseBackendLocked()
         }
     }
 
@@ -40,10 +44,7 @@ public final class LlamaCppRuntimeBackend: LocalLlamaRuntimeBackend, @unchecked 
         try enforceRAMLimit(configuration: configuration)
 
         try lock.withLock {
-            if !backendInitialized {
-                autocomp_llama_backend_init()
-                backendInitialized = true
-            }
+            retainBackendLocked()
 
             unloadLocked()
             var error = AutoCompLlamaError()
@@ -51,6 +52,7 @@ public final class LlamaCppRuntimeBackend: LocalLlamaRuntimeBackend, @unchecked 
                 autocomp_llama_model_load(path, loadVocabularyOnly, &error)
             }
             guard let model else {
+                releaseBackendLocked()
                 throw Self.loadError(
                     message: String(cString: autocomp_llama_error_message(&error)),
                     code: error.code
@@ -90,8 +92,8 @@ public final class LlamaCppRuntimeBackend: LocalLlamaRuntimeBackend, @unchecked 
                 guard let generated else {
                     throw LocalLlamaError.generationFailed(String(cString: autocomp_llama_error_message(&error)))
                 }
-                try Task.checkCancellation()
                 defer { autocomp_llama_string_free(generated) }
+                try Task.checkCancellation()
                 return String(cString: generated)
             }
         }.value
@@ -159,11 +161,24 @@ public final class LlamaCppRuntimeBackend: LocalLlamaRuntimeBackend, @unchecked 
     public func shutdown() async {
         lock.withLock {
             unloadLocked()
-            if backendInitialized {
-                autocomp_llama_backend_free()
-                backendInitialized = false
-            }
+            releaseBackendLocked()
         }
+    }
+
+    private func retainBackendLocked() {
+        guard !backendRetained else {
+            return
+        }
+        backendLifecycle.retain()
+        backendRetained = true
+    }
+
+    private func releaseBackendLocked() {
+        guard backendRetained else {
+            return
+        }
+        backendLifecycle.release()
+        backendRetained = false
     }
 
     private func unloadLocked() {
@@ -220,6 +235,44 @@ public final class LlamaCppRuntimeBackend: LocalLlamaRuntimeBackend, @unchecked 
         }
 
         return appendPointer(at: 0)
+    }
+}
+
+final class LlamaBackendGlobalLifecycle: @unchecked Sendable {
+    static let shared = LlamaBackendGlobalLifecycle(
+        initialize: autocomp_llama_backend_init,
+        free: autocomp_llama_backend_free
+    )
+
+    private let lock = NSLock()
+    private let initialize: () -> Void
+    private let free: () -> Void
+    private var referenceCount = 0
+
+    init(initialize: @escaping () -> Void, free: @escaping () -> Void) {
+        self.initialize = initialize
+        self.free = free
+    }
+
+    func retain() {
+        lock.withLock {
+            if referenceCount == 0 {
+                initialize()
+            }
+            referenceCount += 1
+        }
+    }
+
+    func release() {
+        lock.withLock {
+            guard referenceCount > 0 else {
+                return
+            }
+            referenceCount -= 1
+            if referenceCount == 0 {
+                free()
+            }
+        }
     }
 }
 
