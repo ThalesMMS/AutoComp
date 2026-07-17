@@ -22,6 +22,15 @@ typedef struct AutoCompLlamaCacheStats {
     uint64_t resets;
     int32_t retained_prompt_tokens;
     uint32_t context_tokens;
+    int32_t last_prompt_tokens;
+    int32_t last_common_prefix_tokens;
+    int32_t last_reused_tokens;
+    int32_t last_prefill_tokens;
+    uint64_t last_tokenization_microseconds;
+    uint64_t last_prefill_microseconds;
+    uint64_t last_decode_microseconds;
+    uint64_t cache_rebuilds;
+    int32_t last_cache_miss_reason;
 } AutoCompLlamaCacheStats;
 
 typedef struct AutoCompLlamaCacheDecision {
@@ -41,6 +50,20 @@ typedef struct AutoCompLlamaTokenizerProfile {
     int32_t fim_middle_token;
     bool supports_fill_in_middle;
 } AutoCompLlamaTokenizerProfile;
+
+typedef struct AutoCompLlamaTokenMetadata {
+    uint16_t flags;
+    uint16_t approximate_display_width;
+    int32_t byte_count;
+} AutoCompLlamaTokenMetadata;
+
+/// Called after each generated token with the UTF-8 text accumulated so far.
+/// Return false to stop generation after the current token.
+typedef bool (*AutoCompLlamaStreamCallback)(
+    const char *accumulated_text,
+    int32_t sequence,
+    void *context
+);
 
 void autocomp_llama_backend_init(void);
 void autocomp_llama_backend_free(void);
@@ -62,6 +85,18 @@ char *autocomp_llama_model_generate(
     AutoCompLlamaError *error
 );
 
+char *autocomp_llama_model_generate_stream(
+    AutoCompLlamaModel *model,
+    const char *prompt,
+    int32_t max_tokens,
+    float temperature,
+    const char * const *stop_sequences,
+    int32_t stop_sequence_count,
+    AutoCompLlamaStreamCallback callback,
+    void *callback_context,
+    AutoCompLlamaError *error
+);
+
 void autocomp_llama_model_reset_cache(AutoCompLlamaModel *model);
 AutoCompLlamaCacheStats autocomp_llama_model_cache_stats(const AutoCompLlamaModel *model);
 
@@ -79,6 +114,28 @@ AutoCompLlamaCacheDecision autocomp_llama_prompt_cache_decision(
 bool autocomp_llama_model_tokenizer_profile(
     const AutoCompLlamaModel *model,
     AutoCompLlamaTokenizerProfile *profile,
+    AutoCompLlamaError *error
+);
+
+bool autocomp_llama_model_token_metadata(
+    const AutoCompLlamaModel *model,
+    int32_t token,
+    char *bytes,
+    int32_t byte_capacity,
+    AutoCompLlamaTokenMetadata *metadata,
+    AutoCompLlamaError *error
+);
+
+int32_t autocomp_llama_model_top_tokens(
+    AutoCompLlamaModel *model,
+    const char *prompt,
+    const int32_t *generated_tokens,
+    int32_t generated_token_count,
+    const int32_t *allowed_tokens,
+    int32_t allowed_token_count,
+    int32_t limit,
+    int32_t *result_tokens,
+    float *result_log_probabilities,
     AutoCompLlamaError *error
 );
 

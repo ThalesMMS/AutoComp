@@ -56,6 +56,13 @@ enum CapturedInputEvent: Equatable, Sendable {
         }
     }
 
+    var isDeletionMutation: Bool {
+        if case .text(let keyCode, _) = self {
+            return Self.clearOnlyTextMutationKeyCodes.contains(keyCode)
+        }
+        return false
+    }
+
     var shouldClearSuggestion: Bool {
         switch self {
         case .text(let keyCode, _):

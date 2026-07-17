@@ -38,9 +38,13 @@ final class AppController: ObservableObject {
     private let keyboardShortcuts: KeyboardShortcutService
     private let emojiVariantPreferencesStore: EmojiVariantPreferencesStore
     private let emojiPickerController: EmojiPickerController
+    private let macroPreferencesStore: MacroPreferencesStore
+    private let macroCommandController: MacroCommandController
+    private let inlineCommandCoordinator: InlineCommandCoordinator
     private let completionBackendConfigurationService: CompletionBackendConfigurationService
     private let completionPlaygroundService = CompletionPlaygroundService()
     private let debugArtifactStore: DebugArtifactStore
+    private let completionTraceStore: CompletionTraceStore
     private let suggestionDebugLogger: SuggestionDebugLogger
     private let localPrivacyDataResetService: LocalPrivacyDataResetService
     private let activationPolicyController: AppActivationPolicyController
@@ -87,17 +91,21 @@ final class AppController: ObservableObject {
         self.keyboardShortcuts = environment.keyboardShortcuts
         self.emojiVariantPreferencesStore = environment.emojiVariantPreferencesStore
         self.emojiPickerController = environment.emojiPickerController
+        self.macroPreferencesStore = environment.macroPreferencesStore
+        self.macroCommandController = environment.macroCommandController
+        self.inlineCommandCoordinator = environment.inlineCommandCoordinator
         self.completionBackendConfigurationService = environment.completionBackendConfigurationService
         self.debugArtifactStore = environment.debugArtifactStore
+        self.completionTraceStore = environment.completionTraceStore
         self.suggestionDebugLogger = environment.suggestionDebugLogger
         self.localPrivacyDataResetService = LocalPrivacyDataResetService(
             personalizationStore: environment.personalizationStore,
             privacySettingsStore: environment.privacySettingsStore,
             productivityMetricsStore: environment.productivityMetricsStore,
-            telemetryClient: environment.telemetryClient,
             remoteCompletionConsentStore: environment.remoteCompletionConsentStore,
             debugOptionsStore: environment.debugOptionsStore,
             debugArtifactStore: environment.debugArtifactStore,
+            completionTraceStore: environment.completionTraceStore,
             pasteboardRecoveryStore: environment.pasteboardRecoveryStore
         )
         self.installationLocationService = environment.installationLocationService
@@ -133,11 +141,11 @@ final class AppController: ObservableObject {
             }
         }
 
-        emojiPickerController.onActiveChanged = { [weak self] active in
+        inlineCommandCoordinator.onStateChanged = { [weak self] active, capabilities in
             guard let self else {
                 return
             }
-            self.keyboardShortcuts.setEmojiPickerActive(active)
+            self.keyboardShortcuts.setInlineCommandState(active: active, capabilities: capabilities)
             if active {
                 self.suggestionEngine.hideSuggestion()
                 self.syncShortcutStateAfterAcceptance()
@@ -175,15 +183,15 @@ final class AppController: ObservableObject {
                     guard let self else {
                         return
                     }
-                    let handledByEmoji = await self.emojiPickerController.handleInputEvent(event)
-                    if !handledByEmoji {
+                    let handledByInlineCommand = await self.inlineCommandCoordinator.handleInputEvent(event)
+                    if !handledByInlineCommand {
                         self.suggestionEngine.recordCapturedInputEvent(event)
                     }
                 }
             },
             onEmojiCommand: { [weak self] command in
                 Task { @MainActor in
-                    await self?.handleEmojiKeyboardCommand(command)
+                    await self?.handleInlineCommandKeyboardCommand(command)
                 }
             },
             shortcutOwnershipDecision: { [weak self] command in
@@ -199,8 +207,8 @@ final class AppController: ObservableObject {
         )
     }
 
-    private func handleEmojiKeyboardCommand(_ command: EmojiKeyboardCommand) async {
-        await emojiPickerController.handleKeyboardCommand(command)
+    private func handleInlineCommandKeyboardCommand(_ command: EmojiKeyboardCommand) async {
+        await inlineCommandCoordinator.handleKeyboardCommand(command)
         syncShortcutStateAfterAcceptance()
     }
 
@@ -216,6 +224,7 @@ final class AppController: ObservableObject {
 
         suggestionEngine.setInteractionPipelineSuspended(suspended, reason: reasonSummary)
         keyboardShortcuts.setInteractionPipelineSuspended(suspended, reason: reasonSummary)
+        inlineCommandCoordinator.setPipelineSuspended(suspended)
 
         guard !suspended else {
             return
@@ -273,6 +282,15 @@ final class AppController: ObservableObject {
         emojiPickerController.updatePreferences(preferences)
     }
 
+    func macroPreferences() -> MacroPreferences {
+        macroPreferencesStore.load()
+    }
+
+    func saveMacroPreferences(_ preferences: MacroPreferences) {
+        try? macroPreferencesStore.save(preferences)
+        macroCommandController.updatePreferences(preferences)
+    }
+
     var emojiPickerAcceptKeyLabel: String {
         shortcutSettingsStore.load()[.acceptNextWord].displayName
     }
@@ -292,6 +310,7 @@ final class AppController: ObservableObject {
     }
 
     func stop() {
+        inlineCommandCoordinator.cancelAll(reason: .cancelled)
         suggestionEngine.stop()
         keyboardShortcuts.stop()
         permissionService.stopMonitoring()
@@ -325,10 +344,12 @@ final class AppController: ObservableObject {
 
     func deleteAllLocalPrivacyData() throws {
         try localPrivacyDataResetService.deleteAllLocalPrivacyData()
+        suggestionEngine.resetInMemorySuggestionState(reason: "delete-all-local-privacy-data")
     }
 
     func savePrivacySettings(_ settings: PrivacySettings) {
         try? privacySettingsStore.save(settings)
+        suggestionEngine.resetInMemorySuggestionState(reason: "privacy-settings-changed")
         productivityMetricsStore.reload()
     }
 
@@ -338,6 +359,7 @@ final class AppController: ObservableObject {
 
     func saveDebugOptions(_ options: AutoCompDebugOptions) {
         debugOptionsStore.save(options)
+        completionTraceStore.setEnabled(options.localDebugOptIn)
     }
 
     func debugOptions() -> AutoCompDebugOptions {
@@ -378,6 +400,7 @@ final class AppController: ObservableObject {
 
     func deleteDebugArtifacts() throws {
         try debugArtifactStore.deleteAll()
+        try completionTraceStore.deleteAll()
     }
 
     @discardableResult
@@ -404,7 +427,8 @@ final class AppController: ObservableObject {
     func exportDebugLogs(to directory: URL) throws -> URL {
         try debugArtifactStore.exportDebugLogs(
             to: directory,
-            options: debugOptions()
+            options: debugOptions(),
+            completionTraceStore: completionTraceStore
         )
     }
 

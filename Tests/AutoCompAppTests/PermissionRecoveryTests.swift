@@ -77,6 +77,19 @@ final class PermissionRecoveryTests: XCTestCase {
         XCTAssertEqual(installer.liveTapCount, 3)
     }
 
+    func testKeyboardShortcutServiceDeinitRemovesUnretainedEventTaps() {
+        let installer = RecordingKeyboardShortcutTapInstaller()
+        var service: KeyboardShortcutService? = KeyboardShortcutService(tapInstaller: installer)
+        service?.start(onCommand: { _ in })
+        XCTAssertEqual(installer.liveTapCount, 3)
+
+        service = nil
+
+        XCTAssertEqual(installer.liveTapCount, 0)
+        XCTAssertTrue(installer.installedTaps.allSatisfy(\.removedFromRunLoop))
+        XCTAssertTrue(installer.installedTaps.allSatisfy { !$0.enabled })
+    }
+
     func testPermissionMonitoringDiagnosticsStaySingleSetAcrossRepeatedStartsAndStop() {
         let service = PermissionService()
         defer { service.stopMonitoring() }

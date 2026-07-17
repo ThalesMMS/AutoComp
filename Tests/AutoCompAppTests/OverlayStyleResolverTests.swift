@@ -174,6 +174,24 @@ final class OverlayStyleResolverTests: XCTestCase {
         XCTAssertEqual(style.font.pointSize, 17)
     }
 
+    func testOverlayStyleResolverNegativeProbeIsCachedAcrossCaretMovementInSameField() {
+        let probe = FakeOverlayTextStyleProbe(result: nil)
+        let resolver = OverlayTextStyleResolver(axProbe: probe, cacheTTL: 1)
+        let first = textContext(
+            caretRect: CGRect(x: 100, y: 20, width: 2, height: 17),
+            selectedLocation: 5
+        )
+        let moved = textContext(
+            caretRect: CGRect(x: 108, y: 20, width: 2, height: 17),
+            selectedLocation: 6
+        )
+
+        _ = resolver.style(for: first)
+        _ = resolver.style(for: moved)
+
+        XCTAssertEqual(probe.callCount, 1)
+    }
+
     func testOverlayStyleResolverFallsBackToSystemDefaultForUnknownAppWithoutGeometry() {
         let probe = FakeOverlayTextStyleProbe(result: nil)
         let resolver = OverlayTextStyleResolver(axProbe: probe)
@@ -208,13 +226,14 @@ final class OverlayStyleResolverTests: XCTestCase {
         app: AppIdentity = AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1),
         focusedElementID: String = "field",
         caretRect: CGRect?,
-        previousGlyphRect: CGRect? = nil
+        previousGlyphRect: CGRect? = nil,
+        selectedLocation: Int = 5
     ) -> TextContext {
         TextContext(
             app: app,
             focusedElementID: focusedElementID,
             textBeforeCursor: "Hello",
-            selectedRange: NSRange(location: 5, length: 0),
+            selectedRange: NSRange(location: selectedLocation, length: 0),
             caretRect: caretRect,
             focusedElementRect: CGRect(x: 80, y: 10, width: 300, height: 40),
             previousGlyphRect: previousGlyphRect,

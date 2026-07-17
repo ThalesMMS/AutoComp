@@ -48,12 +48,31 @@ private struct CompletionLatencySeed: Sendable {
     var debounceMs: Int?
 }
 
+private struct SuggestionRefreshSchedulingEvidence: Equatable, Sendable {
+    let hostPublishOutcome: SuggestionSchedulingHostPublishOutcome
+    let hostPublishElapsedMs: Int
+    let hostPublishPollCount: Int
+
+    static let notAwaited = SuggestionRefreshSchedulingEvidence(
+        hostPublishOutcome: .notAwaited,
+        hostPublishElapsedMs: 0,
+        hostPublishPollCount: 0
+    )
+}
+
 private struct ProviderInvocationFailureError: LocalizedError {
     let message: String
 
     var errorDescription: String? {
         message
     }
+}
+
+@MainActor
+private struct PendingPostAcceptanceCommand {
+    let generation: UInt64
+    let inserter: TextInserter
+    let continuation: CheckedContinuation<SuggestionAcceptanceCommandOutcome, Never>
 }
 
 enum SuggestionAcceptanceCommandOutcome: Equatable {
@@ -109,6 +128,40 @@ private enum SuggestionRefreshSource: Equatable, Sendable {
     var shouldStopAfterAppSwitchClear: Bool {
         self == .fallbackTimer
     }
+
+    var schedulingMutation: SuggestionSchedulingMutation {
+        switch self {
+        case .inputEvent(let event):
+            switch event.eventKind {
+            case .textMutation: return .insert
+            case .shortcutMutation: return .shortcut
+            case .acceptance, .fullAcceptance: return .acceptance
+            case .manualTrigger, .dismissal, .navigation, .other: return .focusOrOther
+            }
+        case .postAcceptance:
+            return .acceptance
+        case .focusChanged, .activeAppChanged, .acceptanceGuardrail,
+             .shortcutLeakRepair, .fallbackTimer, .startup:
+            return .focusOrOther
+        }
+    }
+
+    var reuseMutation: SuggestionReuseMutation {
+        guard case .inputEvent(let event) = self else { return .other }
+        if event.isDeletionMutation { return .delete }
+        return event.eventKind == .textMutation ? .append : .other
+    }
+
+    var coalescingPriority: Int {
+        switch self {
+        case .inputEvent, .acceptanceGuardrail, .postAcceptance, .shortcutLeakRepair:
+            return 3
+        case .focusChanged, .activeAppChanged:
+            return 2
+        case .startup, .fallbackTimer:
+            return 1
+        }
+    }
 }
 
 @MainActor
@@ -116,25 +169,6 @@ final class SuggestionEngine: ObservableObject {
 
     private let guardrailLogger = AutoCompLogger(category: "guardrails")
 
-    struct ProviderServices {
-        let generationProvider: CompletionProvider
-        let backendHealthMonitor: BackendHealthMonitor
-        let visualContextProvider: VisualContextProvider?
-        let clipboardContextProvider: ClipboardContextProvider?
-        let keystrokeBufferFallback: KeystrokeBufferFallback?
-    }
-
-    struct PrivacyServices {
-        let privacyStore: PrivacySettingsStore
-        let compatibilityCatalog: CompatibilityCatalog
-        let compatibilitySettings: CompatibilitySettingsStore
-    }
-
-    struct DiagnosticsServices {
-        let productivityMetrics: ProductivityMetricsRecording?
-        let suggestionDebugLogger: SuggestionDebugLogger?
-        let debugOptionsProvider: @MainActor () -> AutoCompDebugOptions
-    }
     @Published private(set) var currentContext: TextContext?
     @Published private(set) var currentSuggestion: Suggestion?
     @Published private(set) var statusMessage: String = "Idle"
@@ -156,12 +190,8 @@ final class SuggestionEngine: ObservableObject {
     private let privacyStore: PrivacySettingsStore
     private let personalizationRecorder: PersonalizationSampleRecorder?
     private let productivityMetrics: ProductivityMetricsRecording?
-    private let eligibilityEvaluator: SuggestionEligibilityEvaluator
-    private let domainRuleResolver = DomainRuleResolver()
-
-    private let providerServices: ProviderServices
-    private let privacyServices: PrivacyServices
-    private let diagnosticsServices: DiagnosticsServices
+    private let eligibilityCoordinator: SuggestionEligibilityCoordinator
+    private let completionRequestCoordinator = CompletionRequestCoordinator()
     private let inputMethodStateProvider: @Sendable () -> InputMethodState
     private let keystrokeBufferFallback: KeystrokeBufferFallback?
     private let publicationController: SuggestionPublicationController
@@ -173,19 +203,35 @@ final class SuggestionEngine: ObservableObject {
     private let lifecycleController = SuggestionLifecycleController()
     private let predictionController = SuggestionPredictionController()
     private let hostPublishAwaiter: HostPublishAwaiter
+    private let schedulingPolicy: SuggestionSchedulingPolicy
+    private var reuseStore: SuggestionReuseStore
+    private let postAcceptanceSpeculationPolicy: PostAcceptanceSpeculationPolicy
     private let diagnosticsController = SuggestionDiagnosticsController()
     private let contextGenerationTracker = ContextGenerationTracker()
     private let suggestionDebugLogger: SuggestionDebugLogger?
+    private let completionTraceRecorder: any CompletionTraceRecording
     private let debugOptionsProvider: @MainActor () -> AutoCompDebugOptions
+    private let streamingConfiguration: StreamingCompletionConfiguration
+    private let streamedSuggestionCoordinator = StreamedSuggestionCoordinator()
 
     private var providerLifecycleGeneration = 0
     private var dismissedContext: TextContext?
     private var postAcceptanceRefreshTask: Task<Void, Never>?
+    private var postAcceptanceCommandTimeoutTask: Task<Void, Never>?
+    private var postAcceptanceCommandBuffer = PostAcceptanceCommandBuffer()
+    private var pendingPostAcceptanceCommand: PendingPostAcceptanceCommand?
     private var visualContextRefreshTask: Task<Void, Never>?
 
     // Refresh single-flight state: prevents overlapping refreshes and coalesces bursts.
     private var refreshTask: Task<Void, Never>?
     private var refreshQueuedSource: SuggestionRefreshSource?
+    private var refreshQueuedTraceContext: CompletionTraceContext?
+    private var refreshQueuedSchedulingEvidence: SuggestionRefreshSchedulingEvidence?
+    private var finishedTraceIDs: Set<CompletionTraceID> = []
+
+    private var backendLatencyHistory = SuggestionBackendLatencyHistory()
+    private var lastTextMutationAt: Date?
+    private var recentTypingIntervalMs: Int?
 
     private var transientFocusFailureStartedAt: Date?
     private let transientFocusFailureGraceInterval: TimeInterval = 1.5
@@ -218,18 +264,16 @@ final class SuggestionEngine: ObservableObject {
         inputController: SuggestionInputStateTracking = SuggestionInputController(),
         shortcutLeakRepairInserter: ShortcutLeakRepairing? = nil,
         hostPublishAwaiter: HostPublishAwaiter = HostPublishAwaiter(),
+        schedulingPolicy: SuggestionSchedulingPolicy = SuggestionSchedulingPolicy(),
+        reuseStore: SuggestionReuseStore = SuggestionReuseStore(),
+        postAcceptanceSpeculationPolicy: PostAcceptanceSpeculationPolicy = PostAcceptanceSpeculationPolicy(),
         suggestionDebugLogger: SuggestionDebugLogger? = nil,
+        completionTraceRecorder: any CompletionTraceRecording = NoopCompletionTraceRecorder(),
+        streamingConfiguration: StreamingCompletionConfiguration = StreamingCompletionFeature.configuration(),
         debugOptionsProvider: @escaping @MainActor () -> AutoCompDebugOptions = { .normal }
     ) {
         self.focusProvider = contextProvider
 
-        self.providerServices = ProviderServices(
-            generationProvider: completionProvider,
-            backendHealthMonitor: backendHealthMonitor,
-            visualContextProvider: visualContextProvider,
-            clipboardContextProvider: clipboardContextProvider,
-            keystrokeBufferFallback: keystrokeBufferFallback
-        )
         self.generationProvider = completionProvider
         self.backendHealthMonitor = backendHealthMonitor
         self.backendStatusSummary = backendHealthMonitor.summary
@@ -237,35 +281,30 @@ final class SuggestionEngine: ObservableObject {
         self.clipboardContextProvider = clipboardContextProvider
         self.keystrokeBufferFallback = keystrokeBufferFallback
 
-        self.privacyServices = PrivacyServices(
-            privacyStore: privacyStore,
-            compatibilityCatalog: compatibilityCatalog,
-            compatibilitySettings: compatibilitySettings
-        )
         self.compatibilityCatalog = compatibilityCatalog
         self.compatibilitySettings = compatibilitySettings
         self.privacyStore = privacyStore
         self.personalizationRecorder = personalizationRecorder
 
-        self.diagnosticsServices = DiagnosticsServices(
-            productivityMetrics: productivityMetrics,
-            suggestionDebugLogger: suggestionDebugLogger,
-            debugOptionsProvider: debugOptionsProvider
-        )
         self.productivityMetrics = productivityMetrics
         self.suggestionDebugLogger = suggestionDebugLogger
+        self.completionTraceRecorder = completionTraceRecorder
+        self.streamingConfiguration = streamingConfiguration
         self.debugOptionsProvider = debugOptionsProvider
 
         self.presenter = presenter
         self.inputController = inputController
         self.isMultiSuggestionEnabled = multiSuggestionEnabled
-        self.eligibilityEvaluator = eligibilityEvaluator
+        self.eligibilityCoordinator = SuggestionEligibilityCoordinator(evaluator: eligibilityEvaluator)
         self.inputMethodStateProvider = inputMethodStateProvider
         self.publicationController = publicationController ?? SuggestionPublicationController(presenter: presenter)
         self.acceptanceSessionController = acceptanceSessionController
         self.acceptanceController = SuggestionAcceptanceController(sessionController: acceptanceSessionController)
         self.shortcutLeakRepairInserter = shortcutLeakRepairInserter
         self.hostPublishAwaiter = hostPublishAwaiter
+        self.schedulingPolicy = schedulingPolicy
+        self.reuseStore = reuseStore
+        self.postAcceptanceSpeculationPolicy = postAcceptanceSpeculationPolicy
     }
 
     func start() {
@@ -284,6 +323,7 @@ final class SuggestionEngine: ObservableObject {
             // Guardrail: suggestions must not survive a focused element change.
             // Hide immediately so there is no window where an old suggestion could be accepted.
             self?.guardrailLogger.info("guardrail event=focus-changed action=hide")
+            self?.closePostAcceptanceCommandWindow(reason: .focusChanged)
             self?.hideSuggestion(reason: "focus-changed", context: self?.currentContext)
             self?.requestRefresh(source: .focusChanged)
             self?.lifecycleController.beginAdaptiveFallbackBurst()
@@ -310,11 +350,14 @@ final class SuggestionEngine: ObservableObject {
         refreshTask?.cancel()
         refreshTask = nil
         refreshQueuedSource = nil
+        refreshQueuedSchedulingEvidence = nil
 
         postAcceptanceRefreshTask?.cancel()
         postAcceptanceRefreshTask = nil
+        closePostAcceptanceCommandWindow(reason: .teardown)
         acceptanceSessionController.clearAll()
         inputController.reset()
+        reuseStore.reset()
         presenter.hide()
     }
 
@@ -351,12 +394,16 @@ final class SuggestionEngine: ObservableObject {
             refreshTask?.cancel()
             refreshTask = nil
             refreshQueuedSource = nil
+            refreshQueuedTraceContext = nil
+            refreshQueuedSchedulingEvidence = nil
             postAcceptanceRefreshTask?.cancel()
             postAcceptanceRefreshTask = nil
+            closePostAcceptanceCommandWindow(reason: .teardown)
             dismissedContext = nil
             transientFocusFailureStartedAt = nil
             acceptanceSessionController.clearAll()
             inputController.reset()
+            reuseStore.reset()
             currentSuggestion = nil
             statusMessage = "AutoComp paused"
             clearVisualContextSession()
@@ -384,8 +431,10 @@ final class SuggestionEngine: ObservableObject {
         dismissedContext = nil
         predictionController.cancelAll()
         hostPublishAwaiter.cancelAll(reason: "autocomplete-toggle")
+        closePostAcceptanceCommandWindow(reason: .teardown)
         acceptanceSessionController.clearAll()
         inputController.reset()
+        reuseStore.reset()
         currentSuggestion = nil
         if enabled {
             statusMessage = "AutoComp enabled"
@@ -403,6 +452,7 @@ final class SuggestionEngine: ObservableObject {
 
     func updateMultiSuggestionEnabled(_ enabled: Bool) {
         isMultiSuggestionEnabled = enabled
+        reuseStore.reset()
         if !enabled, currentSuggestion?.hasMultipleAlternatives == true {
             hideSuggestion(reason: "multi-suggestion-disabled", context: currentContext)
         }
@@ -416,6 +466,15 @@ final class SuggestionEngine: ObservableObject {
         for command: KeyboardShortcutCommand,
         isSuggestionVisible: Bool
     ) -> ShortcutOwnershipDecision {
+        if postAcceptanceCommandBuffer.shouldIntercept() {
+            if inputMethodStateProvider().isComposingText {
+                closePostAcceptanceCommandWindow(reason: .incompatibleInput)
+                return .passThrough(reason: "ime-composition-active")
+            }
+            if command != .acceptNextWord {
+                closePostAcceptanceCommandWindow(reason: .incompatibleInput)
+            }
+        }
         if isInteractionPipelineSuspended {
             return .passThrough(reason: "pipeline-suspended")
         }
@@ -455,6 +514,13 @@ final class SuggestionEngine: ObservableObject {
         action: AcceptanceCommandAction,
         isSuggestionVisible: Bool
     ) -> ShortcutOwnershipDecision {
+        if action == .nextWord,
+           postAcceptanceCommandBuffer.shouldIntercept() {
+            return .consume(reason: postAcceptanceCommandBuffer.hasQueuedCommand
+                ? "post-acceptance-command-already-buffered"
+                : "post-acceptance-command-window")
+        }
+
         guard isSuggestionVisible else {
             return .passThrough(reason: "no-visible-suggestion")
         }
@@ -525,7 +591,18 @@ final class SuggestionEngine: ObservableObject {
             return
         }
 
+        if event != .tab, postAcceptanceCommandBuffer.shouldIntercept() {
+            closePostAcceptanceCommandWindow(reason: .incompatibleInput)
+        }
+
         let inputMethodState = inputMethodStateProvider()
+        if event.eventKind == .textMutation {
+            let now = Date()
+            if let lastTextMutationAt {
+                recentTypingIntervalMs = max(0, Int(now.timeIntervalSince(lastTextMutationAt) * 1_000))
+            }
+            lastTextMutationAt = now
+        }
         keystrokeBufferFallback?.record(
             event: event,
             currentContext: currentContext,
@@ -556,11 +633,33 @@ final class SuggestionEngine: ObservableObject {
             return
         }
 
+        // latest-request-wins starts at input observation, not after AX catches
+        // up. This closes the window where an older debounce/provider could
+        // fire while the newest key is still waiting for host publication.
+        predictionController.cancelAll()
+        hostPublishAwaiter.cancelAll(reason: "new-input-\(event.eventKind.rawValue)")
+
+        if inputMethodState.isComposingText {
+            statusMessage = "IME composition active"
+            hideSuggestion(reason: "ime-composition-active", context: currentContext)
+            GeometryDebug.log("input-event scheduling-suppressed reason=ime-composition-active")
+            return
+        }
+
+        let traceContext = startCompletionTrace()
+        recordTrace(
+            traceContext,
+            event: .inputObserved,
+            reason: .automatic,
+            outcome: .started
+        )
+
         Task { @MainActor [weak self] in
             await self?.awaitHostPublishThenRefresh(
                 source: .inputEvent(event),
                 baseline: hostPublishBaseline,
-                refreshOnTimeout: action.shouldSchedulePrediction
+                refreshOnTimeout: action.shouldSchedulePrediction || event.isDeletionMutation,
+                traceContext: traceContext
             )
         }
     }
@@ -570,6 +669,7 @@ final class SuggestionEngine: ObservableObject {
         statusMessage = "Suggestion dismissed"
         predictionController.cancelAll()
         hostPublishAwaiter.cancelAll(reason: "manual-dismiss")
+        reuseStore.reset()
         hideSuggestion(reason: "manual-dismiss", context: currentContext)
     }
 
@@ -643,6 +743,15 @@ final class SuggestionEngine: ObservableObject {
         inputMethodState: InputMethodState,
         latencySeed: CompletionLatencySeed? = nil
     ) {
+        let traceContext = startCompletionTrace()
+        recordTrace(traceContext, event: .inputObserved, reason: .manual, outcome: .started)
+        recordTrace(
+            traceContext,
+            event: .contextCaptured,
+            outcome: .ready,
+            prefixUTF16Length: (context.textBeforeCursor as NSString).length,
+            suffixUTF16Length: context.textAfterCursor.map { ($0 as NSString).length } ?? 0
+        )
         recordFocusDiagnostics(context)
         let decision = eligibilityDecision(
             for: context,
@@ -657,8 +766,14 @@ final class SuggestionEngine: ObservableObject {
             "decision=\(debugEligibilityDecision(decision))",
             "context=\(SuggestionPipelineLog.contextDescription(context))"
         ])
+        recordTrace(
+            traceContext,
+            event: .eligibilityDecided,
+            outcome: decision.isEligible ? .allowed : .blocked
+        )
         guard decision.isEligible else {
             applyIneligibleDecision(decision, context: context)
+            finishTrace(traceContext, reason: .unknown, outcome: .discarded)
             return
         }
 
@@ -669,7 +784,12 @@ final class SuggestionEngine: ObservableObject {
         acceptanceSessionController.clearAll()
         currentSuggestion = nil
         presenter.hide()
-        requestCompletion(for: context, invocation: .manual, latencySeed: latencySeed)
+        requestCompletion(
+            for: context,
+            invocation: .manual,
+            latencySeed: latencySeed,
+            traceContext: traceContext
+        )
     }
 
     func updateCompletionProvider(
@@ -700,6 +820,7 @@ final class SuggestionEngine: ObservableObject {
         providerLifecycleGeneration += 1
         predictionController.cancelAll()
         hostPublishAwaiter.cancelAll(reason: reason.rawValue)
+        closePostAcceptanceCommandWindow(reason: .teardown)
         diagnostics.recordStaleDiscard(reason: reason.rawValue)
         hideSuggestion(reason: reason.rawValue, context: previousContext)
         resetCachedGenerationContext()
@@ -720,6 +841,7 @@ final class SuggestionEngine: ObservableObject {
         postAcceptanceRefreshTask = nil
         hostPublishAwaiter.cancelAll(reason: "reset-cached-generation-context")
         inputController.reset()
+        reuseStore.reset()
     }
 
     private func clearAcceptanceSession() {
@@ -763,10 +885,29 @@ final class SuggestionEngine: ObservableObject {
             return .passedThrough
         }
 
+        if currentSuggestion == nil,
+           postAcceptanceCommandBuffer.shouldIntercept() {
+            return await enqueuePostAcceptanceCommand(using: inserter)
+        }
+
         let action = AcceptanceCommandAction.nextWord
+        let traceContext = currentSuggestion?.traceContext
+        if let traceContext {
+            recordTrace(traceContext, event: .acceptanceAttempted, outcome: .started)
+        }
         guard let liveContext = await revalidatedAcceptanceContext(for: action) else {
+            if let traceContext {
+                recordTrace(
+                    traceContext,
+                    event: .acceptanceBlocked,
+                    reason: .acceptanceBlocked,
+                    outcome: .blocked
+                )
+                finishTrace(traceContext, reason: .acceptanceBlocked, outcome: .discarded)
+            }
             return .passedThrough
         }
+        let acceptingStreamedPartial = streamedSuggestionCoordinator.freezeForEarlyAcceptance(currentSuggestion)
 
         do {
             let insertionStartedAt = ContinuousClock.now
@@ -775,10 +916,26 @@ final class SuggestionEngine: ObservableObject {
                 currentContext: liveContext,
                 using: inserter
             ) else {
+                if acceptingStreamedPartial { streamedSuggestionCoordinator.resumeAfterFailedAcceptance() }
                 GeometryDebug.log("acceptance passed-through action=\(action.debugName) reason=no-token context=\(debugContext(liveContext)) current=\(debugSuggestionState())")
                 return .passedThrough
             }
             let insertionMs = elapsedMs(since: insertionStartedAt)
+            if let traceContext {
+                recordTrace(traceContext, event: .acceptanceAllowed, outcome: .allowed)
+                recordTrace(
+                    traceContext,
+                    event: .acceptanceInserted,
+                    outcome: .inserted,
+                    durationMs: insertionMs
+                )
+                if result.currentSuggestion?.isExhausted ?? true {
+                    recordTrace(traceContext, event: .sessionExhausted, reason: .exhausted, outcome: .exhausted)
+                    finishTrace(traceContext, reason: .completed, outcome: .finished)
+                } else {
+                    recordTrace(traceContext, event: .sessionAdvanced, outcome: .advanced)
+                }
+            }
             GeometryDebug.log("acceptance accepted action=\(action.debugName) acceptedLength=\((result.acceptedText as NSString).length) context=\(debugContext(liveContext)) current=\(debugSuggestionState(result.currentSuggestion))")
             SuggestionPipelineLog.log("acceptance-accepted", fields: [
                 "action=\(action.debugName)",
@@ -793,6 +950,19 @@ final class SuggestionEngine: ObservableObject {
                 GeometryDebug.log("completed-accept-all state=\(result.completedAcceptAllStateArmed ? "armed" : "nil") source=accept-next-word acceptedLength=\((result.acceptedText as NSString).length)")
             }
             currentSuggestion = result.currentSuggestion
+            if acceptingStreamedPartial {
+                retireStreamAfterEarlyAcceptance(traceContext: traceContext)
+                if var frozenSuggestion = currentSuggestion,
+                   let streaming = frozenSuggestion.streamingMetadata {
+                    frozenSuggestion.streamingMetadata = SuggestionStreamingMetadata(
+                        traceID: streaming.traceID,
+                        workID: streaming.workID,
+                        providerSequence: streaming.providerSequence,
+                        isFinal: true
+                    )
+                    currentSuggestion = frozenSuggestion
+                }
+            }
 
             if let context = currentContext, let currentSuggestion {
                 let presentationContext = result.presentationContext ?? context
@@ -804,9 +974,17 @@ final class SuggestionEngine: ObservableObject {
             } else {
                 presenter.hide()
             }
+            if result.currentSuggestion == nil {
+                startPostAcceptanceSpeculationIfEligible(
+                    context: liveContext,
+                    insertedText: result.acceptedText
+                )
+            }
             schedulePostAcceptanceRefresh(for: action, baseline: liveContext)
             return .accepted
         } catch {
+            if acceptingStreamedPartial { streamedSuggestionCoordinator.resumeAfterFailedAcceptance() }
+            closePostAcceptanceCommandWindow(reason: .insertionFailed)
             statusMessage = "Insertion failed"
             GeometryDebug.log("acceptance insert-failed action=\(action.debugName) error=\((error as? LocalizedError)?.errorDescription ?? error.localizedDescription) context=\(debugContext(liveContext)) current=\(debugSuggestionState())")
             SuggestionPipelineLog.log("acceptance-insert-failed", fields: [
@@ -828,9 +1006,23 @@ final class SuggestionEngine: ObservableObject {
         }
 
         let action = AcceptanceCommandAction.fullSuggestion
+        let traceContext = currentSuggestion?.traceContext
+        if let traceContext {
+            recordTrace(traceContext, event: .acceptanceAttempted, outcome: .started)
+        }
         guard let liveContext = await revalidatedAcceptanceContext(for: action) else {
+            if let traceContext {
+                recordTrace(
+                    traceContext,
+                    event: .acceptanceBlocked,
+                    reason: .acceptanceBlocked,
+                    outcome: .blocked
+                )
+                finishTrace(traceContext, reason: .acceptanceBlocked, outcome: .discarded)
+            }
             return .passedThrough
         }
+        let acceptingStreamedPartial = streamedSuggestionCoordinator.freezeForEarlyAcceptance(currentSuggestion)
 
         do {
             let insertionStartedAt = ContinuousClock.now
@@ -839,10 +1031,22 @@ final class SuggestionEngine: ObservableObject {
                 currentContext: liveContext,
                 using: inserter
             ) else {
+                if acceptingStreamedPartial { streamedSuggestionCoordinator.resumeAfterFailedAcceptance() }
                 GeometryDebug.log("acceptance passed-through action=\(action.debugName) reason=no-token context=\(debugContext(liveContext)) current=\(debugSuggestionState())")
                 return .passedThrough
             }
             let insertionMs = elapsedMs(since: insertionStartedAt)
+            if let traceContext {
+                recordTrace(traceContext, event: .acceptanceAllowed, outcome: .allowed)
+                recordTrace(
+                    traceContext,
+                    event: .acceptanceInserted,
+                    outcome: .inserted,
+                    durationMs: insertionMs
+                )
+                recordTrace(traceContext, event: .sessionExhausted, reason: .exhausted, outcome: .exhausted)
+                finishTrace(traceContext, reason: .completed, outcome: .finished)
+            }
             GeometryDebug.log("acceptance accepted action=\(action.debugName) acceptedLength=\((result.acceptedText as NSString).length) context=\(debugContext(liveContext)) current=\(debugSuggestionState(result.currentSuggestion))")
             SuggestionPipelineLog.log("acceptance-accepted", fields: [
                 "action=\(action.debugName)",
@@ -855,10 +1059,19 @@ final class SuggestionEngine: ObservableObject {
             recordInsertionLatency(insertionMs)
             GeometryDebug.log("completed-accept-all state=\(result.completedAcceptAllStateArmed ? "armed" : "nil") acceptedLength=\((result.acceptedText as NSString).length)")
             currentSuggestion = nil
+            if acceptingStreamedPartial {
+                retireStreamAfterEarlyAcceptance(traceContext: traceContext)
+            }
             presenter.hide()
+            startPostAcceptanceSpeculationIfEligible(
+                context: liveContext,
+                insertedText: result.acceptedText
+            )
             schedulePostAcceptanceRefresh(for: action, baseline: liveContext)
             return .accepted
         } catch {
+            if acceptingStreamedPartial { streamedSuggestionCoordinator.resumeAfterFailedAcceptance() }
+            closePostAcceptanceCommandWindow(reason: .insertionFailed)
             statusMessage = "Insertion failed"
             GeometryDebug.log("acceptance insert-failed action=\(action.debugName) error=\((error as? LocalizedError)?.errorDescription ?? error.localizedDescription) context=\(debugContext(liveContext)) current=\(debugSuggestionState())")
             SuggestionPipelineLog.log("acceptance-insert-failed", fields: [
@@ -869,6 +1082,19 @@ final class SuggestionEngine: ObservableObject {
             ])
             return .failed
         }
+    }
+
+    private func retireStreamAfterEarlyAcceptance(traceContext: CompletionTraceContext?) {
+        streamedSuggestionCoordinator.retireAfterEarlyAcceptance()
+        predictionController.cancelAll()
+        guard let traceContext else { return }
+        recordTrace(
+            traceContext,
+            event: .streamEarlyAccepted,
+            reason: .completed,
+            outcome: .inserted,
+            earlyAcceptance: true
+        )
     }
 
     private func revalidatedAcceptanceContext(for action: AcceptanceCommandAction) async -> TextContext? {
@@ -1071,6 +1297,146 @@ final class SuggestionEngine: ObservableObject {
         }
     }
 
+    private func startPostAcceptanceSpeculationIfEligible(
+        context: TextContext,
+        insertedText: String
+    ) {
+        let route = routingPolicy()?.activeKind ?? .remote
+        let decision = postAcceptanceSpeculationPolicy.decision(
+            context: context,
+            insertedText: insertedText,
+            route: route,
+            inputMethodState: inputMethodStateProvider()
+        )
+        guard case .start(let speculative) = decision else {
+            if case .ineligible(let reason) = decision {
+                SuggestionPipelineLog.log("post-acceptance-speculation-skipped", fields: [
+                    "reason=\(reason.rawValue)",
+                    "route=\(route.rawValue)"
+                ])
+            }
+            return
+        }
+
+        let generation = postAcceptanceCommandBuffer.arm(
+            duration: postAcceptanceSpeculationPolicy.configuration.commandWindow
+        )
+        postAcceptanceCommandTimeoutTask?.cancel()
+        postAcceptanceCommandTimeoutTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let nanoseconds = UInt64(
+                postAcceptanceSpeculationPolicy.configuration.commandWindow * 1_000_000_000
+            )
+            try? await Task.sleep(nanoseconds: nanoseconds)
+            guard !Task.isCancelled,
+                  postAcceptanceCommandBuffer.expire(generation: generation) else {
+                return
+            }
+            releasePendingPostAcceptanceCommand(outcome: .passedThrough, event: "expired")
+        }
+        SuggestionPipelineLog.log("post-acceptance-speculation-started", fields: [
+            "route=\(route.rawValue)",
+            "generation=\(generation)",
+            "commandWindowMs=\(Int(postAcceptanceSpeculationPolicy.configuration.commandWindow * 1_000))"
+        ])
+        requestCompletion(
+            for: speculative.context,
+            invocation: .automatic,
+            speculation: speculative
+        )
+    }
+
+    private func enqueuePostAcceptanceCommand(
+        using inserter: TextInserter
+    ) async -> SuggestionAcceptanceCommandOutcome {
+        switch postAcceptanceCommandBuffer.enqueue() {
+        case .inactive:
+            return .passedThrough
+        case .alreadyQueued(let generation):
+            SuggestionPipelineLog.log("post-acceptance-command", fields: [
+                "action=additional-command-suppressed",
+                "generation=\(generation)"
+            ])
+            return .accepted
+        case .queued(let generation):
+            SuggestionPipelineLog.log("post-acceptance-command", fields: [
+                "action=queued",
+                "generation=\(generation)"
+            ])
+            return await withCheckedContinuation { continuation in
+                pendingPostAcceptanceCommand = PendingPostAcceptanceCommand(
+                    generation: generation,
+                    inserter: inserter,
+                    continuation: continuation
+                )
+            }
+        }
+    }
+
+    private func consumePendingPostAcceptanceCommandIfNeeded() {
+        guard let pending = pendingPostAcceptanceCommand,
+              postAcceptanceCommandBuffer.consume() == pending.generation else {
+            if postAcceptanceCommandBuffer.shouldIntercept(), !postAcceptanceCommandBuffer.hasQueuedCommand {
+                postAcceptanceCommandBuffer.close(.consumed)
+                postAcceptanceCommandTimeoutTask?.cancel()
+                postAcceptanceCommandTimeoutTask = nil
+            }
+            return
+        }
+        pendingPostAcceptanceCommand = nil
+        postAcceptanceCommandTimeoutTask?.cancel()
+        postAcceptanceCommandTimeoutTask = nil
+        SuggestionPipelineLog.log("post-acceptance-command", fields: [
+            "action=consuming",
+            "generation=\(pending.generation)"
+        ])
+        Task { @MainActor [weak self] in
+            guard let self else {
+                pending.continuation.resume(returning: .passedThrough)
+                return
+            }
+            let outcome = await acceptNextWord(using: pending.inserter)
+            pending.continuation.resume(returning: outcome == .failed ? .passedThrough : outcome)
+        }
+    }
+
+    private func closePostAcceptanceCommandWindow(
+        reason: PostAcceptanceCommandBuffer.CloseReason
+    ) {
+        switch reason {
+        case .expired, .consumed:
+            break
+        case .incompatibleInput, .focusChanged, .insertionFailed, .teardown:
+            predictionController.cancelAll()
+        }
+        let hadPendingCommand = pendingPostAcceptanceCommand != nil
+        postAcceptanceCommandBuffer.close(reason)
+        postAcceptanceCommandTimeoutTask?.cancel()
+        postAcceptanceCommandTimeoutTask = nil
+        if hadPendingCommand {
+            releasePendingPostAcceptanceCommand(outcome: .passedThrough, event: reason.rawValue)
+        }
+        SuggestionPipelineLog.log("post-acceptance-command-window", fields: [
+            "action=closed",
+            "reason=\(reason.rawValue)",
+            "hadPending=\(hadPendingCommand)"
+        ])
+    }
+
+    private func releasePendingPostAcceptanceCommand(
+        outcome: SuggestionAcceptanceCommandOutcome,
+        event: String
+    ) {
+        guard let pending = pendingPostAcceptanceCommand else { return }
+        pendingPostAcceptanceCommand = nil
+        SuggestionPipelineLog.log("post-acceptance-command", fields: [
+            "action=released",
+            "reason=\(event)",
+            "generation=\(pending.generation)"
+        ])
+        pending.continuation.resume(returning: outcome)
+    }
+
     private func schedulePostAcceptanceRefresh(
         for action: AcceptanceCommandAction,
         baseline: TextContext
@@ -1090,7 +1456,7 @@ final class SuggestionEngine: ObservableObject {
     private func shouldAwaitHostPublish(for action: SuggestionInputAction) -> Bool {
         switch action.event.eventKind {
         case .textMutation:
-            return action.shouldSchedulePrediction
+            return action.shouldSchedulePrediction || action.event.isDeletionMutation
         case .shortcutMutation:
             return action.event.mayPublishHostText
         case .acceptance, .fullAcceptance, .manualTrigger, .dismissal, .navigation, .other:
@@ -1147,7 +1513,8 @@ final class SuggestionEngine: ObservableObject {
     private func awaitHostPublishThenRefresh(
         source: SuggestionRefreshSource,
         baseline: TextContext?,
-        refreshOnTimeout: Bool
+        refreshOnTimeout: Bool,
+        traceContext: CompletionTraceContext? = nil
     ) async {
         guard isAutocompleteEnabled, !isInteractionPipelineSuspended else {
             if isInteractionPipelineSuspended {
@@ -1156,6 +1523,9 @@ final class SuggestionEngine: ObservableObject {
             return
         }
 
+        if let traceContext {
+            recordTrace(traceContext, event: .hostPublishStarted, outcome: .started)
+        }
         let result = await hostPublishAwaiter.awaitPublication(
             after: baseline,
             provider: focusProvider,
@@ -1164,23 +1534,85 @@ final class SuggestionEngine: ObservableObject {
 
         switch result.outcome {
         case .ready:
-            GeometryDebug.log("host-publish ready source=\(source.debugName) elapsedMs=\(result.elapsedMs)")
-            requestRefresh(source: source)
+            if let traceContext {
+                recordTrace(
+                    traceContext,
+                    event: .hostPublishReady,
+                    outcome: .ready,
+                    durationMs: result.elapsedMs,
+                    hostPublishOutcome: .published,
+                    hostPublishMs: result.elapsedMs,
+                    hostPublishPollCount: result.pollCount
+                )
+            }
+            GeometryDebug.log("host-publish ready source=\(source.debugName) elapsedMs=\(result.elapsedMs) polls=\(result.pollCount)")
+            requestRefresh(
+                source: source,
+                traceContext: traceContext,
+                schedulingEvidence: SuggestionRefreshSchedulingEvidence(
+                    hostPublishOutcome: .published,
+                    hostPublishElapsedMs: result.elapsedMs,
+                    hostPublishPollCount: result.pollCount
+                )
+            )
         case .timeout:
+            if let traceContext {
+                recordTrace(
+                    traceContext,
+                    event: .hostPublishTimeout,
+                    reason: .timeout,
+                    outcome: .discarded,
+                    durationMs: result.elapsedMs,
+                    hostPublishOutcome: .timeout,
+                    hostPublishMs: result.elapsedMs,
+                    hostPublishPollCount: result.pollCount
+                )
+            }
             GeometryDebug.log("host-publish timeout source=\(source.debugName) elapsedMs=\(result.elapsedMs) refresh=\(refreshOnTimeout)")
             if refreshOnTimeout {
-                requestRefresh(source: source)
+                requestRefresh(
+                    source: source,
+                    traceContext: traceContext,
+                    schedulingEvidence: SuggestionRefreshSchedulingEvidence(
+                        hostPublishOutcome: .timeout,
+                        hostPublishElapsedMs: result.elapsedMs,
+                        hostPublishPollCount: result.pollCount
+                    )
+                )
+            } else if let traceContext {
+                finishTrace(traceContext, reason: .timeout, outcome: .discarded)
             }
         case .cancelled:
+            if let traceContext {
+                recordTrace(
+                    traceContext,
+                    event: .hostPublishCancelled,
+                    reason: .taskCancelled,
+                    outcome: .cancelled,
+                    durationMs: result.elapsedMs,
+                    hostPublishOutcome: .cancelled,
+                    hostPublishMs: result.elapsedMs,
+                    hostPublishPollCount: result.pollCount
+                )
+                finishTrace(traceContext, reason: .taskCancelled, outcome: .cancelled)
+            }
             GeometryDebug.log("host-publish cancelled source=\(source.debugName) elapsedMs=\(result.elapsedMs)")
         }
     }
 
-    private func requestRefresh(source: SuggestionRefreshSource) {
+    private func requestRefresh(
+        source: SuggestionRefreshSource,
+        traceContext suppliedTraceContext: CompletionTraceContext? = nil,
+        schedulingEvidence: SuggestionRefreshSchedulingEvidence = .notAwaited
+    ) {
         guard !isInteractionPipelineSuspended else {
             RefreshDiagnostics.log("refresh-request skipped reason=pipeline-suspended source=\(source.debugName)")
+            if let suppliedTraceContext {
+                finishTrace(suppliedTraceContext, reason: .pipelineSuspended, outcome: .discarded)
+            }
             return
         }
+        let traceContext = suppliedTraceContext ?? startCompletionTrace()
 
         let queuedDebugName = refreshQueuedSource?.debugName ?? "nil"
         RefreshDiagnostics.log("refresh-request source=\(source.debugName) inFlight=\(refreshTask != nil) queued=\(queuedDebugName)")
@@ -1192,8 +1624,20 @@ final class SuggestionEngine: ObservableObject {
 
         // Single-flight: if a refresh is already running, remember we need another pass.
         if refreshTask != nil {
+            if let queued = refreshQueuedSource,
+               queued.coalescingPriority > source.coalescingPriority {
+                RefreshDiagnostics.log("refresh-queue dropped source=\(source.debugName) reason=lower-priority queued=\(queued.debugName)")
+                finishTrace(traceContext, reason: .superseded, outcome: .cancelled)
+                return
+            }
             // Coalesce: keep the most recent trigger as the queued source for diagnostics.
+            if let queuedTraceContext = refreshQueuedTraceContext,
+               queuedTraceContext.traceID != traceContext.traceID {
+                finishTrace(queuedTraceContext, reason: .superseded, outcome: .cancelled)
+            }
             refreshQueuedSource = source
+            refreshQueuedTraceContext = traceContext
+            refreshQueuedSchedulingEvidence = schedulingEvidence
             RefreshDiagnostics.log("refresh-queue source=\(source.debugName) running=true")
             SuggestionPipelineLog.log("refresh-queued", fields: [
                 "source=\(source.debugName)"
@@ -1206,26 +1650,46 @@ final class SuggestionEngine: ObservableObject {
                 return
             }
 
-            await self.performRefreshSingleFlight(initialSource: source)
+            await self.performRefreshSingleFlight(
+                initialSource: source,
+                initialTraceContext: traceContext,
+                initialSchedulingEvidence: schedulingEvidence
+            )
         }
     }
 
-    private func performRefreshSingleFlight(initialSource: SuggestionRefreshSource) async {
+    private func performRefreshSingleFlight(
+        initialSource: SuggestionRefreshSource,
+        initialTraceContext: CompletionTraceContext?,
+        initialSchedulingEvidence: SuggestionRefreshSchedulingEvidence
+    ) async {
         var sourceToRun = initialSource
+        var traceContextToRun = initialTraceContext
+        var schedulingEvidenceToRun = initialSchedulingEvidence
 
         while true {
             guard !isInteractionPipelineSuspended else {
                 refreshTask = nil
                 refreshQueuedSource = nil
+                refreshQueuedTraceContext = nil
+                refreshQueuedSchedulingEvidence = nil
                 RefreshDiagnostics.log("refresh-single-flight stopped reason=pipeline-suspended source=\(sourceToRun.debugName)")
                 return
             }
 
-            await refresh(source: sourceToRun)
+            await refresh(
+                source: sourceToRun,
+                traceContext: traceContextToRun,
+                schedulingEvidence: schedulingEvidenceToRun
+            )
 
             if let queued = refreshQueuedSource {
                 refreshQueuedSource = nil
                 sourceToRun = queued
+                traceContextToRun = refreshQueuedTraceContext
+                refreshQueuedTraceContext = nil
+                schedulingEvidenceToRun = refreshQueuedSchedulingEvidence ?? .notAwaited
+                refreshQueuedSchedulingEvidence = nil
                 RefreshDiagnostics.log("refresh-dequeue source=\(queued.debugName) followup=true")
                 SuggestionPipelineLog.log("refresh-dequeued", fields: [
                     "source=\(queued.debugName)"
@@ -1238,7 +1702,11 @@ final class SuggestionEngine: ObservableObject {
         }
     }
 
-    private func refresh(source: SuggestionRefreshSource) async {
+    private func refresh(
+        source: SuggestionRefreshSource,
+        traceContext suppliedTraceContext: CompletionTraceContext? = nil,
+        schedulingEvidence: SuggestionRefreshSchedulingEvidence = .notAwaited
+    ) async {
         guard isAutocompleteEnabled, !isInteractionPipelineSuspended else {
             if isInteractionPipelineSuspended {
                 RefreshDiagnostics.log("refresh-skipped reason=pipeline-suspended source=\(source.debugName)")
@@ -1246,6 +1714,8 @@ final class SuggestionEngine: ObservableObject {
             return
         }
 
+        let traceContext = suppliedTraceContext ?? startCompletionTrace()
+        var traceHandedOff = false
         let refreshStartedAt = ContinuousClock.now
         defer {
             let elapsed = elapsedMs(since: refreshStartedAt)
@@ -1255,6 +1725,9 @@ final class SuggestionEngine: ObservableObject {
                 "elapsedMs=\(elapsed)",
                 "status=\(SuggestionPipelineLog.privacySafeTextSummary(statusMessage))"
             ])
+            if !traceHandedOff {
+                finishTrace(traceContext, reason: .unknown, outcome: .discarded)
+            }
         }
 
         backendStatusSummary = backendHealthMonitor.refresh()
@@ -1271,6 +1744,13 @@ final class SuggestionEngine: ObservableObject {
             transientFocusFailureStartedAt = nil
             recordTrustedContext(context)
             recordFocusDiagnostics(context)
+            recordTrace(
+                traceContext,
+                event: .contextCaptured,
+                outcome: .ready,
+                prefixUTF16Length: (context.textBeforeCursor as NSString).length,
+                suffixUTF16Length: context.textAfterCursor.map { ($0 as NSString).length } ?? 0
+            )
             GeometryDebug.log("refresh source=\(source.debugName) context=\(debugContext(context)) previous=\(debugContext(currentContext)) current=\(debugSuggestionState())")
             RefreshDiagnostics.log("refresh-start source=\(source.debugName) app=\(context.app.bundleID)")
             prepareVisualContextIfNeeded(for: context, source: source)
@@ -1402,6 +1882,16 @@ final class SuggestionEngine: ObservableObject {
                 break
             }
 
+            if publishReusableSuggestionIfAvailable(
+                context: context,
+                source: source,
+                traceContext: traceContext,
+                latencySeed: latencySeed
+            ) {
+                traceHandedOff = true
+                return
+            }
+
             let previousObservedContext = currentContext
             let eligibilityDecision = eligibilityDecision(
                 for: context,
@@ -1422,6 +1912,11 @@ final class SuggestionEngine: ObservableObject {
                 "previous=\(SuggestionPipelineLog.contextDescription(previousObservedContext))",
                 "current=\(SuggestionPipelineLog.suggestionDescription(currentSuggestion))"
             ])
+            recordTrace(
+                traceContext,
+                event: .eligibilityDecided,
+                outcome: eligibilityDecision.isEligible ? .allowed : .blocked
+            )
             let postEligibilityDecision = makeRefreshDecision(for: context, eligibilityDecision: eligibilityDecision)
             switch postEligibilityDecision {
             case .ineligible(let decision):
@@ -1445,12 +1940,14 @@ final class SuggestionEngine: ObservableObject {
             acceptanceSessionController.clearAll()
 
             if let emojiSuggestion = emojiService.suggestion(for: context.textBeforeCursor, contextID: context.id) {
+                traceHandedOff = true
                 GeometryDebug.log("completion-path source=emoji context=\(debugContext(context))")
                 publish(
                     emojiSuggestion,
                     context: context,
                     latencyReport: completionLatencyReport(from: latencySeed),
-                    latencyStartedAt: latencySeed.startedAt
+                    latencyStartedAt: latencySeed.startedAt,
+                    traceContext: traceContext
                 )
                 return
             }
@@ -1459,43 +1956,139 @@ final class SuggestionEngine: ObservableObject {
             // stop typing before requesting a new completion.
             hideSuggestion(reason: "eligible-new-context", context: context)
             inputController.clearSuggestionTrigger()
-            let debounceInterval = predictionController.debounceInterval
-            let debounceStartedAt = ContinuousClock.now
-            let debounceWorkID = predictionController.replaceDebouncedWork { [weak self, debounceInterval, latencySeed, debounceStartedAt] workID in
-                try? await Task.sleep(nanoseconds: UInt64(debounceInterval * 1_000_000_000))
-                guard !Task.isCancelled else { return }
+            let route = routingPolicy()?.activeKind ?? .remote
+            let schedulingDecision = schedulingPolicy.decision(.init(
+                route: route,
+                invocation: .automatic,
+                mutation: source.schedulingMutation,
+                recentBackendLatencyMs: backendLatencyHistory.robustLatencyMs(for: route),
+                hostPublishElapsedMs: schedulingEvidence.hostPublishElapsedMs,
+                hostPublishOutcome: schedulingEvidence.hostPublishOutcome,
+                recentTypingIntervalMs: recentTypingIntervalMs,
+                isComposingText: inputMethodState.isComposingText
+            ))
+            recordTrace(
+                traceContext,
+                event: .schedulingDecided,
+                reason: .automatic,
+                outcome: schedulingDecision.action == .suppress ? .blocked : .ready,
+                requestedBackend: route,
+                hostPublishOutcome: schedulingEvidence.hostPublishOutcome,
+                hostPublishMs: schedulingEvidence.hostPublishElapsedMs,
+                hostPublishPollCount: schedulingEvidence.hostPublishPollCount,
+                targetDebounceMs: schedulingDecision.targetDebounceMs,
+                remainingDebounceMs: schedulingDecision.remainingDebounceMs,
+                schedulingReason: schedulingDecision.reason,
+                recentBackendLatencyMs: schedulingDecision.recentBackendLatencyMs,
+                providerCallStarted: false
+            )
+            SuggestionPipelineLog.log("scheduling-decision", fields: [
+                "policyVersion=\(SuggestionSchedulingPolicy.currentPolicyVersion)",
+                "source=\(source.debugName)",
+                "route=\(route.rawValue)",
+                "hostPublishOutcome=\(schedulingEvidence.hostPublishOutcome.rawValue)",
+                "hostPublishMs=\(schedulingEvidence.hostPublishElapsedMs)",
+                "hostPublishPolls=\(schedulingEvidence.hostPublishPollCount)",
+                "targetDebounceMs=\(schedulingDecision.targetDebounceMs)",
+                "remainingDebounceMs=\(schedulingDecision.remainingDebounceMs)",
+                "recentBackendLatencyMs=\(schedulingDecision.recentBackendLatencyMs ?? -1)",
+                "reason=\(schedulingDecision.reason.rawValue)"
+            ])
+            guard schedulingDecision.action != .suppress else {
+                finishTrace(traceContext, reason: .unknown, outcome: .discarded)
+                return
+            }
+
+            if schedulingDecision.shouldGenerateImmediately {
+                var immediateLatencySeed = latencySeed
+                immediateLatencySeed.debounceMs = 0
+                traceHandedOff = true
+                requestCompletion(
+                    for: context,
+                    invocation: .automatic,
+                    latencySeed: immediateLatencySeed,
+                    traceContext: traceContext
+                )
+                return
+            }
+
+            let debounceMs = schedulingDecision.remainingDebounceMs
+            traceHandedOff = true
+            let debounceWorkID = predictionController.replaceScheduledWork(
+                decision: schedulingDecision
+            ) { [weak self, latencySeed, traceContext] workID, outcome in
                 guard let engine = self else { return }
                 await MainActor.run {
-                    guard engine.predictionController.isCurrent(workID) else {
-                        GeometryDebug.log("completion-debounce skipped reason=stale-work workID=\(workID) generation=\(workID) source=\(source.debugName) context=\(engine.debugContext(context))")
-                        SuggestionPipelineLog.log("completion-debounce-skipped", fields: [
-                            "reason=stale-work",
+                    switch outcome {
+                    case .cancelled(let elapsedMs):
+                        engine.recordTrace(
+                            traceContext,
+                            event: .debounceCancelled,
+                            reason: .taskCancelled,
+                            outcome: .cancelled,
+                            workID: workID,
+                            durationMs: elapsedMs,
+                            providerCallStarted: false
+                        )
+                        engine.finishTrace(traceContext, reason: .taskCancelled, outcome: .cancelled)
+                        return
+                    case .ready(let elapsedMs):
+                        guard engine.predictionController.isCurrent(workID) else {
+                            engine.recordTrace(
+                                traceContext,
+                                event: .debounceCancelled,
+                                reason: .superseded,
+                                outcome: .cancelled,
+                                workID: workID,
+                                durationMs: elapsedMs,
+                                providerCallStarted: false
+                            )
+                            engine.finishTrace(traceContext, reason: .superseded, outcome: .cancelled)
+                            GeometryDebug.log("completion-debounce skipped reason=stale-work workID=\(workID) generation=\(workID) source=\(source.debugName) context=\(engine.debugContext(context))")
+                            SuggestionPipelineLog.log("completion-debounce-skipped", fields: [
+                                "reason=stale-work",
+                                "workID=\(workID)",
+                                "source=\(source.debugName)",
+                                "context=\(SuggestionPipelineLog.contextDescription(context))"
+                            ])
+                            return
+                        }
+                        GeometryDebug.log("completion-debounce fired workID=\(workID) generation=\(workID) source=\(source.debugName) context=\(engine.debugContext(context))")
+                        engine.recordTrace(
+                            traceContext,
+                            event: .debounceElapsed,
+                            outcome: .ready,
+                            workID: workID,
+                            durationMs: elapsedMs
+                        )
+                        SuggestionPipelineLog.log("completion-debounce-fired", fields: [
                             "workID=\(workID)",
                             "source=\(source.debugName)",
                             "context=\(SuggestionPipelineLog.contextDescription(context))"
                         ])
-                        return
+                        var firedLatencySeed = latencySeed
+                        firedLatencySeed.debounceMs = elapsedMs
+                        engine.requestCompletion(
+                            for: context,
+                            invocation: .automatic,
+                            latencySeed: firedLatencySeed,
+                            traceContext: traceContext
+                        )
                     }
-                    GeometryDebug.log("completion-debounce fired workID=\(workID) generation=\(workID) source=\(source.debugName) context=\(engine.debugContext(context))")
-                    SuggestionPipelineLog.log("completion-debounce-fired", fields: [
-                        "workID=\(workID)",
-                        "source=\(source.debugName)",
-                        "context=\(SuggestionPipelineLog.contextDescription(context))"
-                    ])
-                    var firedLatencySeed = latencySeed
-                    firedLatencySeed.debounceMs = debounceStartedAt.duration(to: .now).milliseconds
-                    engine.requestCompletion(
-                        for: context,
-                        invocation: .automatic,
-                        latencySeed: firedLatencySeed
-                    )
                 }
             }
-            GeometryDebug.log("completion-debounce scheduled workID=\(debounceWorkID) generation=\(debounceWorkID) source=\(source.debugName) interval=\(debounceInterval) context=\(debugContext(context))")
+            recordTrace(
+                traceContext,
+                event: .debounceStarted,
+                outcome: .started,
+                workID: debounceWorkID,
+                durationMs: debounceMs
+            )
+            GeometryDebug.log("completion-debounce scheduled workID=\(debounceWorkID) generation=\(debounceWorkID) source=\(source.debugName) intervalMs=\(debounceMs) context=\(debugContext(context))")
             SuggestionPipelineLog.log("completion-debounce-scheduled", fields: [
                 "workID=\(debounceWorkID)",
                 "source=\(source.debugName)",
-                "intervalMs=\(Int(debounceInterval * 1000))",
+                "intervalMs=\(debounceMs)",
                 "context=\(SuggestionPipelineLog.contextDescription(context))"
             ])
         } catch {
@@ -1507,6 +2100,7 @@ final class SuggestionEngine: ObservableObject {
 
             currentContext = nil
             currentSuggestion = nil
+            reuseStore.reset()
             clearVisualContextOnFocusFailure(error)
             statusMessage = (error as? LocalizedError)?.errorDescription ?? "No compatible text field"
             GeometryDebug.log("refresh-error status=\(statusMessage)")
@@ -1588,6 +2182,8 @@ final class SuggestionEngine: ObservableObject {
         predictionController.cancelAll()
         currentSuggestion = nil
         acceptanceSessionController.clearAll()
+        reuseStore.reset()
+        closePostAcceptanceCommandWindow(reason: .focusChanged)
         presenter.hide()
         currentContext = context
         dismissedContext = nil
@@ -1640,7 +2236,10 @@ final class SuggestionEngine: ObservableObject {
             return false
         }
 
-        return domainRuleEligibilitySkipReason(for: context, invocation: .automatic) != .domainDenied
+        return eligibilityCoordinator.allowsVisualContextPreparation(
+            for: context,
+            userRuleset: privacyStore.load().domainWebAppRules.ruleset
+        )
     }
 
     private func clearVisualContextOnFocusFailure(_ error: Error) {
@@ -1675,47 +2274,20 @@ final class SuggestionEngine: ObservableObject {
             userModeOverrides: compatibilitySettings.loadModeOverrides()
         )
         diagnostics.recordCompatibility(compatibilityDecision)
-
-        // Domain / web-app rules are enforced here for browser contexts.
-        if let skipReason = domainRuleEligibilitySkipReason(for: context, invocation: invocation) {
-            diagnostics.recordDomainRuleDecision(skipReason, domainResolution: domainResolution(for: context))
-            return SuggestionEligibilityDecision(
-                outcome: .ineligible(skipReason),
-                statusMessage: nil,
-                logs: []
-            )
-        }
-
-        // Enforce visual-context-required rule behavior:
-        // if a domain requires visual context, do not activate autocomplete unless the
-        // visual context pipeline is currently available and enabled.
-        if invocation != .manual,
-           domainRuleEligibilitySkipReason(for: context, invocation: invocation) == nil,
-           domainRuleRequiresVisualContext(for: context),
-           !visualContextEligibilitySatisfied(for: context) {
-            diagnostics.recordDomainRuleDecision(.domainNeedsVisualContext, domainResolution: domainResolution(for: context))
-            return SuggestionEligibilityDecision(
-                outcome: .ineligible(.domainNeedsVisualContext),
-                statusMessage: "Visual context required",
-                logs: []
-            )
-        }
-
-        return eligibilityEvaluator.evaluate(
+        let result = eligibilityCoordinator.evaluate(
             context: context,
             previousContext: previousObservedContext,
             compatibilityDecision: compatibilityDecision,
-            lastSuggestionTriggerKeyAt: inputController.lastSuggestionTriggerKeyAt,
+            userRuleset: privacyStore.load().domainWebAppRules.ruleset,
             invocation: invocation,
-            inputMethodState: inputMethodState
+            inputMethodState: inputMethodState,
+            lastSuggestionTriggerKeyAt: inputController.lastSuggestionTriggerKeyAt,
+            visualContextIsReady: visualContextEligibilitySatisfied(for: context)
         )
-    }
-
-    private func domainRuleRequiresVisualContext(for context: TextContext) -> Bool {
-        if case .visualContextRequired = domainRuleResolution(for: context).effectiveAction {
-            return true
+        if let skipReason = result.domainRuleSkipReason {
+            diagnostics.recordDomainRuleDecision(skipReason, domainResolution: domainResolution(for: context))
         }
-        return false
+        return result.decision
     }
 
     private func visualContextEligibilitySatisfied(for context: TextContext) -> Bool {
@@ -1751,38 +2323,6 @@ final class SuggestionEngine: ObservableObject {
             return false
         }
         return visualIdentity.matchesStableTarget(contextIdentity)
-    }
-
-    private func domainRuleEligibilitySkipReason(
-        for context: TextContext,
-        invocation: SuggestionEligibilityInvocation
-    ) -> SuggestionEligibilitySkipReason? {
-        switch domainRuleResolution(for: context).effectiveAction {
-        case .allow, .visualContextRequired:
-            return nil
-        case .deny:
-            return .domainDenied
-        case .manualOnly:
-            return invocation == .manual ? nil : .domainManualOnly
-        }
-    }
-
-    private func domainRuleResolution(for context: TextContext) -> DomainRuleResolver.Resolution {
-        domainRuleResolver.resolve(
-            input: DomainRuleResolver.Input(
-                appBundleID: context.app.bundleID,
-                activeDomain: domainRuleActiveDomain(for: context)
-            ),
-            userRuleset: privacyStore.load().domainWebAppRules.ruleset,
-            fallbackRuleset: .autocompleteProductionDefaults
-        )
-    }
-
-    private func domainRuleActiveDomain(for context: TextContext) -> String? {
-        guard let domain = context.domain else {
-            return nil
-        }
-        return DomainNormalization.canonicalDomainString(from: domain)
     }
 
     private func applyIneligibleDecision(
@@ -1892,15 +2432,15 @@ final class SuggestionEngine: ObservableObject {
     }
 
     private func recordGeneratedSuggestion() {
-        (productivityMetrics as? CompletionTelemetryMetricsRecording)?.recordGeneratedSuggestion()
+        (productivityMetrics as? CompletionMetricsRecording)?.recordGeneratedSuggestion()
     }
 
     private func recordShownSuggestion() {
-        (productivityMetrics as? CompletionTelemetryMetricsRecording)?.recordShownSuggestion()
+        (productivityMetrics as? CompletionMetricsRecording)?.recordShownSuggestion()
     }
 
     private func recordSuppressedSuggestion(reason: String) {
-        (productivityMetrics as? CompletionTelemetryMetricsRecording)?.recordSuppressedSuggestion(reason: reason)
+        (productivityMetrics as? CompletionMetricsRecording)?.recordSuppressedSuggestion(reason: reason)
     }
 
     private func recordInsertionLatency(_ latencyMs: Int) {
@@ -1915,24 +2455,69 @@ final class SuggestionEngine: ObservableObject {
     private func requestCompletion(
         for context: TextContext,
         invocation: CompletionInvocation = .automatic,
-        latencySeed: CompletionLatencySeed? = nil
+        latencySeed: CompletionLatencySeed? = nil,
+        traceContext suppliedTraceContext: CompletionTraceContext? = nil,
+        speculation: SpeculativePostAcceptanceContext? = nil
     ) {
-        guard !isInteractionPipelineSuspended else {
+        let traceContext = suppliedTraceContext ?? startCompletionTrace()
+        if let speculation {
+            recordTrace(
+                traceContext,
+                event: .speculationStarted,
+                outcome: .started,
+                requestedBackend: speculation.route,
+                providerCallStarted: false
+            )
+        }
+        if suppliedTraceContext == nil || invocation == .manual {
+            let schedulingBackend = routingPolicy()?.activeKind ?? .remote
+            let schedulingDecision = schedulingPolicy.decision(.init(
+                route: schedulingBackend,
+                invocation: invocation == .manual ? .manual : .automatic,
+                mutation: .focusOrOther
+            ))
+            recordTrace(
+                traceContext,
+                event: .schedulingDecided,
+                reason: invocation == .manual ? .manual : .automatic,
+                outcome: .ready,
+                requestedBackend: schedulingBackend,
+                hostPublishOutcome: .notAwaited,
+                hostPublishMs: 0,
+                hostPublishPollCount: 0,
+                targetDebounceMs: schedulingDecision.targetDebounceMs,
+                remainingDebounceMs: schedulingDecision.remainingDebounceMs,
+                schedulingReason: schedulingDecision.reason,
+                recentBackendLatencyMs: schedulingDecision.recentBackendLatencyMs,
+                providerCallStarted: false
+            )
+        }
+        let preflightDecision = completionRequestCoordinator.preflight(
+            isPipelineSuspended: isInteractionPipelineSuspended,
+            isAutomatic: invocation == .automatic,
+            backendHealthMonitor: &backendHealthMonitor
+        )
+        if case .pipelineSuspended = preflightDecision {
             GeometryDebug.log("completion-suppressed reason=pipeline-suspended context=\(debugContext(context))")
             statusMessage = "AutoComp paused"
             recordSuppressedSuggestion(reason: "pipeline-suspended")
             hideSuggestion(reason: "pipeline-suspended", context: context)
+            finishTrace(traceContext, reason: .pipelineSuspended, outcome: .discarded)
             return
         }
 
-        backendStatusSummary = backendHealthMonitor.refresh()
+        switch preflightDecision {
+        case .proceed(let summary), .backendSuppressed(let summary):
+            backendStatusSummary = summary
+        case .pipelineSuspended:
+            break
+        }
         SuggestionPipelineLog.log("completion-request", fields: [
             "invocation=\(invocation.debugName)",
             "routing=\(SuggestionPipelineLog.routingDescription(routingPolicy()))",
             "context=\(SuggestionPipelineLog.contextDescription(context))"
         ])
-        if invocation == .automatic,
-           let suppression = backendHealthMonitor.suppressionSummary() {
+        if case .backendSuppressed(let suppression) = preflightDecision {
             inputController.clearSuggestionTrigger()
             currentContext = context
             predictionController.cancelAll()
@@ -1958,24 +2543,56 @@ final class SuggestionEngine: ObservableObject {
                 discardReason: "backend-paused"
             )
             hideSuggestion(reason: "backend-paused", context: context)
+            finishTrace(traceContext, reason: .backendPaused, outcome: .discarded)
             return
         }
 
         diagnostics.recordBackendRequest(policy: routingPolicy())
         let requestedSignature = contextGenerationTracker.signature(for: context)
         let providerGeneration = providerLifecycleGeneration
+        let requestedBackend = routingPolicy()?.activeKind ?? .remote
         let latencyStartedAt = latencySeed?.startedAt ?? ContinuousClock.now
         let initialLatencyReport = completionLatencyReport(from: latencySeed)
         predictionController.replaceGenerationWork { [weak self] workID in
+            guard let engine = self else { return }
+            await MainActor.run {
+                engine.recordTrace(
+                    traceContext,
+                    event: .requestBuilt,
+                    outcome: .ready,
+                    workID: workID,
+                    prefixUTF16Length: (context.textBeforeCursor as NSString).length,
+                    suffixUTF16Length: context.textAfterCursor.map { ($0 as NSString).length } ?? 0
+                )
+                engine.recordTrace(
+                    traceContext,
+                    event: .providerStarted,
+                    outcome: .started,
+                    workID: workID,
+                    providerAttempt: 0,
+                    requestedBackend: requestedBackend,
+                    providerCallStarted: true
+                )
+            }
             GeometryDebug.log("completion-request workID=\(workID) generation=\(workID) app=\(context.app.displayName) bundle=\(context.app.bundleID) context=\(context.geometryDebugDescription)")
             SuggestionPipelineLog.log("completion-start", fields: [
                 "workID=\(workID)",
                 "invocation=\(invocation.debugName)",
                 "context=\(SuggestionPipelineLog.contextDescription(context))"
             ])
-            guard let engine = self else { return }
             guard !Task.isCancelled else {
                 await MainActor.run {
+                    engine.recordTrace(
+                        traceContext,
+                        event: .providerCancelled,
+                        reason: .taskCancelled,
+                        outcome: .cancelled,
+                        workID: workID,
+                        providerAttempt: 0,
+                        requestedBackend: requestedBackend,
+                        providerCallStarted: false
+                    )
+                    engine.finishTrace(traceContext, reason: .taskCancelled, outcome: .cancelled)
                     SuggestionPipelineLog.log("completion-cancelled", fields: [
                         "workID=\(workID)",
                         "reason=task-cancelled-before-start",
@@ -2013,6 +2630,17 @@ final class SuggestionEngine: ObservableObject {
             }
             guard !Task.isCancelled else {
                 await MainActor.run {
+                    engine.recordTrace(
+                        traceContext,
+                        event: .providerCancelled,
+                        reason: .taskCancelled,
+                        outcome: .cancelled,
+                        workID: workID,
+                        providerAttempt: 0,
+                        requestedBackend: requestedBackend,
+                        providerCallStarted: false
+                    )
+                    engine.finishTrace(traceContext, reason: .taskCancelled, outcome: .cancelled)
                     SuggestionPipelineLog.log("completion-cancelled", fields: [
                         "workID=\(workID)",
                         "reason=task-cancelled-before-provider",
@@ -2078,11 +2706,13 @@ final class SuggestionEngine: ObservableObject {
                             outcome: "discarded",
                             discardReason: PostProviderCompletionCoordinator.DiscardReason.backendSwitchBeforeProvider.rawValue
                         )
+                        engine.finishTrace(traceContext, reason: .superseded, outcome: .cancelled)
                     }
                     return
                 case .discard(.missingLiveContextAfterVisual):
                     await MainActor.run {
                         guard engine.predictionController.isCurrent(workID) else {
+                            engine.finishTrace(traceContext, reason: .superseded, outcome: .cancelled)
                             return
                         }
                         GeometryDebug.log("completion-discarded reason=missing-live-context-after-visual requested=\(engine.debugContext(context))")
@@ -2101,12 +2731,14 @@ final class SuggestionEngine: ObservableObject {
                             outcome: "discarded",
                             discardReason: "missing-live-context-after-visual"
                         )
+                        engine.finishTrace(traceContext, reason: .staleContext, outcome: .discarded)
                         engine.hideSuggestion(reason: "missing-live-context-after-visual", context: context)
                     }
                     return
                 case .discard(.staleVisualContext):
                     await MainActor.run {
                         guard engine.predictionController.isCurrent(workID) else {
+                            engine.finishTrace(traceContext, reason: .superseded, outcome: .cancelled)
                             return
                         }
                         GeometryDebug.log("completion-discarded reason=stale-visual-context requested=\(engine.debugContext(context)) live=\(engine.debugContext(liveContextAfterVisual))")
@@ -2126,10 +2758,14 @@ final class SuggestionEngine: ObservableObject {
                             outcome: "discarded",
                             discardReason: "stale-visual-context"
                         )
+                        engine.finishTrace(traceContext, reason: .staleContext, outcome: .discarded)
                         engine.hideSuggestion(reason: "stale-visual-context", context: context)
                     }
                     return
                 case .discard:
+                    await MainActor.run {
+                        engine.finishTrace(traceContext, reason: .unknown, outcome: .discarded)
+                    }
                     return
                 }
             } else {
@@ -2151,6 +2787,7 @@ final class SuggestionEngine: ObservableObject {
                             outcome: "discarded",
                             discardReason: PostProviderCompletionCoordinator.DiscardReason.backendSwitchBeforeProvider.rawValue
                         )
+                        engine.finishTrace(traceContext, reason: .superseded, outcome: .cancelled)
                     }
                     return isCurrent
                 }
@@ -2186,11 +2823,12 @@ final class SuggestionEngine: ObservableObject {
                 ])
             }
 
-            let (isCurrentAfterVisual, provider, requestsMultipleSuggestions) = await MainActor.run {
+            let (isCurrentAfterVisual, provider, requestsMultipleSuggestions, streamingConfiguration) = await MainActor.run {
                 (
                     engine.predictionController.isCurrent(workID),
                     engine.generationProvider,
-                    engine.shouldRequestMultipleSuggestions(for: context, invocation: invocation)
+                    engine.shouldRequestMultipleSuggestions(for: context, invocation: invocation),
+                    engine.streamingConfiguration
                 )
             }
             pipelineContext.prepareProviderInvocation(
@@ -2209,21 +2847,46 @@ final class SuggestionEngine: ObservableObject {
                     "context=\(SuggestionPipelineLog.contextDescription(context))"
                 ])
             }
-            // Provider invocation is delegated to the pipeline runner, with cancellation/stale-work
-            // checks extracted into reusable steps.
-            let runner = SuggestionPipeline.Runner<Suggestion>(steps: [
-                SuggestionPipeline.StaleWorkStep<Suggestion>(isCurrent: { _ in
-                    isCurrentAfterVisual
-                }),
-                ProviderInvocationStep(
-                    provider: provider,
-                    timeout: nil
+            let streamingMetadata = StreamingCompletionMetadata(
+                traceContext: traceContext,
+                workID: workID,
+                requestedRoute: requestedBackend
+            )
+            let streamingEnabled = !requestsMultipleSuggestions
+                && streamingConfiguration.enables(
+                    (provider as? any StreamingCompletionProvider)?.streamingCompletionCapability
                 )
-            ])
-
-            let backendStartedAt = ContinuousClock.now
-            let pipelineOutcome = await runner.run(context: &pipelineContext)
-            latencyReport.backendMs = backendStartedAt.duration(to: .now).milliseconds
+            if streamingEnabled {
+                await MainActor.run {
+                    engine.streamedSuggestionCoordinator.begin(streamingMetadata)
+                }
+            }
+            let invocationResult = await engine.completionRequestCoordinator.invoke(
+                context: &pipelineContext,
+                provider: provider,
+                isCurrent: isCurrentAfterVisual,
+                streamingConfiguration: streamingConfiguration,
+                streamingMetadata: streamingMetadata,
+                onPartial: { [weak engine] partial in
+                    guard let engine else { return }
+                    let liveContext = try? await engine.focusProvider.currentContext()
+                    await MainActor.run {
+                        engine.handleStreamedPartial(
+                            partial,
+                            liveContext: liveContext,
+                            requestedSignature: requestedSignature,
+                            providerGeneration: providerGeneration
+                        )
+                    }
+                }
+            )
+            let pipelineOutcome = invocationResult.outcome
+            latencyReport.backendMs = invocationResult.backendLatencyMs
+            if case .publish = pipelineOutcome, let backendMs = latencyReport.backendMs {
+                await MainActor.run {
+                    engine.backendLatencyHistory.record(backendMs, for: requestedBackend)
+                }
+            }
             await MainActor.run {
                 SuggestionPipelineLog.log("provider-finished", fields: [
                     "workID=\(workID)",
@@ -2231,12 +2894,31 @@ final class SuggestionEngine: ObservableObject {
                     "backendMs=\(latencyReport.backendMs ?? -1)",
                     "context=\(SuggestionPipelineLog.contextDescription(context))"
                 ])
+                engine.recordProviderTraceOutcome(
+                    pipelineOutcome,
+                    traceContext: traceContext,
+                    workID: workID,
+                    durationMs: latencyReport.backendMs
+                )
             }
 
             let promptCacheStats = await engine.promptCacheStatsIfAvailable()
 
             switch pipelineOutcome {
             case .publish(let suggestion):
+                if await MainActor.run(body: {
+                    guard engine.streamedSuggestionCoordinator.didHandleFinal(suggestion.streamingMetadata) else {
+                        return false
+                    }
+                    if engine.predictionController.isCurrent(workID) {
+                        engine.recordGeneratedSuggestion()
+                        engine.backendStatusSummary = engine.backendHealthMonitor.recordSuccess()
+                        engine.diagnostics.recordPromptCache(promptCacheStats)
+                    }
+                    return true
+                }) {
+                    return
+                }
                 let completionLatencyReport = latencyReport
                 await MainActor.run {
                     if engine.predictionController.isCurrent(workID) {
@@ -2271,7 +2953,10 @@ final class SuggestionEngine: ObservableObject {
                         )
                     }
 
-                    let liveContextMatchesRequest = engine.contextGenerationTracker.matches(liveContext, signature: requestedSignature)
+                    let liveContextMatchesRequest = engine.contextGenerationTracker.matches(
+                        liveContext,
+                        signature: requestedSignature
+                    ) && (speculation?.signature.matches(liveContext) ?? true)
                     engine.recordTrustedContext(liveContext)
                     GeometryDebug.log("completion-live-context match=\(liveContextMatchesRequest) requested=\(engine.debugContext(context)) live=\(engine.debugContext(liveContext))")
                     SuggestionPipelineLog.log("completion-revalidation", fields: [
@@ -2295,6 +2980,33 @@ final class SuggestionEngine: ObservableObject {
                     liveContext: liveContext,
                     liveContextMatchesRequest: liveRevalidationInputs.liveContextMatchesRequest
                 )
+                await MainActor.run {
+                    engine.recordTrace(
+                        traceContext,
+                        event: .liveContextRevalidated,
+                        reason: liveRevalidationInputs.liveContextMatchesRequest ? nil : .staleContext,
+                        outcome: liveRevalidationInputs.liveContextMatchesRequest || isLowTrustRequest ? .allowed : .blocked,
+                        workID: workID
+                    )
+                    if speculation != nil {
+                        engine.recordTrace(
+                            traceContext,
+                            event: liveRevalidationInputs.liveContextMatchesRequest
+                                ? .speculationValidated
+                                : .speculationDiverged,
+                            reason: liveRevalidationInputs.liveContextMatchesRequest ? nil : .staleContext,
+                            outcome: liveRevalidationInputs.liveContextMatchesRequest ? .allowed : .discarded,
+                            workID: workID,
+                            requestedBackend: requestedBackend,
+                            providerCallStarted: true
+                        )
+                        SuggestionPipelineLog.log("post-acceptance-speculation-finished", fields: [
+                            "workID=\(workID)",
+                            "route=\(requestedBackend.rawValue)",
+                            "result=\(liveRevalidationInputs.liveContextMatchesRequest ? "validated" : "diverged")"
+                        ])
+                    }
+                }
 
                 switch liveRevalidationDecision {
                 case .publish(let publishContext, .skippedLowTrust):
@@ -2313,7 +3025,8 @@ final class SuggestionEngine: ObservableObject {
                             suggestion,
                             context: publishContext,
                             latencyReport: completionLatencyReport,
-                            latencyStartedAt: latencyStartedAt
+                            latencyStartedAt: latencyStartedAt,
+                            traceContext: traceContext
                         )
                         engine.recordAutocompleteDebugPublication(
                             result,
@@ -2337,7 +3050,8 @@ final class SuggestionEngine: ObservableObject {
                             suggestion,
                             context: publishContext,
                             latencyReport: completionLatencyReport,
-                            latencyStartedAt: latencyStartedAt
+                            latencyStartedAt: latencyStartedAt,
+                            traceContext: traceContext
                         )
                         engine.recordAutocompleteDebugPublication(
                             result,
@@ -2374,6 +3088,7 @@ final class SuggestionEngine: ObservableObject {
                             suggestions: [suggestion],
                             discardReason: "missing-live-context"
                         )
+                        engine.finishTrace(traceContext, reason: .staleContext, outcome: .discarded)
                         engine.hideSuggestion(reason: "missing-live-context", context: context)
                     }
 
@@ -2404,6 +3119,7 @@ final class SuggestionEngine: ObservableObject {
                             suggestions: [suggestion],
                             discardReason: "stale-work"
                         )
+                        engine.finishTrace(traceContext, reason: .staleWork, outcome: .discarded)
                     }
 
                 case .discard(.staleContext, _):
@@ -2430,10 +3146,13 @@ final class SuggestionEngine: ObservableObject {
                             suggestions: [suggestion],
                             discardReason: "stale-context"
                         )
+                        engine.finishTrace(traceContext, reason: .staleContext, outcome: .discarded)
                     }
 
                 case .discard:
-                    break
+                    await MainActor.run {
+                        engine.finishTrace(traceContext, reason: .unknown, outcome: .discarded)
+                    }
                 }
 
             case .discard(let reason):
@@ -2455,6 +3174,7 @@ final class SuggestionEngine: ObservableObject {
                         outcome: "discarded",
                         discardReason: reason.message ?? reason.kind.rawValue
                     )
+                    engine.finishTrace(traceContext, reason: .staleWork, outcome: .discarded)
                     engine.hideSuggestion(reason: reason.message ?? reason.kind.rawValue, context: context)
                 }
 
@@ -2506,6 +3226,7 @@ final class SuggestionEngine: ObservableObject {
                         outcome: "failed",
                         error: failureError
                     )
+                    engine.finishTrace(traceContext, reason: .providerFailure, outcome: .failed)
                     engine.hideSuggestion(reason: "completion-failed", context: context)
                 }
 
@@ -2694,13 +3415,320 @@ final class SuggestionEngine: ObservableObject {
         GoogleDocsContext.matches(bundleID: context.app.bundleID, domain: context.domain, appGate: .webLike)
     }
 
+    func resetInMemorySuggestionState(reason: String) {
+        reuseStore.reset()
+        SuggestionPipelineLog.log("reuse-reset", fields: ["reason=\(reason)"])
+    }
+
+    private func publishReusableSuggestionIfAvailable(
+        context: TextContext,
+        source: SuggestionRefreshSource,
+        traceContext: CompletionTraceContext,
+        latencySeed: CompletionLatencySeed
+    ) -> Bool {
+        let mutation = source.reuseMutation
+        guard mutation != .other else { return false }
+        let route = routingPolicy()?.activeKind ?? .remote
+        let decision = reuseStore.decision(for: context, backend: route, mutation: mutation)
+
+        let match: SuggestionReuseMatch
+        let event: CompletionTraceEventName
+        let action: String
+        switch decision {
+        case .promoteAppend(let value):
+            match = value
+            event = .reusePromoted
+            action = "promote-append"
+        case .restoreRollback(let value):
+            match = value
+            event = .reuseRollbackRestored
+            action = "restore-rollback"
+        case .mustRecompute(let reason):
+            recordTrace(
+                traceContext,
+                event: .reuseMiss,
+                reason: .reuseMiss,
+                outcome: .discarded,
+                requestedBackend: route,
+                providerCallStarted: false
+            )
+            SuggestionPipelineLog.log("reuse-miss", fields: [
+                "reason=\(reason.rawValue)",
+                "route=\(route.rawValue)"
+            ])
+            return false
+        case .notApplicable:
+            return false
+        }
+
+        currentContext = context
+        predictionController.cancelAll()
+        acceptanceSessionController.clearAll()
+        inputController.clearSuggestionTrigger()
+        let suggestion = Suggestion(
+            baseContextID: context.id,
+            visibleText: match.remainingText,
+            completionRoute: CompletionRoute(requestedKind: route, deliveredKind: route),
+            latencyMs: 0
+        )
+        recordTrace(
+            traceContext,
+            event: event,
+            outcome: .ready,
+            requestedBackend: route,
+            deliveredBackend: route,
+            candidateRank: match.sourceRank,
+            providerCallStarted: false,
+            reuseSnapshotAgeBucket: reuseAgeBucket(match.snapshotAgeMs),
+            remainingCharacterBucket: reuseCharacterBucket(match.remainingText.count)
+        )
+        SuggestionPipelineLog.log("reuse-hit", fields: [
+            "action=\(action)",
+            "route=\(route.rawValue)",
+            "sourceRank=\(match.sourceRank)",
+            "ageBucket=\(reuseAgeBucket(match.snapshotAgeMs))",
+            "remainingBucket=\(reuseCharacterBucket(match.remainingText.count))",
+            "providerSkipped=true"
+        ])
+        publish(
+            suggestion,
+            context: context,
+            latencyReport: completionLatencyReport(from: latencySeed),
+            latencyStartedAt: latencySeed.startedAt,
+            traceContext: traceContext,
+            recordForReuse: false,
+            providerCallOccurred: false
+        )
+        return true
+    }
+
+    private func recordReusableCandidates(from suggestion: Suggestion, context: TextContext) {
+        let route = suggestion.completionRoute?.deliveredKind ?? routingPolicy()?.activeKind ?? .remote
+        let candidates = suggestion.alternatives.enumerated().compactMap { rank, alternative -> SuggestionReusableCandidate? in
+            let candidate = Suggestion(
+                baseContextID: context.id,
+                visibleText: alternative.visibleText,
+                rawText: alternative.rawText,
+                completionRoute: suggestion.completionRoute,
+                latencyMs: suggestion.latencyMs
+            )
+            guard case .publish(let normalized) = SuggestionPublicationPolicy.evaluate(candidate, for: context),
+                  !normalized.visibleText.isEmpty else {
+                return nil
+            }
+            return SuggestionReusableCandidate(text: normalized.visibleText, originalRank: rank)
+        }
+        let evictionsBefore = reuseStore.evictionCount
+        reuseStore.record(SuggestionCandidateSnapshot(context: context, backend: route, candidates: candidates))
+        SuggestionPipelineLog.log("reuse-snapshot", fields: [
+            "route=\(route.rawValue)",
+            "candidateCount=\(candidates.count)",
+            "snapshotCount=\(reuseStore.snapshotCount)",
+            "evictions=\(reuseStore.evictionCount - evictionsBefore)"
+        ])
+    }
+
+    private func reuseAgeBucket(_ milliseconds: Int) -> Int {
+        switch milliseconds {
+        case ..<1_000: return 0
+        case ..<5_000: return 1
+        case ..<15_000: return 2
+        default: return 3
+        }
+    }
+
+    private func reuseCharacterBucket(_ count: Int) -> Int {
+        switch count {
+        case ...4: return 0
+        case ...12: return 1
+        case ...32: return 2
+        default: return 3
+        }
+    }
+
+    private func handleStreamedPartial(
+        _ partial: CompletionPartial,
+        liveContext: TextContext?,
+        requestedSignature: StrictGenerationSignature,
+        providerGeneration: Int
+    ) {
+        let traceContext = partial.metadata.traceContext
+        recordTrace(
+            traceContext,
+            event: partial.isFinal ? .streamFinalReceived : .streamPartialReceived,
+            outcome: .ready,
+            workID: partial.metadata.workID,
+            providerAttempt: partial.metadata.providerAttempt,
+            durationMs: partial.latencyMs,
+            requestedBackend: partial.metadata.requestedRoute,
+            deliveredBackend: partial.route.deliveredKind,
+            providerSequence: partial.providerSequence
+        )
+
+        guard predictionController.isCurrent(partial.metadata.workID),
+              providerLifecycleGeneration == providerGeneration,
+              let liveContext,
+              contextGenerationTracker.matches(liveContext, signature: requestedSignature) else {
+            streamedSuggestionCoordinator.recordRejectedBeforePolicy(partial)
+            recordTrace(
+                traceContext,
+                event: .streamPartialIgnored,
+                reason: liveContext == nil ? .staleTarget : .staleContext,
+                outcome: .discarded,
+                workID: partial.metadata.workID,
+                providerAttempt: partial.metadata.providerAttempt,
+                providerSequence: partial.providerSequence
+            )
+            if let streaming = currentSuggestion?.streamingMetadata,
+               streaming.traceID == traceContext.traceID,
+               streaming.workID == partial.metadata.workID {
+                currentSuggestion = nil
+                acceptanceSessionController.clearAll()
+                presenter.hide()
+            }
+            return
+        }
+
+        let coalescedBefore = streamedSuggestionCoordinator.metrics.partialsCoalesced
+        let decision = streamedSuggestionCoordinator.receive(
+            partial,
+            context: liveContext
+        ) { [weak self] partial, text, context in
+            self?.renderStreamedSuggestion(partial, text: text, context: context)
+        }
+        if streamedSuggestionCoordinator.metrics.partialsCoalesced > coalescedBefore {
+            recordTrace(
+                traceContext,
+                event: .streamPartialCoalesced,
+                outcome: .discarded,
+                workID: partial.metadata.workID,
+                providerAttempt: partial.metadata.providerAttempt,
+                providerSequence: partial.providerSequence,
+                partialCount: streamedSuggestionCoordinator.metrics.partialsCoalesced
+            )
+        }
+
+        switch decision {
+        case .render:
+            break
+        case .finalizeCurrent:
+            markCurrentStreamFinished(partial, context: liveContext)
+        case .keepCurrent:
+            markCurrentStreamFinished(partial, context: liveContext)
+            recordTrace(
+                traceContext,
+                event: .streamFinalSuppressed,
+                outcome: .rejected,
+                workID: partial.metadata.workID,
+                providerSequence: partial.providerSequence
+            )
+        case .hide:
+            recordTrace(
+                traceContext,
+                event: .streamFinalSuppressed,
+                outcome: .rejected,
+                workID: partial.metadata.workID,
+                providerSequence: partial.providerSequence
+            )
+            currentSuggestion = nil
+            acceptanceSessionController.clearAll()
+            presenter.hide()
+        case .ignore:
+            recordTrace(
+                traceContext,
+                event: .streamPartialIgnored,
+                outcome: .discarded,
+                workID: partial.metadata.workID,
+                providerAttempt: partial.metadata.providerAttempt,
+                providerSequence: partial.providerSequence
+            )
+        }
+    }
+
+    private func renderStreamedSuggestion(
+        _ partial: CompletionPartial,
+        text: String,
+        context: TextContext
+    ) {
+        guard predictionController.isCurrent(partial.metadata.workID) else { return }
+        let traceContext = partial.metadata.traceContext
+        let streamingMetadata = SuggestionStreamingMetadata(
+            traceID: traceContext.traceID,
+            workID: partial.metadata.workID,
+            providerSequence: partial.providerSequence,
+            isFinal: partial.isFinal
+        )
+        let updateExisting = currentSuggestion?.streamingMetadata.map {
+            $0.traceID == streamingMetadata.traceID && $0.workID == streamingMetadata.workID
+        } ?? false
+        let suggestion = Suggestion(
+            baseContextID: context.id,
+            visibleText: text,
+            traceContext: traceContext,
+            streamingMetadata: streamingMetadata,
+            rawText: partial.rawAccumulatedText,
+            completionRoute: partial.route,
+            latencyMs: partial.latencyMs
+        )
+        let result = publish(
+            suggestion,
+            context: context,
+            traceContext: traceContext,
+            recordForReuse: partial.isFinal,
+            providerCallOccurred: true,
+            streamingPartial: !partial.isFinal,
+            updateExisting: updateExisting
+        )
+        if let overlayMs = result.overlayMs {
+            streamedSuggestionCoordinator.recordOverlayCost(overlayMs)
+        }
+        let metrics = streamedSuggestionCoordinator.metrics
+        recordTrace(
+            traceContext,
+            event: .streamPartialRendered,
+            outcome: .published,
+            workID: partial.metadata.workID,
+            providerAttempt: partial.metadata.providerAttempt,
+            durationMs: result.overlayMs,
+            requestedBackend: partial.metadata.requestedRoute,
+            deliveredBackend: partial.route.deliveredKind,
+            providerSequence: partial.providerSequence,
+            partialCount: metrics.partialsRendered,
+            timeToFirstSafePartialMs: metrics.timeToFirstSafePartialMs,
+            timeToFinalMs: metrics.timeToFinalMs
+        )
+    }
+
+    private func markCurrentStreamFinished(_ partial: CompletionPartial, context: TextContext) {
+        guard var suggestion = currentSuggestion,
+              let streaming = suggestion.streamingMetadata,
+              streaming.traceID == partial.metadata.traceContext.traceID,
+              streaming.workID == partial.metadata.workID else { return }
+        suggestion.streamingMetadata = SuggestionStreamingMetadata(
+            traceID: streaming.traceID,
+            workID: streaming.workID,
+            providerSequence: partial.providerSequence,
+            isFinal: true
+        )
+        currentSuggestion = suggestion
+        acceptanceSessionController.recordPublication(context: context, suggestion: suggestion)
+    }
+
     @discardableResult
     private func publish(
         _ suggestion: Suggestion,
         context: TextContext,
         latencyReport: CompletionLatencyReport? = nil,
-        latencyStartedAt: ContinuousClock.Instant? = nil
+        latencyStartedAt: ContinuousClock.Instant? = nil,
+        traceContext suppliedTraceContext: CompletionTraceContext? = nil,
+        recordForReuse: Bool = true,
+        providerCallOccurred: Bool = true,
+        streamingPartial: Bool = false,
+        updateExisting: Bool = false
     ) -> SuggestionPublicationResult {
+        let traceContext = suppliedTraceContext ?? suggestion.traceContext ?? startCompletionTrace()
+        var tracedSuggestion = suggestion
+        tracedSuggestion.traceContext = traceContext
         let mode = displayMode(for: context)
         let privacy = privacyStore.load()
         let privacyDecision = privacy.collectionDecision(
@@ -2709,6 +3737,18 @@ final class SuggestionEngine: ObservableObject {
         )
         diagnostics.recordPrivacy(privacyDecision)
         let collectionAllowed = privacyDecision.allowed
+        recordTrace(
+            traceContext,
+            event: .privacyGateDecided,
+            outcome: collectionAllowed ? .allowed : .blocked
+        )
+        recordTrace(
+            traceContext,
+            event: .normalized,
+            outcome: .ready,
+            candidateCount: tracedSuggestion.alternatives.count,
+            candidateRank: tracedSuggestion.selectedAlternativeIndex
+        )
         GeometryDebug.log("suggestion-publication attempt context=\(debugContext(context)) mode=\(mode.rawValue) raw=\(debugSuggestionState(suggestion))")
         SuggestionPipelineLog.log("publication-attempt", fields: [
             "mode=\(mode.rawValue)",
@@ -2717,10 +3757,11 @@ final class SuggestionEngine: ObservableObject {
             "suggestion=\(SuggestionPipelineLog.suggestionDescription(suggestion))"
         ])
         let result = publicationController.publish(
-            suggestion,
+            tracedSuggestion,
             context: context,
             displayMode: mode,
-            collectionAllowed: collectionAllowed
+            collectionAllowed: collectionAllowed,
+            updateExisting: updateExisting
         )
         logPublicationResult(result)
         SuggestionPipelineLog.log("publication-result", fields: [
@@ -2731,7 +3772,7 @@ final class SuggestionEngine: ObservableObject {
         ])
 
         var completedLatencyReport = latencyReport ?? CompletionLatencyReport()
-        if completedLatencyReport.backendMs == nil {
+        if providerCallOccurred, completedLatencyReport.backendMs == nil {
             completedLatencyReport.backendMs = result.lastLatencyMs
         }
         completedLatencyReport.normalizationMs = result.normalizationMs
@@ -2739,22 +3780,30 @@ final class SuggestionEngine: ObservableObject {
         if completedLatencyReport.totalMs == nil, let latencyStartedAt {
             completedLatencyReport.totalMs = elapsedMs(since: latencyStartedAt)
         }
-        recordCompletionLatency(completedLatencyReport)
+        if !streamingPartial { recordCompletionLatency(completedLatencyReport) }
 
         switch postProviderCoordinator.decidePublicationOutcome(result) {
         case .bindPublishedSuggestion(let suggestion):
-            recordShownSuggestion()
-            diagnostics.recordBackendSuccess(
-                rawText: suggestion.rawText,
-                normalizedText: suggestion.visibleText,
-                collectionAllowed: collectionAllowed,
-                route: suggestion.completionRoute
-            )
+            recordTrace(traceContext, event: .published, outcome: .published)
+            recordTrace(traceContext, event: .overlayPresented, outcome: .ready)
+            if !updateExisting { recordShownSuggestion() }
+            if !streamingPartial {
+                diagnostics.recordBackendSuccess(
+                    rawText: suggestion.rawText,
+                    normalizedText: suggestion.visibleText,
+                    collectionAllowed: collectionAllowed,
+                    route: suggestion.completionRoute
+                )
+            }
             var boundSuggestion = suggestion
             boundSuggestion.binding = SuggestionBinding.from(textContext: context)
 
             currentSuggestion = boundSuggestion
             acceptanceSessionController.recordPublication(context: context, suggestion: boundSuggestion)
+            if recordForReuse {
+                recordReusableCandidates(from: boundSuggestion, context: context)
+            }
+            consumePendingPostAcceptanceCommandIfNeeded()
             GeometryDebug.log("suggestion-state action=published context=\(debugContext(context)) current=\(debugSuggestionState(boundSuggestion))")
             SuggestionPipelineLog.log("suggestion-state", fields: [
                 "action=published",
@@ -2766,6 +3815,13 @@ final class SuggestionEngine: ObservableObject {
                 self.statusMessage = statusMessage
             }
         case .clearRejectedSuggestion(let reason):
+            recordTrace(
+                traceContext,
+                event: .publicationRejected,
+                reason: .publicationRejected,
+                outcome: .rejected
+            )
+            finishTrace(traceContext, reason: .publicationRejected, outcome: .rejected)
             recordSuppressedSuggestion(reason: "publication-\(reason.rawValue)")
             acceptanceSessionController.clearAll()
             currentSuggestion = nil
@@ -2920,6 +3976,16 @@ final class SuggestionEngine: ObservableObject {
     }
 
     private func hideSuggestion(reason: String, context: TextContext?) {
+        streamedSuggestionCoordinator.clear()
+        if let traceContext = currentSuggestion?.traceContext {
+            recordTrace(
+                traceContext,
+                event: .overlayHidden,
+                reason: traceReason(for: reason),
+                outcome: .discarded
+            )
+            finishTrace(traceContext, reason: traceReason(for: reason), outcome: .finished)
+        }
         GeometryDebug.log("suggestion-hide reason=\(reason) context=\(debugContext(context)) current=\(debugSuggestionState())")
         SuggestionPipelineLog.log("suggestion-hide", fields: [
             "reason=\(reason)",
@@ -2935,6 +4001,202 @@ final class SuggestionEngine: ObservableObject {
         currentSuggestion = nil
         acceptanceSessionController.clearAll()
         presenter.hide()
+    }
+
+    private func startCompletionTrace(
+        parentTraceID: CompletionTraceID? = nil,
+        originTraceID: CompletionTraceID? = nil,
+        presentationAttempt: Int = 0
+    ) -> CompletionTraceContext {
+        if finishedTraceIDs.count >= 2_048 {
+            finishedTraceIDs.removeAll(keepingCapacity: true)
+        }
+        let context = CompletionTraceContext(
+            parentTraceID: parentTraceID,
+            originTraceID: originTraceID,
+            presentationAttempt: presentationAttempt
+        )
+        finishedTraceIDs.remove(context.traceID)
+        return context
+    }
+
+    private func recordTrace(
+        _ context: CompletionTraceContext,
+        event: CompletionTraceEventName,
+        reason: CompletionTraceReasonCode? = nil,
+        outcome: CompletionTraceOutcome? = nil,
+        workID: Int? = nil,
+        providerAttempt: Int? = nil,
+        durationMs: Int? = nil,
+        requestedBackend: CompletionEngineKind? = nil,
+        deliveredBackend: CompletionEngineKind? = nil,
+        prefixUTF16Length: Int? = nil,
+        suffixUTF16Length: Int? = nil,
+        candidateCount: Int? = nil,
+        candidateRank: Int? = nil,
+        hostPublishOutcome: SuggestionSchedulingHostPublishOutcome? = nil,
+        hostPublishMs: Int? = nil,
+        hostPublishPollCount: Int? = nil,
+        targetDebounceMs: Int? = nil,
+        remainingDebounceMs: Int? = nil,
+        schedulingReason: SuggestionSchedulingReason? = nil,
+        recentBackendLatencyMs: Int? = nil,
+        providerCallStarted: Bool? = nil,
+        reuseSnapshotAgeBucket: Int? = nil,
+        remainingCharacterBucket: Int? = nil,
+        providerSequence: Int? = nil,
+        partialCount: Int? = nil,
+        timeToFirstSafePartialMs: Int? = nil,
+        timeToFinalMs: Int? = nil,
+        earlyAcceptance: Bool? = nil
+    ) {
+        completionTraceRecorder.record(CompletionTraceEvent(
+            context: context,
+            event: event,
+            reason: reason,
+            outcome: outcome,
+            workID: workID,
+            providerAttempt: providerAttempt,
+            durationMs: durationMs,
+            requestedBackend: requestedBackend,
+            deliveredBackend: deliveredBackend,
+            prefixUTF16Length: prefixUTF16Length,
+            suffixUTF16Length: suffixUTF16Length,
+            candidateCount: candidateCount,
+            candidateRank: candidateRank,
+            hostPublishOutcome: hostPublishOutcome,
+            hostPublishMs: hostPublishMs,
+            hostPublishPollCount: hostPublishPollCount,
+            targetDebounceMs: targetDebounceMs,
+            remainingDebounceMs: remainingDebounceMs,
+            schedulingReason: schedulingReason,
+            recentBackendLatencyMs: recentBackendLatencyMs,
+            providerCallStarted: providerCallStarted,
+            reuseSnapshotAgeBucket: reuseSnapshotAgeBucket,
+            remainingCharacterBucket: remainingCharacterBucket,
+            providerSequence: providerSequence,
+            partialCount: partialCount,
+            timeToFirstSafePartialMs: timeToFirstSafePartialMs,
+            timeToFinalMs: timeToFinalMs,
+            earlyAcceptance: earlyAcceptance
+        ))
+    }
+
+    private func finishTrace(
+        _ context: CompletionTraceContext,
+        reason: CompletionTraceReasonCode,
+        outcome: CompletionTraceOutcome
+    ) {
+        guard finishedTraceIDs.insert(context.traceID).inserted else {
+            return
+        }
+        recordTrace(
+            context,
+            event: .traceFinished,
+            reason: reason,
+            outcome: outcome
+        )
+    }
+
+    private func recordProviderTraceOutcome(
+        _ outcome: SuggestionPipeline.Outcome<Suggestion>,
+        traceContext: CompletionTraceContext,
+        workID: Int,
+        durationMs: Int?
+    ) {
+        switch outcome {
+        case .publish(let suggestion):
+            if let route = suggestion.completionRoute, route.usedFallback {
+                recordTrace(
+                    traceContext,
+                    event: .providerFailed,
+                    reason: .providerFailure,
+                    outcome: .failed,
+                    workID: workID,
+                    providerAttempt: 0,
+                    requestedBackend: route.requestedKind
+                )
+                recordTrace(
+                    traceContext,
+                    event: .fallbackStarted,
+                    reason: .fallback,
+                    outcome: .started,
+                    workID: workID,
+                    providerAttempt: 1,
+                    requestedBackend: route.requestedKind,
+                    deliveredBackend: route.deliveredKind
+                )
+                recordTrace(
+                    traceContext,
+                    event: .providerCompleted,
+                    outcome: .ready,
+                    workID: workID,
+                    providerAttempt: 1,
+                    durationMs: durationMs,
+                    requestedBackend: route.requestedKind,
+                    deliveredBackend: route.deliveredKind,
+                    candidateCount: suggestion.alternatives.count,
+                    candidateRank: suggestion.selectedAlternativeIndex
+                )
+            } else {
+                recordTrace(
+                    traceContext,
+                    event: .providerCompleted,
+                    outcome: .ready,
+                    workID: workID,
+                    providerAttempt: 0,
+                    durationMs: durationMs,
+                    requestedBackend: suggestion.completionRoute?.requestedKind,
+                    deliveredBackend: suggestion.completionRoute?.deliveredKind,
+                    candidateCount: suggestion.alternatives.count,
+                    candidateRank: suggestion.selectedAlternativeIndex
+                )
+            }
+        case .discard(let reason):
+            recordTrace(
+                traceContext,
+                event: reason.kind == .cancelled ? .providerCancelled : .providerFailed,
+                reason: reason.kind == .cancelled ? .taskCancelled : .staleWork,
+                outcome: reason.kind == .cancelled ? .cancelled : .discarded,
+                workID: workID,
+                providerAttempt: 0,
+                durationMs: durationMs
+            )
+        case .failure:
+            recordTrace(
+                traceContext,
+                event: .providerFailed,
+                reason: .providerFailure,
+                outcome: .failed,
+                workID: workID,
+                providerAttempt: 0,
+                durationMs: durationMs
+            )
+        case .continue:
+            break
+        }
+    }
+
+    private func traceReason(for reason: String) -> CompletionTraceReasonCode {
+        if reason.contains("focus") {
+            return .focusChanged
+        }
+        if reason.contains("stale") {
+            return .staleContext
+        }
+        if reason.contains("acceptance") {
+            return .acceptanceBlocked
+        }
+        if reason.contains("dismiss") {
+            return .dismissed
+        }
+        if reason.contains("cancel") {
+            return .taskCancelled
+        }
+        if reason.contains("diverg") {
+            return .diverged
+        }
+        return .unknown
     }
 
     private func debugContext(_ context: TextContext?) -> String {

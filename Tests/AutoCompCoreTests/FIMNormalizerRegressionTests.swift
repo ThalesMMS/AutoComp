@@ -41,7 +41,9 @@ final class FIMNormalizerRegressionTests: XCTestCase {
             "graphemeCluster",
             "xmlLikeTags",
             "chatTags",
-            "suffixAtStart"
+            "suffixAtStart",
+            "midWordHealing",
+            "partialSuffixOverlap"
         ]
 
         XCTAssertTrue(

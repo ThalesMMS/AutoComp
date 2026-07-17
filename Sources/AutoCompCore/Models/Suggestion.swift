@@ -20,6 +20,15 @@ public struct Suggestion: Identifiable, Codable, Equatable, Sendable {
     /// (e.g. diagnostics), but binding is in-memory only and should be cleared on hide/invalidate.
     public var binding: SuggestionBinding?
 
+    /// In-memory correlation metadata for the suggestion lifecycle.
+    ///
+    /// Like `binding`, this is excluded from Codable persistence so trace
+    /// identifiers cannot accidentally become a user-content storage format.
+    public var traceContext: CompletionTraceContext?
+
+    /// In-memory streaming ownership. Excluded from Codable persistence.
+    public var streamingMetadata: SuggestionStreamingMetadata?
+
     public var visibleText: String
     public var remainingText: String
     public var acceptedPrefix: String
@@ -50,6 +59,8 @@ public struct Suggestion: Identifiable, Codable, Equatable, Sendable {
         visibleText: String,
         remainingText: String? = nil,
         binding: SuggestionBinding? = nil,
+        traceContext: CompletionTraceContext? = nil,
+        streamingMetadata: SuggestionStreamingMetadata? = nil,
         acceptedPrefix: String = "",
         rawText: String? = nil,
         alternatives: [SuggestionAlternative] = [],
@@ -66,6 +77,8 @@ public struct Suggestion: Identifiable, Codable, Equatable, Sendable {
         self.id = id
         self.baseContextID = baseContextID
         self.binding = binding
+        self.traceContext = traceContext
+        self.streamingMetadata = streamingMetadata
         self.visibleText = selectedAlternative.visibleText
         self.remainingText = remainingText ?? selectedAlternative.visibleText
         self.acceptedPrefix = acceptedPrefix
@@ -97,6 +110,8 @@ public struct Suggestion: Identifiable, Codable, Equatable, Sendable {
             visibleText: visibleText,
             remainingText: remainingText,
             binding: nil,
+            traceContext: nil,
+            streamingMetadata: nil,
             acceptedPrefix: acceptedPrefix,
             rawText: rawText,
             alternatives: alternatives,
@@ -132,6 +147,8 @@ public struct Suggestion: Identifiable, Codable, Equatable, Sendable {
             baseContextID: baseContextID,
             visibleText: alternatives[nextIndex].visibleText,
             binding: binding,
+            traceContext: traceContext,
+            streamingMetadata: streamingMetadata,
             rawText: alternatives[nextIndex].rawText ?? rawText,
             alternatives: alternatives,
             selectedAlternativeIndex: nextIndex,

@@ -22,6 +22,7 @@ final class LocalProductivityMetricsStoreTests: XCTestCase {
         XCTAssertEqual(store.snapshot.wordsAcceptedTotal, 4)
         XCTAssertEqual(store.snapshot.suggestionsAccepted, 1)
 
+        store.flushPendingPersistence()
         let encoded = try XCTUnwrap(defaults.data(forKey: "metrics"))
         let persisted = String(data: encoded, encoding: .utf8) ?? ""
         XCTAssertFalse(persisted.contains("hello"))
@@ -136,6 +137,7 @@ final class LocalProductivityMetricsStoreTests: XCTestCase {
         XCTAssertEqual(store.snapshot.lastLatencyReport?.backendMs, 41)
         XCTAssertEqual(store.snapshot.lastLatencyReport?.insertionMs, 8)
 
+        store.flushPendingPersistence()
         let encoded = try XCTUnwrap(defaults.data(forKey: "metrics"))
         let persisted = String(data: encoded, encoding: .utf8) ?? ""
         XCTAssertTrue(persisted.contains("\"backendMs\":41"))
@@ -171,12 +173,104 @@ final class LocalProductivityMetricsStoreTests: XCTestCase {
         XCTAssertEqual(store.snapshot.p50BackendLatencyMs, 20)
         XCTAssertEqual(store.snapshot.p95BackendLatencyMs, 100)
 
+        store.flushPendingPersistence()
         let encoded = try XCTUnwrap(defaults.data(forKey: "metrics"))
         let persisted = String(data: encoded, encoding: .utf8) ?? ""
         XCTAssertTrue(persisted.contains("\"suggestionsGenerated\":2"))
         XCTAssertTrue(persisted.contains("\"suggestionsShown\":1"))
         XCTAssertFalse(persisted.contains("typed secret words"))
         XCTAssertFalse(persisted.contains("prompt text"))
+    }
+
+    func testBurstUpdatesPersistOnlyLatestStateOnce() throws {
+        let suiteName = "AutoCompProductivityMetrics-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(WriteCountingUserDefaults(suiteName: suiteName))
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+        let privacyStore = PrivacySettingsStore(defaults: defaults, key: "privacy")
+        let store = LocalProductivityMetricsStore(
+            defaults: defaults,
+            key: "metrics",
+            privacyStore: privacyStore,
+            calendar: utcCalendar(),
+            now: { Date(timeIntervalSince1970: 100) }
+        )
+        store.flushPendingPersistence()
+        defaults.resetWriteCount()
+
+        for _ in 0..<20 {
+            store.recordGeneratedSuggestion()
+        }
+        store.flushPendingPersistence()
+
+        XCTAssertEqual(store.snapshot.suggestionsGenerated, 20)
+        XCTAssertEqual(defaults.writeCount, 1)
+
+        let reloadedStore = LocalProductivityMetricsStore(
+            defaults: defaults,
+            key: "metrics",
+            privacyStore: privacyStore,
+            calendar: utcCalendar(),
+            now: { Date(timeIntervalSince1970: 100) }
+        )
+        XCTAssertEqual(reloadedStore.snapshot.suggestionsGenerated, 20)
+    }
+
+    func testScheduledPersistenceWritesLatestSnapshotOffHotPath() async throws {
+        let defaults = try makeDefaults()
+        let privacyStore = PrivacySettingsStore(defaults: defaults, key: "privacy")
+        let store = LocalProductivityMetricsStore(
+            defaults: defaults,
+            key: "metrics",
+            privacyStore: privacyStore,
+            calendar: utcCalendar(),
+            now: { Date(timeIntervalSince1970: 100) }
+        )
+
+        store.recordGeneratedSuggestion()
+        store.recordShownSuggestion()
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        var persisted = ""
+        while ContinuousClock.now < deadline {
+            if let encoded = defaults.data(forKey: "metrics"),
+               let body = String(data: encoded, encoding: .utf8) {
+                persisted = body
+                if body.contains("\"suggestionsGenerated\":1"),
+                   body.contains("\"suggestionsShown\":1") {
+                    break
+                }
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        XCTAssertTrue(persisted.contains("\"suggestionsGenerated\":1"))
+        XCTAssertTrue(persisted.contains("\"suggestionsShown\":1"))
+    }
+
+    func testPrivacySaveImmediatelyControlsMetricsWithoutReload() throws {
+        let defaults = try makeDefaults()
+        let privacyStore = PrivacySettingsStore(defaults: defaults, key: "privacy")
+        let store = LocalProductivityMetricsStore(
+            defaults: defaults,
+            key: "metrics",
+            privacyStore: privacyStore,
+            calendar: utcCalendar(),
+            now: { Date(timeIntervalSince1970: 100) }
+        )
+
+        store.recordGeneratedSuggestion()
+        try privacyStore.save(PrivacySettings(productivityMetricsEnabled: false))
+        store.recordGeneratedSuggestion()
+
+        XCTAssertFalse(store.snapshot.isEnabled)
+        XCTAssertEqual(store.snapshot.suggestionsGenerated, 1)
+
+        try privacyStore.save(PrivacySettings(productivityMetricsEnabled: true))
+        store.recordGeneratedSuggestion()
+
+        XCTAssertTrue(store.snapshot.isEnabled)
+        XCTAssertEqual(store.snapshot.suggestionsGenerated, 2)
     }
 
     private func makeDefaults() throws -> UserDefaults {
@@ -193,5 +287,31 @@ final class LocalProductivityMetricsStoreTests: XCTestCase {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0)!
         return calendar
+    }
+}
+
+private final class WriteCountingUserDefaults: UserDefaults, @unchecked Sendable {
+    private let countLock = NSLock()
+    private var storedWriteCount = 0
+
+    var writeCount: Int {
+        countLock.lock()
+        defer { countLock.unlock() }
+        return storedWriteCount
+    }
+
+    override func set(_ value: Any?, forKey defaultName: String) {
+        if defaultName == "metrics" {
+            countLock.lock()
+            storedWriteCount += 1
+            countLock.unlock()
+        }
+        super.set(value, forKey: defaultName)
+    }
+
+    func resetWriteCount() {
+        countLock.lock()
+        storedWriteCount = 0
+        countLock.unlock()
     }
 }

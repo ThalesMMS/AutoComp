@@ -84,7 +84,6 @@ final class RedactedSettingsTransferTests: XCTestCase {
             collectionEnabled: false,
             clipboardContextEnabled: false,
             screenContextEnabled: false,
-            telemetryEnabled: true,
             localPersonalizationEnabled: false,
             personalizationStrength: 0.8,
             writingPreferences: WritingPreferences(enabled: true, rules: ["keep local writing rule"]),
@@ -120,7 +119,6 @@ final class RedactedSettingsTransferTests: XCTestCase {
         XCTAssertEqual(updatedPrivacy.personalizationStrength, 0.8)
         XCTAssertEqual(updatedPrivacy.writingPreferences.rules, ["imported writing rule"])
         XCTAssertEqual(updatedPrivacy.writingPreferences.languageHints, ["English"])
-        XCTAssertFalse(updatedPrivacy.telemetryEnabled)
 
         let currentBackend = CompletionBackendSettings(
             engineKind: .remote,

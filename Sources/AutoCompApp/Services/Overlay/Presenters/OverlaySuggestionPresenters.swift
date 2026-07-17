@@ -298,14 +298,21 @@ final class VisualInlineOverlayPresenter: VisualInlineSuggestionPresenting {
             && context.nextGlyphRect == nil
             && context.lineReferenceRect == nil
             && context.focusedElementRect != nil
-        let screenContext = screenContextProvider(context)
+        guard let screenContext = screenContextProvider(context) else {
+            return InlinePreviewResolution(rejectionReason: "unsupported-coordinate-space")
+        }
+        let coordinateSpace = context.caretGeometryCoordinateSpace ?? .accessibilityGlobal
+        guard coordinateSpace == .accessibilityGlobal || coordinateSpace == .appKitGlobal else {
+            return InlinePreviewResolution(rejectionReason: "unsupported-coordinate-space")
+        }
         if !usesFocusedElementFallback {
             let trustGeometry = Self.trustGeometry(for: context, screenContext: screenContext)
             let trustDecision = CaretGeometryTrustEvaluator.default.evaluate(
                 caretRect: trustGeometry.caretRect,
                 focusedElementRect: trustGeometry.focusedElementRect,
                 screenBounds: trustGeometry.screenBounds,
-                quality: context.caretGeometryQuality
+                quality: context.caretGeometryQuality,
+                provenance: context.caretGeometryProvenance ?? .unknown
             )
             switch trustDecision {
             case .allowInline:
@@ -315,10 +322,6 @@ final class VisualInlineOverlayPresenter: VisualInlineSuggestionPresenting {
             case .suppress:
                 return InlinePreviewResolution(rejectionReason: "caret-untrusted-suppress")
             }
-        }
-
-        guard let screenContext else {
-            return InlinePreviewResolution(rejectionReason: "missing-inline-anchor")
         }
 
         let font = style.font
@@ -362,12 +365,22 @@ final class VisualInlineOverlayPresenter: VisualInlineSuggestionPresenting {
             return (context.caretRect, context.focusedElementRect, nil)
         }
 
-        let caretRect = context.caretRect.map {
-            OverlayGeometry.appKitRect(accessibilityRect: $0, screenFrame: screenContext.mainScreenFrame)
+        let coordinateSpace = context.caretGeometryCoordinateSpace ?? .accessibilityGlobal
+        let convert: (CGRect) -> CGRect? = { rect in
+            switch coordinateSpace {
+            case .accessibilityGlobal:
+                return OverlayGeometry.appKitRect(
+                    accessibilityRect: rect,
+                    screenFrame: screenContext.mainScreenFrame
+                )
+            case .appKitGlobal:
+                return rect
+            case .screenLocal, .unknown:
+                return nil
+            }
         }
-        let focusedElementRect = context.focusedElementRect.map {
-            OverlayGeometry.appKitRect(accessibilityRect: $0, screenFrame: screenContext.mainScreenFrame)
-        }
+        let caretRect = context.caretRect.flatMap(convert)
+        let focusedElementRect = context.focusedElementRect.flatMap(convert)
         let trustScreenBounds: CGRect?
         if let caretRect {
             trustScreenBounds = screenBounds(containing: caretRect, screenContext: screenContext)

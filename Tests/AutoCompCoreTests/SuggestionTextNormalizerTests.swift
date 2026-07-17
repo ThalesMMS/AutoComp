@@ -150,6 +150,16 @@ final class SuggestionTextNormalizerTests: XCTestCase {
         XCTAssertEqual(normalized, "adiada para sexta-feira")
     }
 
+    func testSuffixOverlapUsesNormalizedTrailingLineEndings() {
+        let normalized = SuggestionTextNormalizer.normalize(
+            rawText: "finish\nwor",
+            precedingText: "Please ",
+            trailingText: "\r\nworld"
+        )
+
+        XCTAssertEqual(normalized, "finish")
+    }
+
     func testRemovesFillInMiddleMarkersBeforeCompletion() {
         let normalized = SuggestionTextNormalizer.normalize(
             rawText: "<|fim_middle|>\nadiada para sexta-feira",

@@ -91,6 +91,8 @@ final class LlamaRuntimeBuildContractTests: XCTestCase {
 
         XCTAssertTrue(harness.contains("--max-ram-bytes"))
         XCTAssertTrue(harness.contains("maxRAMBytes: options.maxRAMBytes"))
+        XCTAssertTrue(harness.contains("CompletionBackendDefaults.localMaxRAMBytes"))
+        XCTAssertFalse(harness.contains("6_442_450_944"))
         XCTAssertTrue(localRuntimeDoc.contains("--max-ram-bytes BYTES"))
         XCTAssertTrue(localRuntimeDoc.contains("LocalLlamaError.allocationFailed"))
     }
@@ -220,6 +222,24 @@ final class LlamaRuntimeBuildContractTests: XCTestCase {
             ConstrainedLocalCompletionFeature.isEnabled(values: [
                 ConstrainedLocalCompletionFeature.environmentKey: "1"
             ])
+        )
+    }
+
+    func testMultiBranchDecoderRequiresIndependentRuntimeOptInAndDerivesProfilePath() {
+        XCTAssertFalse(ConstrainedLocalCompletionFeature.isMultiBranchEnabled(values: [:]))
+        XCTAssertTrue(ConstrainedLocalCompletionFeature.isMultiBranchEnabled(values: [
+            ConstrainedLocalCompletionFeature.multiBranchEnvironmentKey: "yes"
+        ]))
+        XCTAssertEqual(
+            ConstrainedLocalCompletionFeature.tokenProfilePath(modelPath: "/tmp/model.gguf", values: [:]),
+            "/tmp/model.gguf.actkp"
+        )
+        XCTAssertEqual(
+            ConstrainedLocalCompletionFeature.tokenProfilePath(
+                modelPath: "/tmp/model.gguf",
+                values: [ConstrainedLocalCompletionFeature.tokenProfilePathEnvironmentKey: "/tmp/custom.actkp"]
+            ),
+            "/tmp/custom.actkp"
         )
     }
 

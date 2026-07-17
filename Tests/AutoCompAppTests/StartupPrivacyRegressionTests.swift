@@ -113,13 +113,14 @@ final class StartupPrivacyRegressionTests: XCTestCase {
         XCTAssertEqual(recordedClipboardContexts, [clipboardSnapshot])
     }
 
-    func testControllerDoesNotBuildOrCaptureTelemetryWhilePolicyDisablesTelemetry() throws {
+    func testProductionSourceContainsNoOutboundTelemetryPipeline() throws {
+        let root = try packageRoot()
         let source = try String(
-            contentsOf: try packageRoot().appendingPathComponent("Sources/AutoCompApp/App/AppController.swift"),
+            contentsOf: root.appendingPathComponent("Sources/AutoCompApp/App/AppController.swift"),
             encoding: .utf8
         )
         let environmentSource = try String(
-            contentsOf: try packageRoot().appendingPathComponent("Sources/AutoCompApp/App/AutoCompAppEnvironment.swift"),
+            contentsOf: root.appendingPathComponent("Sources/AutoCompApp/App/AutoCompAppEnvironment.swift"),
             encoding: .utf8
         )
         let startBody = try functionBody(
@@ -137,8 +138,12 @@ final class StartupPrivacyRegressionTests: XCTestCase {
         XCTAssertFalse(source.contains("telemetryClient.capture"))
         XCTAssertFalse(source.contains("telemetryClient.setEnabled"))
         XCTAssertTrue(source.contains("func testRemoteConnection(settings: CompletionBackendSettings) async -> RemoteBackendProbeResult"))
-        XCTAssertTrue(environmentSource.contains("let telemetryClient = DisabledTelemetryClient()"))
+        XCTAssertFalse(environmentSource.contains("TelemetryClient"))
+        XCTAssertFalse(environmentSource.contains("telemetryClient"))
         XCTAssertFalse(environmentSource.contains("RedactingTelemetryClient"))
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: root.appendingPathComponent("Sources/AutoCompCore/Services/TelemetryClient.swift").path
+        ))
     }
 
     func testOpeningMenuDoesNotRestartController() throws {
@@ -163,8 +168,7 @@ final class StartupPrivacyRegressionTests: XCTestCase {
         try store.save(PrivacySettings(
             collectionEnabled: true,
             clipboardContextEnabled: clipboardEnabled,
-            screenContextEnabled: screenEnabled,
-            telemetryEnabled: true
+            screenContextEnabled: screenEnabled
         ))
         return store
     }

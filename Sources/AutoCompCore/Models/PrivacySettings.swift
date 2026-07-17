@@ -21,7 +21,6 @@ public struct PrivacySettings: Codable, Equatable, Sendable {
     public var collectionEnabled: Bool
     public var clipboardContextEnabled: Bool
     public var screenContextEnabled: Bool
-    public var telemetryEnabled: Bool
     public var productivityMetricsEnabled: Bool
     public var localPersonalizationEnabled: Bool
     public var personalizationStrength: Double
@@ -36,7 +35,6 @@ public struct PrivacySettings: Codable, Equatable, Sendable {
         collectionEnabled: Bool = false,
         clipboardContextEnabled: Bool = false,
         screenContextEnabled: Bool = false,
-        telemetryEnabled: Bool = false,
         productivityMetricsEnabled: Bool = true,
         localPersonalizationEnabled: Bool = false,
         personalizationStrength: Double = 0.35,
@@ -48,7 +46,6 @@ public struct PrivacySettings: Codable, Equatable, Sendable {
         self.collectionEnabled = collectionEnabled
         self.clipboardContextEnabled = clipboardContextEnabled
         self.screenContextEnabled = screenContextEnabled
-        self.telemetryEnabled = telemetryEnabled
         self.productivityMetricsEnabled = productivityMetricsEnabled
         self.localPersonalizationEnabled = localPersonalizationEnabled
         self.personalizationStrength = personalizationStrength
@@ -62,7 +59,6 @@ public struct PrivacySettings: Codable, Equatable, Sendable {
         case collectionEnabled
         case clipboardContextEnabled
         case screenContextEnabled
-        case telemetryEnabled
         case productivityMetricsEnabled
         case localPersonalizationEnabled
         case personalizationStrength
@@ -78,7 +74,6 @@ public struct PrivacySettings: Codable, Equatable, Sendable {
             collectionEnabled: try container.decodeIfPresent(Bool.self, forKey: .collectionEnabled) ?? false,
             clipboardContextEnabled: try container.decodeIfPresent(Bool.self, forKey: .clipboardContextEnabled) ?? false,
             screenContextEnabled: try container.decodeIfPresent(Bool.self, forKey: .screenContextEnabled) ?? false,
-            telemetryEnabled: try container.decodeIfPresent(Bool.self, forKey: .telemetryEnabled) ?? false,
             productivityMetricsEnabled: try container.decodeIfPresent(Bool.self, forKey: .productivityMetricsEnabled) ?? true,
             localPersonalizationEnabled: try container.decodeIfPresent(Bool.self, forKey: .localPersonalizationEnabled) ?? false,
             personalizationStrength: try container.decodeIfPresent(Double.self, forKey: .personalizationStrength) ?? 0.35,

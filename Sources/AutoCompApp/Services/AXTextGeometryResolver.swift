@@ -10,7 +10,31 @@ struct AXTextGeometrySnapshot {
     var nextGlyphRect: CGRect?
     var lineReferenceRect: CGRect?
     var caretGeometryQuality: CaretGeometryQuality
+    var caretGeometryProvenance: CaretGeometryProvenance
+    var coordinateSpace: CaretGeometryCoordinateSpace
     var observedCharacterWidth: CGFloat?
+
+    init(
+        focusedElementRect: CGRect?,
+        caretRect: CGRect?,
+        previousGlyphRect: CGRect?,
+        nextGlyphRect: CGRect?,
+        lineReferenceRect: CGRect?,
+        caretGeometryQuality: CaretGeometryQuality,
+        caretGeometryProvenance: CaretGeometryProvenance = .unknown,
+        coordinateSpace: CaretGeometryCoordinateSpace = .accessibilityGlobal,
+        observedCharacterWidth: CGFloat?
+    ) {
+        self.focusedElementRect = focusedElementRect
+        self.caretRect = caretRect
+        self.previousGlyphRect = previousGlyphRect
+        self.nextGlyphRect = nextGlyphRect
+        self.lineReferenceRect = lineReferenceRect
+        self.caretGeometryQuality = caretGeometryQuality
+        self.caretGeometryProvenance = caretGeometryProvenance
+        self.coordinateSpace = coordinateSpace
+        self.observedCharacterWidth = observedCharacterWidth
+    }
 }
 
 struct AXTextGeometryResolver {
@@ -38,6 +62,8 @@ struct AXTextGeometryResolver {
             ),
             lineReferenceRect: nil,
             caretGeometryQuality: .unavailable,
+            caretGeometryProvenance: .unknown,
+            coordinateSpace: .accessibilityGlobal,
             observedCharacterWidth: nil
         )
         geometry.lineReferenceRect = geometry.previousGlyphRect
@@ -51,6 +77,11 @@ struct AXTextGeometryResolver {
             previousGlyphRect: geometry.previousGlyphRect,
             nextGlyphRect: geometry.nextGlyphRect
         )
+        geometry.caretGeometryProvenance = Self.bestProvenance(
+            caretRect: geometry.caretRect,
+            previousGlyphRect: geometry.previousGlyphRect,
+            focusedElementRect: geometry.focusedElementRect
+        )
 
         if AXTextMarkerGeometryFallback.isEligibleBrowser(bundleID: snapshot.bundleID),
            let textMarkerCaretRect = textMarkerFallback.resolve(
@@ -62,6 +93,7 @@ struct AXTextGeometryResolver {
             geometry.nextGlyphRect = nil
             geometry.lineReferenceRect = textMarkerCaretRect
             geometry.caretGeometryQuality = .directCaret
+            geometry.caretGeometryProvenance = .textMarkerFallback
             geometry.observedCharacterWidth = nil
         } else if let codexCaretRect = codexProseMirrorLineCaretRect(
             snapshot: snapshot,
@@ -72,6 +104,7 @@ struct AXTextGeometryResolver {
             geometry.nextGlyphRect = nil
             geometry.lineReferenceRect = codexCaretRect
             geometry.caretGeometryQuality = .lineMetric
+            geometry.caretGeometryProvenance = .hiddenTextLayoutEstimate
             geometry.observedCharacterWidth = nil
             GeometryDebug.log("ax-fallback source=codex-prosemirror-line caretRect=\(codexCaretRect) focusedElementRect=\(String(describing: geometry.focusedElementRect))")
         } else if let googleDocsCaretRect = googleDocsAXLineCaretRect(
@@ -83,6 +116,7 @@ struct AXTextGeometryResolver {
             geometry.nextGlyphRect = nil
             geometry.lineReferenceRect = googleDocsCaretRect
             geometry.caretGeometryQuality = .lineMetric
+            geometry.caretGeometryProvenance = .webAccessibilityBridge
             geometry.observedCharacterWidth = nil
             GeometryDebug.log("ax-fallback source=google-docs-braille-line caretRect=\(googleDocsCaretRect) focusedElementRect=\(String(describing: geometry.focusedElementRect))")
         }
@@ -128,6 +162,17 @@ struct AXTextGeometryResolver {
             return rect.width
         }
         return nil
+    }
+
+    static func bestProvenance(
+        caretRect: CGRect?,
+        previousGlyphRect: CGRect?,
+        focusedElementRect: CGRect?
+    ) -> CaretGeometryProvenance {
+        if caretRect != nil { return .nativeSelectedRange }
+        if previousGlyphRect != nil { return .nativeCharacterBounds }
+        if focusedElementRect != nil { return .focusedElementFrame }
+        return .unknown
     }
 
     func shouldUseScreenOCRFallback(
@@ -181,7 +226,7 @@ struct AXTextGeometryResolver {
         let lineHeight: CGFloat = 20
         let caretHeight: CGFloat = 18
         let maxLineWidth = max(1, focusedElementRect.width - horizontalPadding * 2 - 2)
-        let lineEstimate = estimatedVisibleLine(
+        let lineEstimate = VisibleTextLineEstimator.estimate(
             in: text,
             font: font,
             maxLineWidth: maxLineWidth
@@ -297,33 +342,4 @@ struct AXTextGeometryResolver {
         }
     }
 
-    private func estimatedVisibleLine(in text: String, font: NSFont, maxLineWidth: CGFloat) -> (width: CGFloat, lineIndex: Int) {
-        let lineText = lastLine(in: text)
-        var currentLine = ""
-        var currentWidth: CGFloat = 0
-        var visualLineCount = 1
-        let attributes: [NSAttributedString.Key: Any] = [.font: font]
-
-        for character in lineText {
-            let candidate = currentLine + String(character)
-            let candidateWidth = ceil((candidate as NSString).size(withAttributes: attributes).width)
-            if !currentLine.isEmpty, candidateWidth > maxLineWidth {
-                visualLineCount += 1
-                currentLine = String(character)
-                currentWidth = ceil((currentLine as NSString).size(withAttributes: attributes).width)
-            } else {
-                currentLine = candidate
-                currentWidth = candidateWidth
-            }
-        }
-
-        return (width: min(currentWidth, maxLineWidth), lineIndex: visualLineCount - 1)
-    }
-
-    private func lastLine(in text: String) -> String {
-        if let lastNewline = text.lastIndex(where: { $0 == "\n" || $0 == "\r" }) {
-            return String(text[text.index(after: lastNewline)...])
-        }
-        return text
-    }
 }

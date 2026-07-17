@@ -4,7 +4,7 @@ private let backendHealthLogger = AutoCompLogger(category: "health-backend")
 
 /// Reports whether the selected backend is reachable.
 ///
-/// This check relies on existing telemetry/state (last probe result + circuit breaker status)
+/// This check relies on existing local state (last probe result + circuit breaker status)
 /// rather than performing network requests directly.
 struct BackendReachabilityHealthCheck {
     static let id = "backend.reachability"

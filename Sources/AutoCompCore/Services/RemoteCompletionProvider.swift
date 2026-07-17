@@ -260,7 +260,10 @@ public struct RemoteCompletionProvider: MultiplePersonalizationContextAwareCompl
             completionRequest: completionRequest,
             suggestionCount: options.suggestionCount,
             messages: [
-                RemoteChatMessage(role: "system", content: systemPrompt(for: completionRequest.mode)),
+                RemoteChatMessage(
+                    role: "system",
+                    content: CompletionSystemPrompts.prompt(for: completionRequest.mode)
+                ),
                 RemoteChatMessage(role: "user", content: completionRequest.prompt)
             ]
         ))
@@ -312,15 +315,6 @@ public struct RemoteCompletionProvider: MultiplePersonalizationContextAwareCompl
         }
 
         return suggestions
-    }
-
-    private func systemPrompt(for mode: CompletionRequestMode) -> String {
-        switch mode {
-        case .continuation:
-            return "You are AutoComp, a low-latency autocomplete engine. Return only the user's likely next words. Do not explain."
-        case .fillInMiddle:
-            return "You are AutoComp, a low-latency autocomplete engine. Fill the cursor gap and return only the text to insert. Do not repeat suffix text or explain."
-        }
     }
 
     private func endpointURL(baseURL: String) -> URL? {

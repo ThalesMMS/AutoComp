@@ -155,6 +155,21 @@ final class OverlayGeometryTests: XCTestCase {
         )
     }
 
+    func testTextMarkerFallbackCachesNegativeResultWithinSessionTTL() {
+        let fallback = AXTextMarkerGeometryFallback(isEnabled: true, cacheTTL: 1)
+        let snapshot = googleDocsSnapshot(
+            bundleID: "com.google.Chrome",
+            displayName: "Google Chrome",
+            textBeforeCursor: "draft"
+        )
+
+        XCTAssertNil(fallback.resolve(snapshot: snapshot, geometry: weakGeometry()))
+        XCTAssertNil(fallback.resolve(snapshot: snapshot, geometry: weakGeometry()))
+
+        XCTAssertEqual(fallback.cacheStats.misses, 1)
+        XCTAssertEqual(fallback.cacheStats.negativeHits, 1)
+    }
+
     func testGoogleDocsSafariOffscreenMetricsUseScreenOCRFallback() {
         let resolver = AXTextGeometryResolver()
 
@@ -714,6 +729,53 @@ final class OverlayGeometryTests: XCTestCase {
         XCTAssertEqual(validation.caretRect, CGRect(x: 1_220, y: 480, width: 2, height: 20))
     }
 
+    func testOverlayGeometryValidatorPreservesExplicitAppKitCoordinatesOnLeftDisplay() {
+        let validation = overlayValidation(
+            for: textContext(
+                selectedRange: NSRange(location: 12, length: 0),
+                caretRect: CGRect(x: -720, y: 420, width: 2, height: 20),
+                focusedElementRect: nil,
+                caretGeometryCoordinateSpace: .appKitGlobal
+            ),
+            screenFrames: [
+                CGRect(x: -1_000, y: 0, width: 1_000, height: 1_000),
+                CGRect(x: 0, y: 0, width: 1_000, height: 1_000)
+            ]
+        )
+
+        XCTAssertEqual(validation.caretRect, CGRect(x: -720, y: 420, width: 2, height: 20))
+    }
+
+    func testOverlayGeometryValidatorRejectsUnconvertedScreenLocalCoordinates() {
+        let validation = overlayValidation(
+            for: textContext(
+                selectedRange: NSRange(location: 12, length: 0),
+                caretRect: CGRect(x: 100, y: 100, width: 2, height: 20),
+                focusedElementRect: nil,
+                caretGeometryCoordinateSpace: .screenLocal
+            )
+        )
+
+        XCTAssertNil(validation.caretRect)
+    }
+
+    func testAccessibilityCoordinatesSupportDisplayAboveMainScreen() {
+        let validation = overlayValidation(
+            for: textContext(
+                selectedRange: NSRange(location: 12, length: 0),
+                caretRect: CGRect(x: 300, y: -220, width: 2, height: 20),
+                focusedElementRect: nil,
+                caretGeometryCoordinateSpace: .accessibilityGlobal
+            ),
+            screenFrames: [
+                CGRect(x: 0, y: 0, width: 1_000, height: 1_000),
+                CGRect(x: 0, y: 1_000, width: 1_000, height: 800)
+            ]
+        )
+
+        XCTAssertEqual(validation.caretRect, CGRect(x: 300, y: 1_200, width: 2, height: 20))
+    }
+
     func testOverlayGeometryValidatorAppliesCaretQualityCaps() {
         let weakValidation = overlayValidation(
             for: textContext(
@@ -868,6 +930,23 @@ final class OverlayGeometryTests: XCTestCase {
         XCTAssertLessThan((layout?.origin.y ?? 0) + (layout?.size.height ?? 0), convertedFocus.maxY)
     }
 
+    func testNativeWebCaretIsNotReplacedByTextBoxEstimate() {
+        let layout = InlinePreviewGeometry.layout(
+            context: textContext(
+                app: AppIdentity(bundleID: "com.google.Chrome", displayName: "Google Chrome", processID: 42),
+                selectedRange: NSRange(location: 12, length: 0),
+                caretRect: CGRect(x: 420, y: 500, width: 120, height: 24),
+                focusedElementRect: CGRect(x: 300, y: 460, width: 300, height: 100),
+                caretGeometryProvenance: .nativeSelectedRange
+            ),
+            contentSize: NSSize(width: 180, height: 18),
+            screenFrame: CGRect(x: 0, y: 0, width: 1_000, height: 1_000),
+            visibleFrame: CGRect(x: 0, y: 0, width: 1_000, height: 1_000)
+        )
+
+        XCTAssertEqual(layout?.source, .exactAX)
+    }
+
     func testWebLikeLongTextEstimateUsesLastWrappedLineInsteadOfRightEdgeClamp() {
         let focusedRect = CGRect(x: 278, y: 829, width: 712, height: 88)
         let text = """
@@ -945,7 +1024,9 @@ final class OverlayGeometryTests: XCTestCase {
         previousGlyphRect: CGRect? = nil,
         nextGlyphRect: CGRect? = nil,
         lineReferenceRect: CGRect? = nil,
-        caretGeometryQuality: CaretGeometryQuality = .directCaret
+        caretGeometryQuality: CaretGeometryQuality = .directCaret,
+        caretGeometryProvenance: CaretGeometryProvenance = .unknown,
+        caretGeometryCoordinateSpace: CaretGeometryCoordinateSpace = .accessibilityGlobal
     ) -> TextContext {
         TextContext(
             app: app,
@@ -957,7 +1038,9 @@ final class OverlayGeometryTests: XCTestCase {
             previousGlyphRect: previousGlyphRect,
             nextGlyphRect: nextGlyphRect,
             lineReferenceRect: lineReferenceRect,
-            caretGeometryQuality: caretGeometryQuality
+            caretGeometryQuality: caretGeometryQuality,
+            caretGeometryProvenance: caretGeometryProvenance,
+            caretGeometryCoordinateSpace: caretGeometryCoordinateSpace
         )
     }
 
@@ -1039,7 +1122,6 @@ final class OverlayGeometryTests: XCTestCase {
             isGoogleDocsElement: true,
             isCodexComposerElement: false,
             selectedRange: NSRange(location: (textBeforeCursor as NSString).length, length: 0),
-            fullText: textBeforeCursor,
             textLength: (textBeforeCursor as NSString).length,
             textBeforeCursor: textBeforeCursor,
             textAfterCursor: nil,

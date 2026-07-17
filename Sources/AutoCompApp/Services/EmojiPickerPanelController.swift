@@ -78,11 +78,11 @@ final class EmojiPickerPanelController: EmojiPickerPanelControlling {
         let belowY = anchor.minY - height - 6
         let desiredY = belowY >= visibleFrame.minY ? belowY : anchor.maxY + 6
         let desiredOrigin = CGPoint(x: anchor.minX, y: desiredY)
-        let clampedOrigin = CGPoint(
-            x: min(max(desiredOrigin.x, visibleFrame.minX), max(visibleFrame.minX, visibleFrame.maxX - width)),
-            y: min(max(desiredOrigin.y, visibleFrame.minY), max(visibleFrame.minY, visibleFrame.maxY - height))
+        let clampResult = visibleFrame.clampingOrigin(
+            desiredOrigin,
+            panelSize: CGSize(width: width, height: height)
         )
-        return NSRect(x: clampedOrigin.x, y: clampedOrigin.y, width: width, height: height)
+        return NSRect(x: clampResult.origin.x, y: clampResult.origin.y, width: width, height: height)
     }
 }
 

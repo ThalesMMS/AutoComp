@@ -22,6 +22,10 @@ struct AutoCompAppEnvironment {
     let keyboardShortcuts: KeyboardShortcutService
     let emojiVariantPreferencesStore: EmojiVariantPreferencesStore
     let emojiPickerController: EmojiPickerController
+    let macroPreferencesStore: MacroPreferencesStore
+    let macroCommandController: MacroCommandController
+    let inlineCommandCoordinator: InlineCommandCoordinator
+    let inlineCommandDiagnostics: InlineCommandDiagnostics
     let inputSourceMonitor: InputSourceMonitor
     let shortcutSettingsStore: KeyboardShortcutSettingsStore
     let completionBackendConfigurationService: CompletionBackendConfigurationService
@@ -30,12 +34,12 @@ struct AutoCompAppEnvironment {
     let remoteCompletionConsentStore: RemoteCompletionConsentStore
     let debugOptionsStore: AutoCompDebugOptionsStore
     let debugArtifactStore: DebugArtifactStore
+    let completionTraceStore: CompletionTraceStore
     let pasteboardRecoveryStore: PasteboardInsertionRecoveryStore
     let suggestionDebugLogger: SuggestionDebugLogger
     let overlayRecoveryAdvisor: OverlayRecoveryAdvisor
     let productivityMetricsStore: LocalProductivityMetricsStore
     let installationLocationService: InstallationLocationService
-    let telemetryClient: any TelemetryClient
     let usesInlinePreviewTestProvider: Bool
     let runsSettingsConnectionUITest: Bool
     let usesPlaygroundTestProvider: Bool
@@ -58,6 +62,9 @@ struct AutoCompAppEnvironment {
         let privacySettingsStore = PrivacySettingsStore()
         let debugOptionsStore = AutoCompDebugOptionsStore()
         let debugArtifactStore = DebugArtifactStore()
+        let completionTraceStore = CompletionTraceStore(
+            isEnabled: debugOptionsStore.load().localDebugOptIn
+        )
         let pasteboardRecoveryStore = PasteboardInsertionRecoveryStore()
         let suggestionDebugLogger = SuggestionDebugLogger(artifactStore: debugArtifactStore)
         let overlayRecoveryAdvisor = OverlayRecoveryAdvisor()
@@ -65,12 +72,13 @@ struct AutoCompAppEnvironment {
             privacyStore: privacySettingsStore
         )
         let installationLocationService = InstallationLocationService()
-        let telemetryClient = DisabledTelemetryClient()
         let interactionPipelineSuspensionController = InteractionPipelineSuspensionController()
         let inputSuppressionController = InputSuppressionController()
         let inputSourceMonitor = InputSourceMonitor()
         let shortcutSettingsStore = KeyboardShortcutSettingsStore()
         let emojiVariantPreferencesStore = EmojiVariantPreferencesStore()
+        let macroPreferencesStore = MacroPreferencesStore()
+        let inlineCommandDiagnostics = InlineCommandDiagnostics(traceRecorder: completionTraceStore)
         let keyboardShortcuts = KeyboardShortcutService(
             inputSuppressionController: inputSuppressionController,
             shortcutSettings: shortcutSettingsStore.load(),
@@ -92,7 +100,25 @@ struct AutoCompAppEnvironment {
             contextProvider: focusTrackingModel,
             textReplacer: acceptanceService,
             preferencesStore: emojiVariantPreferencesStore,
-            panelController: EmojiPickerPanelController()
+            panelController: EmojiPickerPanelController(),
+            diagnostics: inlineCommandDiagnostics,
+            hostPublishDelayNanoseconds: 0
+        )
+        let macroCommandController = MacroCommandController(
+            contextProvider: focusTrackingModel,
+            textReplacer: acceptanceService,
+            preferencesStore: macroPreferencesStore,
+            panelController: MacroPreviewPanelController(),
+            diagnostics: inlineCommandDiagnostics,
+            acceptKeyLabel: {
+                shortcutSettingsStore.load()[.acceptNextWord].displayName
+            },
+            hostPublishDelayNanoseconds: 0
+        )
+        let inlineCommandCoordinator = InlineCommandCoordinator(
+            controllers: [emojiPickerController, macroCommandController],
+            inputMethodStateProvider: { inputSourceMonitor.currentState },
+            hostPublishDelayNanoseconds: 25_000_000
         )
         let visualContextCoordinator = VisualContextCoordinator(
             privacyStore: privacySettingsStore,
@@ -136,6 +162,7 @@ struct AutoCompAppEnvironment {
             keystrokeBufferFallback: keystrokeBufferFallback,
             shortcutLeakRepairInserter: acceptanceService,
             suggestionDebugLogger: suggestionDebugLogger,
+            completionTraceRecorder: completionTraceStore,
             debugOptionsProvider: {
                 debugOptionsStore.load()
             }
@@ -165,6 +192,10 @@ struct AutoCompAppEnvironment {
         self.keyboardShortcuts = keyboardShortcuts
         self.emojiVariantPreferencesStore = emojiVariantPreferencesStore
         self.emojiPickerController = emojiPickerController
+        self.macroPreferencesStore = macroPreferencesStore
+        self.macroCommandController = macroCommandController
+        self.inlineCommandCoordinator = inlineCommandCoordinator
+        self.inlineCommandDiagnostics = inlineCommandDiagnostics
         self.inputSourceMonitor = inputSourceMonitor
         self.shortcutSettingsStore = shortcutSettingsStore
         self.completionBackendConfigurationService = completionBackendConfigurationService
@@ -173,12 +204,12 @@ struct AutoCompAppEnvironment {
         self.remoteCompletionConsentStore = remoteCompletionConsentStore
         self.debugOptionsStore = debugOptionsStore
         self.debugArtifactStore = debugArtifactStore
+        self.completionTraceStore = completionTraceStore
         self.pasteboardRecoveryStore = pasteboardRecoveryStore
         self.suggestionDebugLogger = suggestionDebugLogger
         self.overlayRecoveryAdvisor = overlayRecoveryAdvisor
         self.productivityMetricsStore = productivityMetricsStore
         self.installationLocationService = installationLocationService
-        self.telemetryClient = telemetryClient
         self.usesInlinePreviewTestProvider = usesInlinePreviewTestProvider
         self.runsSettingsConnectionUITest = runsSettingsConnectionUITest
         self.usesPlaygroundTestProvider = usesPlaygroundTestProvider
@@ -247,7 +278,7 @@ struct AutoCompAppEnvironment {
         #if AUTOCOMP_CONSTRAINED_LOCAL_COMPLETION
         if ConstrainedLocalCompletionFeature.isEnabled() {
             return ConstrainedLocalCompletionProvider(
-                localConfiguration: settings.localConfiguration,
+                configuration: constrainedLocalConfiguration(settings: settings),
                 runtime: LocalLlamaRuntimeCore(backend: LlamaCppRuntimeBackend()),
                 runtimeStatusRecorder: runtimeStatusStore.makeRecorder()
             )
@@ -262,7 +293,7 @@ struct AutoCompAppEnvironment {
         #if AUTOCOMP_CONSTRAINED_LOCAL_COMPLETION
         if ConstrainedLocalCompletionFeature.isEnabled() {
             return ConstrainedLocalCompletionProvider(
-                localConfiguration: settings.localConfiguration,
+                configuration: constrainedLocalConfiguration(settings: settings),
                 runtimeStatusRecorder: runtimeStatusStore.makeRecorder()
             )
         }
@@ -273,6 +304,22 @@ struct AutoCompAppEnvironment {
         )
         #endif
     }
+
+    #if AUTOCOMP_CONSTRAINED_LOCAL_COMPLETION
+    private static func constrainedLocalConfiguration(
+        settings: CompletionBackendSettings
+    ) -> ConstrainedLocalCompletionConfiguration {
+        let multiBranchEnabled = ConstrainedLocalCompletionFeature.isMultiBranchEnabled()
+        return ConstrainedLocalCompletionConfiguration(
+            localConfiguration: settings.localConfiguration,
+            midWordHealingEnabled: true,
+            multiBranchDecoderEnabled: multiBranchEnabled,
+            tokenProfilePath: multiBranchEnabled
+                ? ConstrainedLocalCompletionFeature.tokenProfilePath(modelPath: settings.localConfiguration.modelPath)
+                : nil
+        )
+    }
+    #endif
 
     private static func fallbackKind(for settings: CompletionBackendSettings) -> CompletionEngineKind? {
         switch settings.engineKind {

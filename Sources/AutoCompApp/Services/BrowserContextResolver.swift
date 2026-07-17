@@ -46,13 +46,93 @@ enum BrowserScriptResult: Equatable {
     case failure(code: Int?, message: String?)
 }
 
-struct BrowserContextResolver {
+final class CompiledBrowserScriptRunner: @unchecked Sendable {
+    typealias Executable = () -> BrowserScriptResult
+    typealias Compiler = (String) -> Executable?
+
+    private let lock = NSLock()
+    private let compiler: Compiler
+    private var executables: [String: Executable] = [:]
+
+    init(compiler: @escaping Compiler = CompiledBrowserScriptRunner.compileAppleScript) {
+        self.compiler = compiler
+    }
+
+    func run(_ source: String) -> BrowserScriptResult {
+        lock.withLock {
+            let executable: Executable
+            if let cached = executables[source] {
+                executable = cached
+            } else {
+                guard let compiled = compiler(source) else {
+                    return .failure(code: nil, message: "AppleScript compilation failed")
+                }
+                executables[source] = compiled
+                executable = compiled
+            }
+            return executable()
+        }
+    }
+
+    private static func compileAppleScript(_ source: String) -> Executable? {
+        guard let script = NSAppleScript(source: source) else { return nil }
+        return {
+            var error: NSDictionary?
+            let descriptor = script.executeAndReturnError(&error)
+            if let error {
+                return .failure(
+                    code: error[NSAppleScript.errorNumber] as? Int,
+                    message: error[NSAppleScript.errorMessage] as? String
+                )
+            }
+            return .success(descriptor.stringValue)
+        }
+    }
+}
+
+struct BrowserContextResolverDiagnostics: Equatable {
+    let cacheHits: Int
+    let scriptExecutions: Int
+}
+
+final class BrowserContextResolver: @unchecked Sendable {
     typealias ScriptRunner = (String) -> BrowserScriptResult
 
-    private let scriptRunner: ScriptRunner
+    private struct CacheEntry {
+        let resolution: BrowserDomainResolution
+        let createdAt: Date
+    }
 
-    init(scriptRunner: @escaping ScriptRunner = BrowserContextResolver.runAppleScript) {
-        self.scriptRunner = scriptRunner
+    private static let sharedScriptRunner = CompiledBrowserScriptRunner()
+    private let lock = NSLock()
+    private let scriptRunner: ScriptRunner
+    private let cacheTTL: TimeInterval
+    private let now: () -> Date
+    private var cache: [String: CacheEntry] = [:]
+    private var cacheHitCount = 0
+    private var scriptExecutionCount = 0
+
+    init(
+        scriptRunner: ScriptRunner? = nil,
+        cacheTTL: TimeInterval = 0.5,
+        now: @escaping () -> Date = { Date() }
+    ) {
+        self.scriptRunner = scriptRunner ?? Self.sharedScriptRunner.run
+        self.cacheTTL = max(0, cacheTTL)
+        self.now = now
+    }
+
+    convenience init(scriptRunner: @escaping ScriptRunner) {
+        self.init(scriptRunner: scriptRunner, cacheTTL: 0.5)
+    }
+
+    var diagnostics: BrowserContextResolverDiagnostics {
+        lock.withLock {
+            BrowserContextResolverDiagnostics(
+                cacheHits: cacheHitCount,
+                scriptExecutions: scriptExecutionCount
+            )
+        }
     }
 
     func activeDomain(for bundleID: String) -> String? {
@@ -64,18 +144,49 @@ struct BrowserContextResolver {
             return BrowserDomainResolution(status: .notBrowser, domain: nil)
         }
 
+        let capturedNow = now()
+        if let cached = lock.withLock({ () -> BrowserDomainResolution? in
+            guard let entry = cache[bundleID],
+                  capturedNow.timeIntervalSince(entry.createdAt) < cacheTTL else {
+                cache.removeValue(forKey: bundleID)
+                return nil
+            }
+            cacheHitCount += 1
+            return entry.resolution
+        }) {
+            return cached
+        }
+
+        let resolution: BrowserDomainResolution
         switch scriptRunner(script) {
         case .success(let urlString):
             guard let urlString,
                   let host = URL(string: urlString)?.host(percentEncoded: false) else {
-                return BrowserDomainResolution(status: .unavailableBrowserScriptFailed, domain: nil)
+                resolution = BrowserDomainResolution(status: .unavailableBrowserScriptFailed, domain: nil)
+                break
             }
-            return .known(normalizedDomain(host: host, urlString: urlString))
+            resolution = .known(normalizedDomain(host: host, urlString: urlString))
         case .failure(let code, let message):
             if Self.isAppleEventsDenied(code: code, message: message) {
-                return BrowserDomainResolution(status: .unavailableAppleEventsDenied, domain: nil)
+                resolution = BrowserDomainResolution(status: .unavailableAppleEventsDenied, domain: nil)
+            } else {
+                resolution = BrowserDomainResolution(status: .unavailableBrowserScriptFailed, domain: nil)
             }
-            return BrowserDomainResolution(status: .unavailableBrowserScriptFailed, domain: nil)
+        }
+        lock.withLock {
+            scriptExecutionCount += 1
+            cache[bundleID] = CacheEntry(resolution: resolution, createdAt: capturedNow)
+        }
+        return resolution
+    }
+
+    func invalidate(bundleID: String? = nil) {
+        lock.withLock {
+            if let bundleID {
+                cache.removeValue(forKey: bundleID)
+            } else {
+                cache.removeAll(keepingCapacity: true)
+            }
         }
     }
 
@@ -102,17 +213,6 @@ struct BrowserContextResolver {
         default:
             return nil
         }
-    }
-
-    private static func runAppleScript(_ script: String) -> BrowserScriptResult {
-        var error: NSDictionary?
-        guard let descriptor = NSAppleScript(source: script)?.executeAndReturnError(&error) else {
-            return .failure(
-                code: error?[NSAppleScript.errorNumber] as? Int,
-                message: error?[NSAppleScript.errorMessage] as? String
-            )
-        }
-        return .success(descriptor.stringValue)
     }
 
     private static func isAppleEventsDenied(code: Int?, message: String?) -> Bool {

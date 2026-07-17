@@ -19,8 +19,8 @@ struct DeveloperSettingsView: View {
     var body: some View {
         SettingsPaneForm(title: "Developer") {
             Section("Debug") {
-                Toggle("Enable local debug artifacts and prompt previews", isOn: debugOptInBinding)
-                SectionFooterNote(text: "When enabled, AutoComp may save prompts, OCR, clipboard context, or typed text to local debug artifacts. Leave this off unless actively debugging.")
+                Toggle("Enable local debug artifacts, traces, and prompt previews", isOn: debugOptInBinding)
+                SectionFooterNote(text: "When enabled, AutoComp writes privacy-safe completion trace JSONL and may save prompts, OCR, clipboard context, or typed text to separately labeled local debug artifacts. Leave this off unless actively debugging.")
                 LabeledContent("Debug artifacts", value: "\(debugArtifactCount)")
                 LabeledContent("Location", value: controller.debugArtifactDirectoryPath)
                 Button("Export Debug Logs...") {
@@ -28,7 +28,7 @@ struct DeveloperSettingsView: View {
                 }
                 DangerZoneView(
                     title: "Delete debug artifacts",
-                    message: "Removes local debug bundles and prompt previews from this Mac."
+                    message: "Removes local debug bundles, completion traces, and prompt previews from this Mac."
                 ) {
                     Button("Delete Debug Artifacts", role: .destructive) {
                         isConfirmingDebugArtifactDeletion = true
@@ -74,12 +74,18 @@ struct DeveloperSettingsView: View {
                     state: debugFlagState(RefreshDiagnostics.isEnabled),
                     statusTitle: enabledTitle(RefreshDiagnostics.isEnabled)
                 )
+                SettingsActionRow(
+                    title: "Pipeline debug logging",
+                    subtitle: "Writes redacted input, completion, and acceptance decisions to the app logger.",
+                    state: debugFlagState(SuggestionPipelineLog.isEnabled),
+                    statusTitle: enabledTitle(SuggestionPipelineLog.isEnabled)
+                )
                 HStack {
                     Button("Copy Focus Overlay Flag") {
                         copyLaunchSnippet("--focus-debug-overlay")
                     }
-                    Button("Copy Geometry Debug Env") {
-                        copyLaunchSnippet("AUTOCOMP_GEOMETRY_DEBUG=1 AUTOCOMP_REFRESH_DEBUG=1")
+                    Button("Copy Debug Logging Env") {
+                        copyLaunchSnippet("AUTOCOMP_GEOMETRY_DEBUG=1 AUTOCOMP_REFRESH_DEBUG=1 AUTOCOMP_PIPELINE_DEBUG=1")
                     }
                 }
                 if let developerMessage {
@@ -226,7 +232,7 @@ struct DeveloperSettingsView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This removes local debug bundles and prompt previews from this Mac.")
+            Text("This removes local debug bundles, completion traces, and prompt previews from this Mac.")
         }
         .confirmationDialog(
             "Apply Redacted Settings Import?",

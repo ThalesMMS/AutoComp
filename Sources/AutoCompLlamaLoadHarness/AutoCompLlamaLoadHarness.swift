@@ -28,16 +28,27 @@ struct AutoCompLlamaLoadHarness {
                     ),
                     runtime: runtime
                 )
+                var elapsedSamples: [Double] = []
+                var prefillSamples: [Double] = []
                 for attempt in 1...options.repeatCount {
                     let attemptStartedAt = Date()
-                    let suggestion = try await provider.complete(context: makeContext(textBeforeCursor: prompt))
-                    let elapsed = Int(Date().timeIntervalSince(attemptStartedAt) * 1_000)
-                    print("Generated local completion \(attempt)/\(options.repeatCount) in \(elapsed) ms: \(suggestion.visibleText)")
+                    let appended = String(repeating: options.appendStep, count: attempt - 1)
+                    _ = try await provider.complete(context: makeContext(textBeforeCursor: prompt + appended))
+                    let elapsed = Date().timeIntervalSince(attemptStartedAt) * 1_000
+                    let stats = backend.cacheStats()
+                    elapsedSamples.append(elapsed)
+                    prefillSamples.append(stats.reuse.prefillMilliseconds)
+                    print(
+                        "Prompt reuse sample \(attempt)/\(options.repeatCount): totalMs=\(format(elapsed)) promptTokens=\(stats.reuse.promptTokens) commonPrefixTokens=\(stats.reuse.commonPrefixTokens) reusedTokens=\(stats.reuse.reusedTokens) prefillTokens=\(stats.reuse.prefillTokens) tokenizationMs=\(format(stats.reuse.tokenizationMilliseconds)) prefillMs=\(format(stats.reuse.prefillMilliseconds)) decodeMs=\(format(stats.reuse.decodeMilliseconds)) rebuilds=\(stats.reuse.cacheRebuilds)"
+                    )
                 }
                 let elapsed = Int(Date().timeIntervalSince(startedAt) * 1_000)
                 let stats = backend.cacheStats()
                 print(
                     "Prompt cache after \(elapsed) ms: hits=\(stats.hits) misses=\(stats.misses) resets=\(stats.resets) retainedPromptTokens=\(stats.retainedPromptTokens) contextTokens=\(stats.contextTokens)"
+                )
+                print(
+                    "Prompt reuse percentiles: totalP50Ms=\(format(percentile(elapsedSamples, 0.50))) totalP95Ms=\(format(percentile(elapsedSamples, 0.95))) prefillP50Ms=\(format(percentile(prefillSamples, 0.50))) prefillP95Ms=\(format(percentile(prefillSamples, 0.95)))"
                 )
             } else {
                 try await runtime.load(configuration: LocalLlamaConfiguration(
@@ -59,8 +70,9 @@ struct AutoCompLlamaLoadHarness {
         var loadVocabularyOnly = false
         var prompt: String?
         var maxTokens = 16
-        var maxRAMBytes: UInt64 = 6_442_450_944
+        var maxRAMBytes = CompletionBackendDefaults.localMaxRAMBytes
         var repeatCount = 1
+        var appendStep = ""
         var printStatus = false
         var remaining = Array(CommandLine.arguments.dropFirst())
 
@@ -116,6 +128,14 @@ struct AutoCompLlamaLoadHarness {
             remaining.remove(at: index)
         }
 
+        if let index = remaining.firstIndex(of: "--append-step") {
+            let valueIndex = remaining.index(after: index)
+            guard valueIndex < remaining.endIndex else { throw HarnessError.missingAppendStep }
+            appendStep = remaining[valueIndex]
+            remaining.remove(at: valueIndex)
+            remaining.remove(at: index)
+        }
+
         if let providedPath = remaining.first {
             modelPath = providedPath
         }
@@ -127,6 +147,7 @@ struct AutoCompLlamaLoadHarness {
             maxTokens: maxTokens,
             maxRAMBytes: maxRAMBytes,
             repeatCount: repeatCount,
+            appendStep: appendStep,
             printStatus: printStatus
         )
     }
@@ -154,6 +175,17 @@ struct AutoCompLlamaLoadHarness {
         )
     }
 
+    private static func percentile(_ values: [Double], _ quantile: Double) -> Double {
+        guard !values.isEmpty else { return 0 }
+        let sorted = values.sorted()
+        let index = Int(ceil(Double(sorted.count) * quantile)) - 1
+        return sorted[max(0, min(index, sorted.count - 1))]
+    }
+
+    private static func format(_ value: Double) -> String {
+        String(format: "%.2f", value)
+    }
+
     private struct Options {
         let modelPath: String?
         let loadVocabularyOnly: Bool
@@ -161,6 +193,7 @@ struct AutoCompLlamaLoadHarness {
         let maxTokens: Int
         let maxRAMBytes: UInt64
         let repeatCount: Int
+        let appendStep: String
         let printStatus: Bool
     }
 
@@ -170,6 +203,7 @@ struct AutoCompLlamaLoadHarness {
         case invalidMaxTokens
         case invalidMaxRAMBytes
         case invalidRepeatCount
+        case missingAppendStep
 
         var errorDescription: String? {
             switch self {
@@ -183,6 +217,8 @@ struct AutoCompLlamaLoadHarness {
                 return "--max-ram-bytes requires a positive integer byte value."
             case .invalidRepeatCount:
                 return "--repeat requires a positive integer value."
+            case .missingAppendStep:
+                return "--append-step requires a value to append between repeated prompts."
             }
         }
     }

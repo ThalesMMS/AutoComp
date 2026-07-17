@@ -73,16 +73,12 @@ final class RedactionSentinelRegressionTests: XCTestCase {
             now: Date(timeIntervalSince1970: 1)
         )
 
-        let telemetryPayload = try redactedTelemetryPayload()
-        let telemetryQueueAfterDelete = try redactedTelemetryQueueAfterDelete()
         let qaLog = try redactedQALogBody()
         let promptPreview = playgroundPreview.promptPreview(options: .normal) ?? "prompt preview hidden"
 
         assertNoSentinels(in: [
             "normal log summaries": redactedLogSummaries(),
             "debug-disabled artifacts": "artifactCount=\(artifactStore.artifactCount())",
-            "telemetry payload": telemetryPayload,
-            "telemetry queued artifacts": telemetryQueueAfterDelete,
             "menu diagnostics": diagnostics.menuRows
                 .map { "\($0.title)=\($0.value)" }
                 .joined(separator: "\n"),
@@ -209,50 +205,6 @@ final class RedactionSentinelRegressionTests: XCTestCase {
             .joined(separator: "\n")
     }
 
-    private func redactedTelemetryPayload() throws -> String {
-        let sink = RecordingTelemetrySink()
-        let client = RedactingTelemetryClient(enabled: true, sink: sink)
-
-        client.capture(telemetryInput())
-
-        return String(data: try JSONEncoder().encode(sink.events()), encoding: .utf8) ?? ""
-    }
-
-    private func redactedTelemetryQueueAfterDelete() throws -> String {
-        let sink = RecordingTelemetrySink()
-        let client = RedactingTelemetryClient(enabled: true, sink: sink)
-
-        client.capture(telemetryInput())
-        client.deleteAll()
-
-        return String(data: try JSONEncoder().encode(sink.events()), encoding: .utf8) ?? ""
-    }
-
-    private func telemetryInput() -> TelemetryEventInput {
-        TelemetryEventInput(
-            name: "sentinel-redaction-regression",
-            appVersion: "1.0.0",
-            buildNumber: "1",
-            backendKind: .remote,
-            technicalError: TelemetryTechnicalError(category: "remote-backend", code: "timeout"),
-            permissionStatuses: [
-                .accessibility: .granted,
-                .inputMonitoring: .granted,
-                .screenRecording: .denied
-            ],
-            bundleID: "com.example.\(axSentinel)",
-            prompt: promptSentinel,
-            textBeforeCursor: axSentinel,
-            textAfterCursor: promptSentinel,
-            clipboard: clipboardSentinel,
-            ocrText: ocrSentinel,
-            screenshotDescription: ocrSentinel,
-            suggestion: axSentinel,
-            url: "https://example.test/private?\(promptSentinel)",
-            domain: "\(clipboardSentinel).example.test"
-        )
-    }
-
     private func redactedQALogBody() throws -> String {
         let root = try packageRoot()
         let logURL = temporaryDirectory()
@@ -319,30 +271,5 @@ final class RedactionSentinelRegressionTests: XCTestCase {
     private func temporaryDirectory() -> URL {
         FileManager.default.temporaryDirectory
             .appendingPathComponent("autocomp-redaction-\(UUID().uuidString)", isDirectory: true)
-    }
-}
-
-private final class RecordingTelemetrySink: TelemetryEventSink, @unchecked Sendable {
-    private let lock = NSLock()
-    private var storedEvents: [TelemetryEvent] = []
-
-    func send(_ event: TelemetryEvent) {
-        lock.lock()
-        storedEvents.append(event)
-        lock.unlock()
-    }
-
-    func deleteAll() {
-        lock.lock()
-        storedEvents.removeAll()
-        lock.unlock()
-    }
-
-    func events() -> [TelemetryEvent] {
-        lock.lock()
-        defer {
-            lock.unlock()
-        }
-        return storedEvents
     }
 }

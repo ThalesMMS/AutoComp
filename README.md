@@ -36,7 +36,7 @@ The app defaults to the remote OpenAI-compatible backend configured in Settings 
 - `AUTOCOMP_LOCAL_MODEL_PATH`
 - `AUTOCOMP_LOCAL_MAX_RAM_BYTES`
 
-Current development defaults point at `http://100.98.1.45:8000` with `default`.
+Fresh installs leave the remote endpoint empty and use `default` as the model placeholder. Configure the endpoint in Settings > Model or provide the development environment variables above before testing remote completions.
 
 When `.env.local` exists, `./script/build_and_run.sh` embeds it into the staged development app as `Contents/Resources/autocomp.env` and prints a warning. Do not share a dev-staged `dist/AutoComp.app` that contains that file. To stage a shareable development bundle without embedded local defaults, run:
 
@@ -51,6 +51,7 @@ Backend modes:
 - Remote OpenAI-compatible sends autocomplete text to the configured endpoint.
 - Apple Intelligence uses FoundationModels only when the framework is available and the OS supports it; otherwise the app reports the backend as unavailable. Remote fallback is opt-in. Settings > Model shows Apple availability, OS/SDK requirement text, fallback state, and the last Apple error.
 - Local in-process is available only in app builds that link the optional llama.cpp runtime and have a configured GGUF model file. The default package build does not link that runtime. Set `AUTOCOMP_ENABLE_LLAMA_RUNTIME=1` to build it through `pkg-config llama`, or set both `AUTOCOMP_LLAMA_CFLAGS` and `AUTOCOMP_LLAMA_LIBS` to provide explicit compiler and linker flags. Remote fallback is opt-in. Settings > Model shows the local runtime state, model path, load state, last local error, memory limit, remote fallback state, and a diagnostics report that checks the GGUF file, runtime dylibs, architecture compatibility, and estimated memory fit.
+- The token-profile/multi-branch local decoder is a separate default-off experiment. Build and validation commands, its binary contract, bounded fallback behavior, and promotion evidence gate are documented in [ExperimentalTokenProfileAndDecoder.md](Docs/ExperimentalTokenProfileAndDecoder.md).
 
 AutoComp's baseline is macOS 14+. Apple Intelligence remains conditional and may require a newer macOS release such as macOS 26. Local in-process completion is also conditional; the app should not be treated as local-capable unless Settings reports both runtime and model file availability.
 
@@ -64,6 +65,8 @@ To validate a local-runtime build environment before enabling it, run:
 ./script/check_llama_pkg_config.sh
 AUTOCOMP_ENABLE_LLAMA_RUNTIME=1 swift build
 ```
+
+The optional accumulated-partial streaming prototype is independently off by default. After linking the local runtime, enable it with `AUTOCOMP_ENABLE_LOCAL_STREAMING=1`. See [Docs/StreamingCompletion.md](Docs/StreamingCompletion.md) for its monotonic publication, cancellation, metrics, and promotion gates.
 
 To validate the **local model diagnostics** UX (GGUF validation, dylib discovery, architecture checks, and memory-fit estimates), use:
 
@@ -83,6 +86,8 @@ Settings > Privacy includes a source policy table for AX text, clipboard context
 ## Architecture Policy
 
 AutoComp implementation and review work must follow the clean-room policy in `Docs/CleanRoomPolicy.md` when behavior is informed by external autocomplete applications. The policy requires AutoComp-owned code, names, tests, UI text, prompts, and assets.
+
+The #262 improvement program is governed by `Docs/ExternalAutocompleteInspirationDecision.md`, which records consulted source revisions/licenses, translates each workstream into AutoComp requirements, and provides the reusable issue/PR checklist.
 
 The app pipeline, composition root, capture flow, prediction flow, overlay tiers, insertion path, privacy boundaries, and testing entry points are mapped in `Docs/Architecture.md`.
 

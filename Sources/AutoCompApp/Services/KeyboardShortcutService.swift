@@ -156,7 +156,8 @@ final class KeyboardShortcutService: @unchecked Sendable {
     private var forwardedInputEventIdentities: Set<ForwardedInputEventIdentity> = []
     private var forwardedInputEventIdentityOrder: [ForwardedInputEventIdentity] = []
     private var isInteractionPipelineSuspended = false
-    private var isEmojiPickerActive = false
+    private var isInlineCommandActive = false
+    private var inlineCommandCapabilities = InlineCommandKeyboardCapabilities.inactive
     private let shortcutOwnershipEvaluator = ShortcutOwnershipEvaluator()
     private let shortcutLogger = AutoCompLogger(category: "shortcuts")
 
@@ -170,6 +171,10 @@ final class KeyboardShortcutService: @unchecked Sendable {
         self.shortcutSettings = shortcutSettings
         self.inputMethodStateProvider = inputMethodStateProvider
         self.tapInstaller = tapInstaller
+    }
+
+    deinit {
+        removeEventTaps()
     }
 
     var diagnostics: KeyboardShortcutServiceDiagnostics {
@@ -297,7 +302,8 @@ final class KeyboardShortcutService: @unchecked Sendable {
         passthroughReplay = nil
         resetForwardedInputEventDeduplication()
         isInteractionPipelineSuspended = false
-        isEmojiPickerActive = false
+        isInlineCommandActive = false
+        inlineCommandCapabilities = .inactive
         inputSuppressionController.reset()
     }
 
@@ -326,11 +332,22 @@ final class KeyboardShortcutService: @unchecked Sendable {
     }
 
     func setEmojiPickerActive(_ active: Bool) {
-        guard isEmojiPickerActive != active else {
-            return
-        }
-        isEmojiPickerActive = active
-        GeometryDebug.log("shortcut-emoji-picker-active active=\(active)")
+        setInlineCommandState(
+            active: active,
+            capabilities: active ? .selectableResults : .inactive
+        )
+    }
+
+    func setInlineCommandState(
+        active: Bool,
+        capabilities: InlineCommandKeyboardCapabilities
+    ) {
+        guard isInlineCommandActive != active || inlineCommandCapabilities != capabilities else { return }
+        isInlineCommandActive = active
+        inlineCommandCapabilities = active ? capabilities : .inactive
+        GeometryDebug.log(
+            "shortcut-inline-command-active active=\(active) accept=\(inlineCommandCapabilities.canAccept) navigate=\(inlineCommandCapabilities.canNavigate)"
+        )
     }
 
     func clearShortcutGrace() {
@@ -484,12 +501,12 @@ final class KeyboardShortcutService: @unchecked Sendable {
             inputEvent: inputEvent,
             matchedCommand: matchedCommand
         )
-        if let emojiCommand = emojiKeyboardCommand(for: inputEvent, matchedCommand: matchedCommand) {
-            GeometryDebug.log("shortcut-emoji-picker-consumed command=\(emojiCommand) keyCode=\(keyCode)")
+        if let route = inlineCommandKeyboardRoute(for: inputEvent, matchedCommand: matchedCommand) {
+            GeometryDebug.log("shortcut-inline-command-route command=\(route.command) consume=\(route.shouldConsume) keyCode=\(keyCode)")
             DispatchQueue.main.async { [weak self] in
-                self?.onEmojiCommand?(emojiCommand)
+                self?.onEmojiCommand?(route.command)
             }
-            return nil
+            if route.shouldConsume { return nil }
         }
         if matchedCommand == nil, let inputEvent {
             dispatchInputEventIfNeeded(inputEvent, inputMethodState: inputMethodState, type: type, event: event)
@@ -625,42 +642,66 @@ final class KeyboardShortcutService: @unchecked Sendable {
         event.flags.intersection([.maskCommand, .maskAlternate, .maskControl, .maskShift]).isEmpty
     }
 
-    private func emojiKeyboardCommand(
+    private struct InlineCommandKeyboardRoute {
+        let command: EmojiKeyboardCommand
+        let shouldConsume: Bool
+    }
+
+    private func inlineCommandKeyboardRoute(
         for inputEvent: CapturedInputEvent?,
         matchedCommand: KeyboardShortcutCommand?
-    ) -> EmojiKeyboardCommand? {
-        guard isEmojiPickerActive else {
+    ) -> InlineCommandKeyboardRoute? {
+        guard isInlineCommandActive else {
             return nil
         }
 
         switch matchedCommand {
         case .acceptNextWord:
-            return .acceptSelected
+            return InlineCommandKeyboardRoute(
+                command: inlineCommandCapabilities.canAccept ? .acceptSelected : .cancel,
+                shouldConsume: inlineCommandCapabilities.canAccept
+            )
         case .dismissSuggestion:
-            return .cancel
+            return InlineCommandKeyboardRoute(command: .cancel, shouldConsume: true)
         case .selectPreviousSuggestion:
-            return .selectPrevious
+            return InlineCommandKeyboardRoute(
+                command: inlineCommandCapabilities.canNavigate ? .selectPrevious : .cancel,
+                shouldConsume: inlineCommandCapabilities.canNavigate
+            )
         case .selectNextSuggestion:
-            return .selectNext
-        case .acceptFullSuggestion, .manualTrigger, .toggleAutocomplete, nil:
+            return InlineCommandKeyboardRoute(
+                command: inlineCommandCapabilities.canNavigate ? .selectNext : .cancel,
+                shouldConsume: inlineCommandCapabilities.canNavigate
+            )
+        case .acceptFullSuggestion:
+            return InlineCommandKeyboardRoute(command: .cancel, shouldConsume: false)
+        case .manualTrigger, .toggleAutocomplete, nil:
             break
         }
 
         switch inputEvent {
         case .tab:
-            return .acceptSelected
+            return InlineCommandKeyboardRoute(
+                command: inlineCommandCapabilities.canAccept ? .acceptSelected : .cancel,
+                shouldConsume: inlineCommandCapabilities.canAccept
+            )
         case .dismissal:
-            return .cancel
+            return InlineCommandKeyboardRoute(command: .cancel, shouldConsume: true)
         case .navigation(let keyCode):
+            guard inlineCommandCapabilities.canNavigate else {
+                return InlineCommandKeyboardRoute(command: .cancel, shouldConsume: false)
+            }
             switch keyCode {
             case 123, 126:
-                return .selectPrevious
+                return InlineCommandKeyboardRoute(command: .selectPrevious, shouldConsume: true)
             case 124, 125:
-                return .selectNext
+                return InlineCommandKeyboardRoute(command: .selectNext, shouldConsume: true)
             default:
                 return nil
             }
-        case .text, .acceptAll, .shortcutMutation, .pointer, nil:
+        case .acceptAll:
+            return InlineCommandKeyboardRoute(command: .cancel, shouldConsume: false)
+        case .text, .shortcutMutation, .pointer, nil:
             return nil
         }
     }

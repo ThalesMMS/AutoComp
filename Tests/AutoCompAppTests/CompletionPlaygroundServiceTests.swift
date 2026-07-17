@@ -9,7 +9,10 @@ final class CompletionPlaygroundServiceTests: XCTestCase {
         let preview = service.preview(
             prefix: "Please write ",
             suffix: "",
-            settings: CompletionBackendSettings(remoteModel: "test-model")
+            settings: CompletionBackendSettings(
+                remoteBaseURL: "http://127.0.0.1:8000",
+                remoteModel: "test-model"
+            )
         )
 
         XCTAssertEqual(preview.request.mode, .continuation)
@@ -17,8 +20,8 @@ final class CompletionPlaygroundServiceTests: XCTestCase {
         XCTAssertEqual(preview.request.truncatedTextBeforeCursor, "Please write ")
         XCTAssertNil(preview.request.truncatedTextAfterCursor)
         XCTAssertEqual(preview.request.model, "test-model")
-        XCTAssertEqual(preview.requestDestinationTitle, "Remote: test-model at http://100.98.1.45:8000")
-        XCTAssertTrue(preview.dataLeavesDeviceTitle.contains("sent to http://100.98.1.45:8000"))
+        XCTAssertEqual(preview.requestDestinationTitle, "Remote: test-model at http://127.0.0.1:8000")
+        XCTAssertTrue(preview.dataLeavesDeviceTitle.contains("sent to http://127.0.0.1:8000"))
         XCTAssertEqual(preview.remoteFallbackTitle, "Not applicable because the remote backend is selected.")
     }
 

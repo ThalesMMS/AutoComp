@@ -14,12 +14,14 @@ final class CIHeadlessScriptTests: XCTestCase {
             "build_without_llama.sh",
             "build_with_llama.sh",
             "swift test",
+            "swift run AutoCompBench",
             "release_build.sh",
             "AUTOCOMP_CI_RUN_LLAMA_MATRIX",
             "Accessibility, AppleEvents, TextEdit, System Events, or real host apps",
             "EXIT_BUILD_FAILURE=10",
             "EXIT_TEST_FAILURE=11",
             "EXIT_RELEASE_DRY_RUN_FAILURE=12",
+            "EXIT_BENCHMARK_FAILURE=13",
             "EXIT_MISSING_TARGET=20",
             "EXIT_ENVIRONMENT_SKIP=30"
         ] {
@@ -30,7 +32,8 @@ final class CIHeadlessScriptTests: XCTestCase {
     func testDiscoveryOnlyReportsRequiredTargetsAndOptionalRuntimeSkip() throws {
         let packageDump = try writePackageDump(testTargets: [
             "AutoCompAppTests",
-            "AutoCompCoreTests"
+            "AutoCompCoreTests",
+            "AutoCompBenchTests"
         ])
         defer {
             try? FileManager.default.removeItem(at: packageDump)
@@ -44,13 +47,15 @@ final class CIHeadlessScriptTests: XCTestCase {
         XCTAssertEqual(result.status, 0, result.output)
         XCTAssertTrue(result.output.contains("AutoCompAppTests"))
         XCTAssertTrue(result.output.contains("AutoCompCoreTests"))
+        XCTAssertTrue(result.output.contains("AutoCompBenchTests"))
         XCTAssertTrue(result.output.contains("environment skip: AutoCompLlamaRuntimeTests"))
         XCTAssertTrue(result.output.contains("discovery-only complete"))
     }
 
     func testDiscoveryOnlyFailsClearlyForMissingExpectedTarget() throws {
         let packageDump = try writePackageDump(testTargets: [
-            "AutoCompCoreTests"
+            "AutoCompCoreTests",
+            "AutoCompBenchTests"
         ])
         defer {
             try? FileManager.default.removeItem(at: packageDump)

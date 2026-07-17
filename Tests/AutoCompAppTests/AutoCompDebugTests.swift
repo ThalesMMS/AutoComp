@@ -5,6 +5,44 @@ import AutoCompCore
 import XCTest
 
 final class AutoCompDebugTests: XCTestCase {
+    func testDisabledDebugChannelDoesNotEvaluateMessage() {
+        var evaluationCount = 0
+        let channel = DebugChannel(
+            category: "test",
+            prefix: "Test",
+            isEnabled: false,
+            privacy: .redactWholeMessage
+        )
+
+        channel.log({
+            evaluationCount += 1
+            return "SECRET expensive payload"
+        }())
+
+        XCTAssertEqual(evaluationCount, 0)
+    }
+
+    func testDebugFlagResolutionUsesInjectedSnapshot() {
+        XCTAssertTrue(DebugChannel.flagEnabled(
+            argument: "--probe-debug",
+            environmentVariable: "PROBE_DEBUG",
+            arguments: ["AutoComp", "--probe-debug"],
+            environment: [:]
+        ))
+        XCTAssertTrue(DebugChannel.flagEnabled(
+            argument: "--probe-debug",
+            environmentVariable: "PROBE_DEBUG",
+            arguments: [],
+            environment: ["PROBE_DEBUG": "1"]
+        ))
+        XCTAssertFalse(DebugChannel.flagEnabled(
+            argument: "--probe-debug",
+            environmentVariable: "PROBE_DEBUG",
+            arguments: [],
+            environment: [:]
+        ))
+    }
+
     func testRedactedSummaryDoesNotExposeSourceText() {
         let secret = "private prompt text 123"
 
@@ -244,6 +282,7 @@ final class AutoCompDebugTests: XCTestCase {
             try? FileManager.default.removeItem(at: exportRoot)
         }
 
+        XCTAssertFalse(recorder.isEnabled)
         recorder.record(
             focusSnapshot: makeFocusSnapshot(secretText: "secret field text"),
             geometry: makeGeometry(),
@@ -259,6 +298,7 @@ final class AutoCompDebugTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
 
         enabled = true
+        XCTAssertTrue(recorder.isEnabled)
         recorder.record(
             focusSnapshot: makeFocusSnapshot(secretText: "secret field text"),
             geometry: makeGeometry(),
@@ -384,7 +424,6 @@ final class AutoCompDebugTests: XCTestCase {
             isGoogleDocsElement: false,
             isCodexComposerElement: false,
             selectedRange: NSRange(location: 7, length: 6),
-            fullText: secretText,
             textLength: (secretText as NSString).length,
             textBeforeCursor: "secret field prefix",
             textAfterCursor: "secret field suffix",

@@ -22,14 +22,14 @@ struct AutoCompDebugOptions: Codable, Equatable, Sendable {
 }
 
 final class AutoCompDebugOptionsStore: @unchecked Sendable {
-    private let defaults: UserDefaults
+    private let defaults: MirroredUserDefaults
     private let key: String
 
     init(
         defaults: UserDefaults = .standard,
         key: String = "debugOptions"
     ) {
-        self.defaults = defaults
+        self.defaults = MirroredUserDefaults(primary: defaults)
         self.key = key
     }
 
@@ -38,18 +38,14 @@ final class AutoCompDebugOptionsStore: @unchecked Sendable {
             return AutoCompDebugOptions(localDebugOptIn: true)
         }
 
-        guard let data = defaults.data(forKey: key),
-              let options = try? JSONDecoder().decode(AutoCompDebugOptions.self, from: data) else {
+        guard let options = defaults.decode(AutoCompDebugOptions.self, forKey: key) else {
             return .normal
         }
         return options
     }
 
     func save(_ options: AutoCompDebugOptions) {
-        guard let data = try? JSONEncoder().encode(options) else {
-            return
-        }
-        defaults.set(data, forKey: key)
+        try? defaults.encode(options, forKey: key)
     }
 }
 
@@ -94,11 +90,78 @@ struct AutoCompLogger: Sendable {
     }
 }
 
-enum SuggestionPipelineLog {
-    private static let logger = AutoCompLogger(category: "suggestion-pipeline")
+struct DebugChannel: Sendable {
+    enum Privacy: Sendable {
+        case redactWholeMessage
+        case preRedactedStructured
+    }
 
-    static func log(_ event: String, fields: [String] = []) {
-        logger.info(line(event: event, fields: fields))
+    let isEnabled: Bool
+    private let prefix: String
+    private let privacy: Privacy
+    private let writesToStandardError: Bool
+    private let logger: AutoCompLogger
+    private let unredactedSink: (@Sendable (String) -> Void)?
+
+    init(
+        category: String,
+        prefix: String,
+        isEnabled: Bool,
+        privacy: Privacy,
+        writesToStandardError: Bool = false,
+        unredactedSink: (@Sendable (String) -> Void)? = nil
+    ) {
+        self.isEnabled = isEnabled
+        self.prefix = prefix
+        self.privacy = privacy
+        self.writesToStandardError = writesToStandardError
+        self.logger = AutoCompLogger(category: category)
+        self.unredactedSink = unredactedSink
+    }
+
+    func log(_ message: @autoclosure () -> String) {
+        guard isEnabled else { return }
+        let resolvedMessage = message()
+        let safeMessage: String
+        switch privacy {
+        case .redactWholeMessage:
+            safeMessage = AutoCompLogger.redactedSummary(for: resolvedMessage).description
+        case .preRedactedStructured:
+            safeMessage = resolvedMessage
+        }
+        let line = prefix.isEmpty ? safeMessage : "\(prefix) \(safeMessage)"
+        logger.info(line)
+        if writesToStandardError, let data = "\(line)\n".data(using: .utf8) {
+            FileHandle.standardError.write(data)
+        }
+        unredactedSink?(resolvedMessage)
+    }
+
+    static func flagEnabled(
+        argument: String,
+        environmentVariable: String,
+        arguments: [String] = ProcessInfo.processInfo.arguments,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> Bool {
+        arguments.contains(argument) || environment[environmentVariable] == "1"
+    }
+}
+
+enum SuggestionPipelineLog {
+    private static let channel = DebugChannel(
+        category: "suggestion-pipeline",
+        prefix: "",
+        isEnabled: DebugChannel.flagEnabled(
+            argument: "--pipeline-debug",
+            environmentVariable: "AUTOCOMP_PIPELINE_DEBUG"
+        ),
+        privacy: .preRedactedStructured
+    )
+
+    static let isEnabled = channel.isEnabled
+
+    static func log(_ event: String, fields: @autoclosure () -> [String] = []) {
+        channel.log(line(event: event, fields: fields()))
     }
 
     static func line(event: String, fields: [String] = []) -> String {
@@ -261,6 +324,7 @@ struct DebugArtifactStore {
     func exportDebugLogs(
         to destinationDirectory: URL,
         options: AutoCompDebugOptions,
+        completionTraceStore: CompletionTraceStore? = nil,
         createdAt: Date = Date()
     ) throws -> URL {
         let exportDirectory = destinationDirectory
@@ -282,6 +346,8 @@ struct DebugArtifactStore {
             atomically: true,
             encoding: .utf8
         )
+
+        try completionTraceStore?.export(to: exportDirectory)
 
         guard !artifacts.isEmpty else {
             return exportDirectory

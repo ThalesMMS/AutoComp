@@ -90,5 +90,23 @@
     "textAfterCursor": " porque o prazo mudou.",
     "rawText": " porque o prazo mudou.adiada",
     "expectedText": "adiada"
+  },
+  {
+    "name": "mid-word-portuguese-stem",
+    "source": "handwritten",
+    "categories": ["midWordHealing", "suffixEcho", "mixedLanguage"],
+    "textBeforeCursor": "Fígado de dimens",
+    "textAfterCursor": "ões preservadas",
+    "rawText": "ões adicionais, ões preservadas",
+    "expectedText": "ões adicionais,"
+  },
+  {
+    "name": "partial-suffix-safe-boundary",
+    "source": "handwritten",
+    "categories": ["partialSuffixOverlap", "suffixEcho"],
+    "textBeforeCursor": "Resumo: ",
+    "textAfterCursor": "preservadas",
+    "rawText": "texto preserv",
+    "expectedText": "texto"
   }
 ]

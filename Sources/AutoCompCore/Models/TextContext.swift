@@ -181,6 +181,10 @@ public struct TextContext: Identifiable, Codable, Equatable, Sendable {
     public let nextGlyphRect: CGRect?
     public let lineReferenceRect: CGRect?
     public let caretGeometryQuality: CaretGeometryQuality
+    /// Optional for backwards-compatible decoding of snapshots written before provenance existed.
+    public let caretGeometryProvenance: CaretGeometryProvenance?
+    /// Optional for backwards-compatible decoding; live AX capture always sets this explicitly.
+    public let caretGeometryCoordinateSpace: CaretGeometryCoordinateSpace?
     public let observedCharacterWidth: CGFloat?
     public let languageHint: String?
     public let captureSources: Set<TextCaptureSource>
@@ -203,6 +207,8 @@ public struct TextContext: Identifiable, Codable, Equatable, Sendable {
         nextGlyphRect: CGRect? = nil,
         lineReferenceRect: CGRect? = nil,
         caretGeometryQuality: CaretGeometryQuality = .unavailable,
+        caretGeometryProvenance: CaretGeometryProvenance? = .unknown,
+        caretGeometryCoordinateSpace: CaretGeometryCoordinateSpace? = .accessibilityGlobal,
         observedCharacterWidth: CGFloat? = nil,
         languageHint: String? = nil,
         captureSources: Set<TextCaptureSource> = [.accessibility],
@@ -224,6 +230,8 @@ public struct TextContext: Identifiable, Codable, Equatable, Sendable {
         self.nextGlyphRect = nextGlyphRect
         self.lineReferenceRect = lineReferenceRect
         self.caretGeometryQuality = caretGeometryQuality
+        self.caretGeometryProvenance = caretGeometryProvenance
+        self.caretGeometryCoordinateSpace = caretGeometryCoordinateSpace
         self.observedCharacterWidth = observedCharacterWidth
         self.languageHint = languageHint
         self.captureSources = captureSources
@@ -232,7 +240,9 @@ public struct TextContext: Identifiable, Codable, Equatable, Sendable {
 
     public func copy(
         textBeforeCursor: String? = nil,
-        stableFieldIdentity: StableFieldIdentity?? = nil
+        stableFieldIdentity: StableFieldIdentity?? = nil,
+        languageHint: String?? = nil,
+        captureSources: Set<TextCaptureSource>? = nil
     ) -> TextContext {
         TextContext(
             id: id,
@@ -251,9 +261,11 @@ public struct TextContext: Identifiable, Codable, Equatable, Sendable {
             nextGlyphRect: nextGlyphRect,
             lineReferenceRect: lineReferenceRect,
             caretGeometryQuality: caretGeometryQuality,
+            caretGeometryProvenance: caretGeometryProvenance,
+            caretGeometryCoordinateSpace: caretGeometryCoordinateSpace,
             observedCharacterWidth: observedCharacterWidth,
-            languageHint: languageHint,
-            captureSources: captureSources,
+            languageHint: languageHint ?? self.languageHint,
+            captureSources: captureSources ?? self.captureSources,
             createdAt: createdAt
         )
     }

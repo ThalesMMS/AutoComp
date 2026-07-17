@@ -25,8 +25,14 @@ final class AcceptanceServiceTests: XCTestCase {
     func testUnicodePayloadPreservesAccentsAndEmojiUTF16Units() {
         let text = "cafe\u{301} 🚀"
         let units = AcceptanceUnicodePayload.utf16Units(for: text)
+        let scalarPayloads = AcceptanceUnicodePayload.utf16UnitsByScalar(for: text)
 
         XCTAssertEqual(String(decoding: units, as: UTF16.self), text)
+        XCTAssertEqual(
+            scalarPayloads.map { String(decoding: $0, as: UTF16.self) },
+            ["c", "a", "f", "e", "\u{301}", " ", "🚀"]
+        )
+        XCTAssertEqual(scalarPayloads.last?.count, 2)
     }
 
     func testEmojiReplacementDeletesTrailingUTF16RunBeforeInsertingGlyph() throws {
@@ -81,7 +87,7 @@ final class AcceptanceServiceTests: XCTestCase {
         )
     }
 
-    func testPerCharacterInsertionRegistersPairPerUTF16Unit() async throws {
+    func testPerCharacterInsertionRegistersPairPerUnicodeScalarEvent() async throws {
         let poster = RecordingAcceptanceKeyboardEventPoster()
         let suppressionController = InputSuppressionController()
         let service = acceptanceService(
@@ -126,6 +132,33 @@ final class AcceptanceServiceTests: XCTestCase {
         XCTAssertEqual(acceptedText, "done ")
         XCTAssertEqual(poster.unicodeStrings, ["d", "o", "n", "e", " "])
         XCTAssertTrue(poster.keyEvents.isEmpty)
+        try assertSyntheticPairs(
+            suppressionController,
+            keyCode: 0,
+            flags: [],
+            count: 5
+        )
+    }
+
+    func testBrowserPerCharacterInsertionKeepsNonBMPScalarInOneEvent() async throws {
+        let poster = RecordingAcceptanceKeyboardEventPoster()
+        let suppressionController = InputSuppressionController()
+        let service = acceptanceService(
+            keyboardEventPoster: poster,
+            inputSuppressionController: suppressionController,
+            insertionPolicy: AcceptanceInsertionPolicy(singleUnicodeFastPathEnabled: true),
+            frontmostBundleID: "com.google.Chrome"
+        )
+        var suggestion = Suggestion(
+            baseContextID: UUID(),
+            visibleText: "go 🚀!",
+            latencyMs: 20
+        )
+
+        let acceptedText = try await service.acceptAll(from: &suggestion)
+
+        XCTAssertEqual(acceptedText, "go 🚀!")
+        XCTAssertEqual(poster.unicodeStrings, ["g", "o", " ", "🚀", "!"])
         try assertSyntheticPairs(
             suppressionController,
             keyCode: 0,
@@ -212,6 +245,37 @@ final class AcceptanceServiceTests: XCTestCase {
             flags: .maskCommand,
             count: 1
         )
+    }
+
+    func testClipboardRestoresInMemorySnapshotWhenRecoverySaveFails() async throws {
+        let poster = RecordingAcceptanceKeyboardEventPoster()
+        let pasteboard = RecordingAcceptancePasteboard()
+        let recoveryStore = try makeFailingPasteboardRecoveryStore()
+        let originalItems = [
+            PreservedPasteboardItem(dataByType: [.string: Data("original clipboard".utf8)])
+        ]
+        pasteboard.items = originalItems
+        let service = acceptanceService(
+            keyboardEventPoster: poster,
+            pasteboard: pasteboard,
+            pasteboardRecoveryStore: recoveryStore,
+            clipboardRestoreDelay: 0
+        )
+        let longText = String(repeating: "x", count: 65)
+        var suggestion = Suggestion(
+            baseContextID: UUID(),
+            visibleText: longText,
+            latencyMs: 20
+        )
+
+        let acceptedText = try await service.acceptAll(from: &suggestion)
+
+        XCTAssertEqual(acceptedText, longText)
+        XCTAssertEqual(pasteboard.setStrings, [longText])
+        XCTAssertEqual(pasteboard.recordedRecoveryMarkerIDs.count, 1)
+        XCTAssertNotNil(pasteboard.recordedRecoveryMarkerIDs[0])
+        XCTAssertEqual(pasteboard.items, originalItems)
+        XCTAssertNil(pasteboard.activeRecoveryMarkerID)
     }
 
     func testPasteboardRecoveryRestoresMarkedSnapshotAfterRestart() throws {
@@ -399,6 +463,18 @@ final class AcceptanceServiceTests: XCTestCase {
             now: now
         )
     }
+
+    private func makeFailingPasteboardRecoveryStore() throws -> PasteboardInsertionRecoveryStore {
+        let parent = FileManager.default.temporaryDirectory
+            .appendingPathComponent("autocomp-pasteboard-save-failure-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+        addTeardownBlock {
+            try? FileManager.default.removeItem(at: parent)
+        }
+        let fileBlockingDirectoryCreation = parent.appendingPathComponent("not-a-directory")
+        try Data("blocker".utf8).write(to: fileBlockingDirectoryCreation)
+        return PasteboardInsertionRecoveryStore(directory: fileBlockingDirectoryCreation)
+    }
 }
 
 private final class RecordingAcceptanceKeyboardEventPoster: AcceptanceKeyboardEventPosting {
@@ -429,6 +505,7 @@ private final class RecordingAcceptancePasteboard: AcceptancePasteboard {
     var items: [PreservedPasteboardItem]?
     var activeRecoveryMarkerID: String?
     private(set) var setStrings: [String] = []
+    private(set) var recordedRecoveryMarkerIDs: [String?] = []
 
     func preservedItems() -> [PreservedPasteboardItem]? {
         items
@@ -441,6 +518,7 @@ private final class RecordingAcceptancePasteboard: AcceptancePasteboard {
 
     func setString(_ text: String, recoveryMarkerID: String?) {
         setStrings.append(text)
+        recordedRecoveryMarkerIDs.append(recoveryMarkerID)
         activeRecoveryMarkerID = recoveryMarkerID
         items = [
             PreservedPasteboardItem(dataByType: [.string: Data(text.utf8)])

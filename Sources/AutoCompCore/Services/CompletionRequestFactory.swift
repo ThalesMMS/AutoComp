@@ -30,18 +30,20 @@ public struct CompletionRequestFactory: Sendable {
         )
         let allowedVisualContext = promptBuilder.truncatedVisualContext(privacyAllowedVisualContext)
         let allowedClipboardContext = promptBuilder.truncatedClipboardContext(privacyAllowedClipboardContext)
+        let preparedContext = promptBuilder.prepare(context)
         let prompt = promptBuilder.prompt(
             for: context,
+            preparedContext: preparedContext,
             privacySettings: privacySettings,
             visualContext: allowedVisualContext,
             clipboardContext: allowedClipboardContext,
             personalizationSamples: personalizationSamples
         )
-        let requestMode = promptBuilder.mode(for: context)
-        let truncatedTextBeforeCursor = promptBuilder.truncatedTextBeforeCursor(for: context)
-        let truncatedTextAfterCursor = promptBuilder.truncatedTextAfterCursor(for: context)
-        let truncatedSelectedText = promptBuilder.truncatedSelectedText(for: context)
-        let truncatedFullTextWindow = promptBuilder.truncatedFullTextWindow(for: context)
+        let requestMode = preparedContext.mode
+        let truncatedTextBeforeCursor = preparedContext.textBeforeCursor
+        let truncatedTextAfterCursor = preparedContext.textAfterCursor
+        let truncatedSelectedText = preparedContext.selectedText
+        let truncatedFullTextWindow = preparedContext.fullTextWindow
         let allowedCaptureSources = allowedCaptureSources(
             from: context.captureSources,
             privacySettings: privacySettings

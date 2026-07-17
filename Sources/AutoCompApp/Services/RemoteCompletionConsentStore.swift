@@ -27,14 +27,14 @@ final class RemoteCompletionConsentStore: @unchecked Sendable {
         var remoteFallbackEndpoint: String?
     }
 
-    private let defaults: UserDefaults
+    private let defaults: MirroredUserDefaults
     private let key: String
 
     init(
         defaults: UserDefaults = .standard,
         key: String = "remoteCompletionConsent"
     ) {
-        self.defaults = defaults
+        self.defaults = MirroredUserDefaults(primary: defaults)
         self.key = key
     }
 
@@ -95,18 +95,14 @@ final class RemoteCompletionConsentStore: @unchecked Sendable {
     }
 
     private func load() -> State {
-        guard let data = defaults.data(forKey: key),
-              let state = try? JSONDecoder().decode(State.self, from: data) else {
+        guard let state = defaults.decode(State.self, forKey: key) else {
             return State()
         }
         return state
     }
 
     private func save(_ state: State) {
-        guard let data = try? JSONEncoder().encode(state) else {
-            return
-        }
-        defaults.set(data, forKey: key)
+        try? defaults.encode(state, forKey: key)
     }
 
     private func endpoint(

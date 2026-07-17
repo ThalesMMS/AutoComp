@@ -68,6 +68,8 @@ enum CaretPrediction {
             nextGlyphRect: context.nextGlyphRect,
             lineReferenceRect: context.lineReferenceRect,
             caretGeometryQuality: context.caretGeometryQuality,
+            caretGeometryProvenance: .hiddenTextLayoutEstimate,
+            caretGeometryCoordinateSpace: context.caretGeometryCoordinateSpace,
             observedCharacterWidth: context.observedCharacterWidth,
             languageHint: context.languageHint,
             captureSources: context.captureSources,

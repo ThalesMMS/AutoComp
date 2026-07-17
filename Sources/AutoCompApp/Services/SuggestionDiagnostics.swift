@@ -23,10 +23,40 @@ struct SuggestionDiagnostics: Equatable {
         let focusedElementID: String?
         let contextSource: String
         let geometryQuality: String
+        let geometryProvenance: String
+        let geometryCoordinateSpace: String
         let contextTrust: String
         let contextWarning: String?
         let hasCaretRect: Bool
         let hasFocusedElementRect: Bool
+
+        init(
+            appDisplayName: String,
+            bundleID: String,
+            domain: String?,
+            focusedElementID: String?,
+            contextSource: String,
+            geometryQuality: String,
+            geometryProvenance: String = CaretGeometryProvenance.unknown.rawValue,
+            geometryCoordinateSpace: String = CaretGeometryCoordinateSpace.accessibilityGlobal.rawValue,
+            contextTrust: String,
+            contextWarning: String?,
+            hasCaretRect: Bool,
+            hasFocusedElementRect: Bool
+        ) {
+            self.appDisplayName = appDisplayName
+            self.bundleID = bundleID
+            self.domain = domain
+            self.focusedElementID = focusedElementID
+            self.contextSource = contextSource
+            self.geometryQuality = geometryQuality
+            self.geometryProvenance = geometryProvenance
+            self.geometryCoordinateSpace = geometryCoordinateSpace
+            self.contextTrust = contextTrust
+            self.contextWarning = contextWarning
+            self.hasCaretRect = hasCaretRect
+            self.hasFocusedElementRect = hasFocusedElementRect
+        }
     }
 
     struct SupplementalContext: Equatable {
@@ -226,9 +256,21 @@ struct SuggestionDiagnostics: Equatable {
         let resets: UInt64
         let retainedPromptTokens: Int
         let contextTokens: UInt32
+        let reuse: LocalPromptReuseMetrics
+        let lastResetReason: LlamaPromptCacheResetReason?
 
         var summary: String {
-            "hits \(hits), misses \(misses), resets \(resets), retained \(retainedPromptTokens)/\(contextTokens)"
+            let base = "hits \(hits), misses \(misses), resets \(resets), retained \(retainedPromptTokens)/\(contextTokens)"
+            guard reuse.promptTokens > 0 else { return base }
+            let reason = lastResetReason.map { ", reason \($0.rawValue)" } ?? ""
+            return base
+                + ", last common/reused/prefill \(reuse.commonPrefixTokens)/\(reuse.reusedTokens)/\(reuse.prefillTokens)"
+                + ", tokenize/prefill/decode \(format(reuse.tokenizationMilliseconds))/\(format(reuse.prefillMilliseconds))/\(format(reuse.decodeMilliseconds)) ms"
+                + reason
+        }
+
+        private func format(_ value: Double) -> String {
+            String(format: "%.1f", value)
         }
     }
 
@@ -258,6 +300,8 @@ struct SuggestionDiagnostics: Equatable {
             rows.append(SuggestionDiagnosticRow(id: "focus", title: "Focus", value: focus.appDisplayName))
             rows.append(SuggestionDiagnosticRow(id: "contextSource", title: "Context Source", value: focus.contextSource))
             rows.append(SuggestionDiagnosticRow(id: "geometry", title: "Geometry", value: focus.geometryQuality))
+            rows.append(SuggestionDiagnosticRow(id: "geometryProvenance", title: "Geometry Source", value: focus.geometryProvenance))
+            rows.append(SuggestionDiagnosticRow(id: "geometryCoordinateSpace", title: "Geometry Space", value: focus.geometryCoordinateSpace))
             rows.append(SuggestionDiagnosticRow(id: "contextTrust", title: "Context Trust", value: focus.contextTrust))
             if let contextWarning = focus.contextWarning {
                 rows.append(SuggestionDiagnosticRow(id: "contextWarning", title: "Context Warning", value: contextWarning))
@@ -338,6 +382,8 @@ struct SuggestionDiagnostics: Equatable {
             focusedElementID: context.focusedElementID,
             contextSource: captureDiagnostics.contextSourceTitle,
             geometryQuality: captureDiagnostics.geometryQualityTitle,
+            geometryProvenance: (context.caretGeometryProvenance ?? .unknown).rawValue,
+            geometryCoordinateSpace: (context.caretGeometryCoordinateSpace ?? .accessibilityGlobal).rawValue,
             contextTrust: captureDiagnostics.trustTitle,
             contextWarning: captureDiagnostics.lowTrustWarning,
             hasCaretRect: context.caretRect != nil,
@@ -603,7 +649,9 @@ struct SuggestionDiagnostics: Equatable {
             misses: stats.misses,
             resets: stats.resets,
             retainedPromptTokens: stats.retainedPromptTokens,
-            contextTokens: stats.contextTokens
+            contextTokens: stats.contextTokens,
+            reuse: stats.reuse,
+            lastResetReason: stats.lastResetReason
         )
     }
 

@@ -51,12 +51,13 @@ final class SuggestionPublicationController {
         _ suggestion: Suggestion,
         context: TextContext,
         displayMode: SuggestionDisplayMode,
-        collectionAllowed: Bool
+        collectionAllowed: Bool,
+        updateExisting: Bool = false
     ) -> SuggestionPublicationResult {
         let normalizationStartedAt = ContinuousClock.now
-        let normalizedSuggestion = self.normalizedSuggestion(suggestion, for: context)
+        let policyDecision = SuggestionPublicationPolicy.evaluate(suggestion, for: context)
         let normalizationMs = normalizationStartedAt.duration(to: .now).milliseconds
-        guard !normalizedSuggestion.visibleText.isEmpty else {
+        guard case .publish(let normalizedSuggestion) = policyDecision else {
             presenter.hide()
             return SuggestionPublicationResult(
                 outcome: .rejected(.emptyAfterNormalization),
@@ -76,7 +77,11 @@ final class SuggestionPublicationController {
         }
 
         let overlayStartedAt = ContinuousClock.now
-        presenter.show(normalizedSuggestion, for: context, mode: displayMode)
+        if updateExisting {
+            presenter.update(normalizedSuggestion, for: context, mode: displayMode)
+        } else {
+            presenter.show(normalizedSuggestion, for: context, mode: displayMode)
+        }
         let overlayMs = overlayStartedAt.duration(to: .now).milliseconds
         var statusParts = ["Suggesting in \(context.app.displayName)"]
         if normalizedSuggestion.hasMultipleAlternatives {
@@ -102,34 +107,6 @@ final class SuggestionPublicationController {
                 )
             ]
         )
-    }
-
-    private func normalizedSuggestion(_ suggestion: Suggestion, for context: TextContext) -> Suggestion {
-        guard textEndsWithSuggestionTriggerWhitespace(context.textBeforeCursor) else {
-            return suggestion
-        }
-
-        var normalized = suggestion
-        normalized.visibleText = droppingLeadingWhitespaceAndNewlines(from: normalized.visibleText)
-        normalized.remainingText = droppingLeadingWhitespaceAndNewlines(from: normalized.remainingText)
-        return normalized
-    }
-
-    private func droppingLeadingWhitespaceAndNewlines(from text: String) -> String {
-        let firstNonWhitespace = text.unicodeScalars.firstIndex {
-            !CharacterSet.whitespacesAndNewlines.contains($0)
-        }
-        guard let firstNonWhitespace else {
-            return ""
-        }
-        return String(text.unicodeScalars[firstNonWhitespace...])
-    }
-
-    private func textEndsWithSuggestionTriggerWhitespace(_ text: String) -> Bool {
-        guard let lastScalar = text.unicodeScalars.last else {
-            return false
-        }
-        return CharacterSet.whitespacesAndNewlines.contains(lastScalar)
     }
 
     private func log(

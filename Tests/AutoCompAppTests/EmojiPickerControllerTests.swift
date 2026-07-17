@@ -53,6 +53,11 @@ final class EmojiPickerControllerTests: XCTestCase {
             contextProvider: contextProvider,
             textReplacer: replacer,
             panelController: panel,
+            hostPublishAwaiter: HostPublishAwaiter(configuration: .init(
+                firstReadDelayNanoseconds: 0,
+                pollIntervalNanoseconds: 0,
+                timeoutNanoseconds: 0
+            )),
             hostPublishDelayNanoseconds: 0
         )
         var activeStates: [Bool] = []
@@ -109,6 +114,11 @@ final class EmojiPickerControllerTests: XCTestCase {
             contextProvider: contextProvider,
             textReplacer: replacer,
             panelController: panel,
+            hostPublishAwaiter: HostPublishAwaiter(configuration: .init(
+                firstReadDelayNanoseconds: 0,
+                pollIntervalNanoseconds: 0,
+                timeoutNanoseconds: 0
+            )),
             hostPublishDelayNanoseconds: 0
         )
 
@@ -149,12 +159,23 @@ final class EmojiPickerControllerTests: XCTestCase {
             contextProvider: contextProvider,
             textReplacer: replacer,
             panelController: panel,
+            hostPublishAwaiter: HostPublishAwaiter(configuration: .init(
+                firstReadDelayNanoseconds: 0,
+                pollIntervalNanoseconds: 0,
+                timeoutNanoseconds: 0
+            )),
             hostPublishDelayNanoseconds: 0
         )
+        let committed = expectation(description: "Clicked emoji committed")
+        controller.onActiveChanged = { isActive in
+            if !isActive {
+                committed.fulfill()
+            }
+        }
 
         _ = await controller.handleInputEvent(.text(keyCode: 0, isSuggestionTrigger: false))
         panel.select(index: 0)
-        await Task.yield()
+        await fulfillment(of: [committed], timeout: 1)
 
         XCTAssertEqual(replacer.replacements, [
             RecordingEmojiTextReplacer.Replacement(utf16Length: 7, text: "🚀")

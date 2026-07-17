@@ -43,7 +43,18 @@ public enum SuggestionTextNormalizer {
             promptEchoCandidates: promptEchoCandidates
         )
         text = removeLeadingExplanatoryPreamble(from: text)
-        text = removeTrailingTextEcho(from: text, trailingText: trailingText)
+        let normalizedTrailingText = trailingText?
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        text = removeTrailingTextEcho(from: text, trailingText: normalizedTrailingText)
+        if let trailingText = normalizedTrailingText, !trailingText.isEmpty {
+            switch SuffixOverlapTruncator().truncate(candidate: text, suffix: trailingText) {
+            case .keep(let value), .truncated(let value, _):
+                text = value
+            case .suppress:
+                text = ""
+            }
+        }
 
         if endsWithWhitespace(precedingText) {
             text = droppingLeadingHorizontalWhitespace(from: text)

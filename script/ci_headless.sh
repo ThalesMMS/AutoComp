@@ -6,6 +6,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 EXIT_BUILD_FAILURE=10
 EXIT_TEST_FAILURE=11
 EXIT_RELEASE_DRY_RUN_FAILURE=12
+EXIT_BENCHMARK_FAILURE=13
 EXIT_MISSING_TARGET=20
 EXIT_ENVIRONMENT_SKIP=30
 
@@ -22,6 +23,7 @@ Exit codes:
   10  build or package discovery failure
   11  test failure
   12  release dry-run failure
+  13  deterministic fixture benchmark regression
   20  missing expected test target
   30  required optional environment is unavailable
 
@@ -83,7 +85,7 @@ run_without_llama_env() (
 )
 
 split_expected_targets() {
-  local raw="${AUTOCOMP_CI_EXPECT_TEST_TARGETS:-AutoCompCoreTests AutoCompAppTests}"
+  local raw="${AUTOCOMP_CI_EXPECT_TEST_TARGETS:-AutoCompCoreTests AutoCompAppTests AutoCompBenchTests}"
   raw="${raw//,/ }"
   # shellcheck disable=SC2206
   EXPECTED_TARGETS=($raw)
@@ -133,7 +135,7 @@ contains_target() {
 
 verify_test_directories() {
   local missing=()
-  for directory in Tests/AutoCompCoreTests Tests/AutoCompAppTests Tests/AutoCompLlamaRuntimeTests; do
+  for directory in Tests/AutoCompCoreTests Tests/AutoCompAppTests Tests/AutoCompBenchTests Tests/AutoCompLlamaRuntimeTests; do
     if [[ ! -d "$directory" ]]; then
       missing+=("$directory")
     fi
@@ -188,6 +190,12 @@ else
   report "environment skip: llama build matrix not requested"
 fi
 run_step "tests" "$EXIT_TEST_FAILURE" run_without_llama_env swift test
+run_step "deterministic fixture benchmark" "$EXIT_BENCHMARK_FAILURE" \
+  run_without_llama_env swift run AutoCompBench \
+    --mode fixture \
+    --suite all \
+    --baseline Benchmarks/Baselines/fixture-baseline.json \
+    --output .build/ci-autocomp-bench
 run_step "release dry-run" "$EXIT_RELEASE_DRY_RUN_FAILURE" \
   run_without_llama_env "$ROOT_DIR/script/release_build.sh" \
     --dry-run \

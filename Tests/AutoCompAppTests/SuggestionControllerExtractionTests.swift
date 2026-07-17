@@ -36,7 +36,7 @@ final class SuggestionControllerExtractionTests: XCTestCase {
     }
 
     func testPredictionControllerInvalidatesEarlierDebouncedWork() async {
-        let controller = SuggestionPredictionController(debounceInterval: 0.01)
+        let controller = SuggestionPredictionController()
         var firedWorkIDs: [Int] = []
         let fired = expectation(description: "latest work fired")
 
@@ -64,6 +64,36 @@ final class SuggestionControllerExtractionTests: XCTestCase {
         await fulfillment(of: [fired], timeout: 1)
         XCTAssertEqual(firedWorkIDs, [secondWorkID])
         XCTAssertTrue(controller.isCurrent(secondWorkID))
+    }
+
+    func testPredictionControllerExecutesCalculatedRemainingDebounce() async {
+        let controller = SuggestionPredictionController()
+        let decision = SuggestionSchedulingPolicy(configuration: .init(
+            localTargetMs: 40,
+            minimumTargetMs: 0
+        )).decision(.init(
+            route: .localLlama,
+            invocation: .automatic,
+            mutation: .insert,
+            hostPublishElapsedMs: 10,
+            hostPublishOutcome: .published
+        ))
+        let fired = expectation(description: "calculated scheduling fired")
+        var observedOutcome: SuggestionScheduledWorkOutcome?
+
+        controller.replaceScheduledWork(decision: decision) { _, outcome in
+            await MainActor.run {
+                observedOutcome = outcome
+                fired.fulfill()
+            }
+        }
+
+        await fulfillment(of: [fired], timeout: 1)
+        guard case .ready(let elapsedMs) = observedOutcome else {
+            return XCTFail("Expected ready scheduled work")
+        }
+        XCTAssertEqual(decision.remainingDebounceMs, 30)
+        XCTAssertGreaterThanOrEqual(elapsedMs, 25)
     }
 
     func testAcceptanceControllerAcceptsNextWordAndPredictsPresentationContext() async throws {

@@ -33,34 +33,52 @@ struct OverlayGeometryValidator {
     }
 
     func validate(context: TextContext) -> OverlayGeometryValidation {
-        let focusedElementRect = validatedElementRect(context.focusedElementRect)
+        let coordinateSpace = context.caretGeometryCoordinateSpace ?? .accessibilityGlobal
+        guard coordinateSpace == .accessibilityGlobal || coordinateSpace == .appKitGlobal else {
+            GeometryDebug.log("overlay-geometry rejected-coordinate-space space=\(coordinateSpace.rawValue)")
+            return OverlayGeometryValidation(
+                focusedElementRect: nil,
+                caretRect: nil,
+                previousGlyphRect: nil,
+                nextGlyphRect: nil,
+                lineReferenceRect: nil
+            )
+        }
+        let focusedElementRect = validatedElementRect(
+            context.focusedElementRect,
+            coordinateSpace: coordinateSpace
+        )
         let caretRect = validatedMetricRect(
             context.caretRect,
             name: "caret",
             quality: context.caretGeometryQuality,
             selectedRange: context.selectedRange,
-            focusedElementRect: focusedElementRect
+            focusedElementRect: focusedElementRect,
+            coordinateSpace: coordinateSpace
         )
         let previousGlyphRect = validatedMetricRect(
             context.previousGlyphRect ?? context.lineReferenceRect,
             name: "previous-glyph",
             quality: context.caretGeometryQuality,
             selectedRange: context.selectedRange,
-            focusedElementRect: focusedElementRect
+            focusedElementRect: focusedElementRect,
+            coordinateSpace: coordinateSpace
         )
         let nextGlyphRect = validatedMetricRect(
             context.nextGlyphRect,
             name: "next-glyph",
             quality: context.caretGeometryQuality,
             selectedRange: context.selectedRange,
-            focusedElementRect: focusedElementRect
+            focusedElementRect: focusedElementRect,
+            coordinateSpace: coordinateSpace
         )
         let lineReferenceRect = validatedMetricRect(
             context.lineReferenceRect,
             name: "line-reference",
             quality: context.caretGeometryQuality,
             selectedRange: context.selectedRange,
-            focusedElementRect: focusedElementRect
+            focusedElementRect: focusedElementRect,
+            coordinateSpace: coordinateSpace
         )
         return OverlayGeometryValidation(
             focusedElementRect: focusedElementRect,
@@ -71,7 +89,10 @@ struct OverlayGeometryValidator {
         )
     }
 
-    private func validatedElementRect(_ rawRect: CGRect?) -> CGRect? {
+    private func validatedElementRect(
+        _ rawRect: CGRect?,
+        coordinateSpace: CaretGeometryCoordinateSpace
+    ) -> CGRect? {
         guard let rawRect,
               rawRect.isFiniteAndNonEmpty,
               rawRect.width <= screenFrame.width * 1.2,
@@ -84,7 +105,11 @@ struct OverlayGeometryValidator {
             return nil
         }
 
-        guard let converted = convertedRect(rawRect, name: "focused-element") else {
+        guard let converted = convertedRect(
+            rawRect,
+            name: "focused-element",
+            coordinateSpace: coordinateSpace
+        ) else {
             return nil
         }
         GeometryDebug.log("overlay-geometry accepted metric=focused-element converted=\(converted)")
@@ -96,7 +121,8 @@ struct OverlayGeometryValidator {
         name: String,
         quality: CaretGeometryQuality,
         selectedRange: NSRange?,
-        focusedElementRect: CGRect?
+        focusedElementRect: CGRect?,
+        coordinateSpace: CaretGeometryCoordinateSpace
     ) -> CGRect? {
         guard let rawRect else {
             return nil
@@ -124,7 +150,11 @@ struct OverlayGeometryValidator {
             return nil
         }
 
-        guard let converted = convertedRect(normalizedRawRect, name: name) else {
+        guard let converted = convertedRect(
+            normalizedRawRect,
+            name: name,
+            coordinateSpace: coordinateSpace
+        ) else {
             return nil
         }
 
@@ -145,9 +175,15 @@ struct OverlayGeometryValidator {
         return converted
     }
 
-    private func convertedRect(_ rawRect: CGRect, name: String) -> CGRect? {
+    private func convertedRect(
+        _ rawRect: CGRect,
+        name: String,
+        coordinateSpace: CaretGeometryCoordinateSpace
+    ) -> CGRect? {
         for candidate in rawRectCandidates(rawRect) {
-            let converted = OverlayGeometry.appKitRect(accessibilityRect: candidate.rect, screenFrame: screenFrame)
+            let converted = coordinateSpace == .appKitGlobal
+                ? candidate.rect
+                : OverlayGeometry.appKitRect(accessibilityRect: candidate.rect, screenFrame: screenFrame)
             guard converted.isFiniteAndNonEmpty else {
                 continue
             }
@@ -159,7 +195,9 @@ struct OverlayGeometryValidator {
             }
         }
 
-        let converted = OverlayGeometry.appKitRect(accessibilityRect: rawRect, screenFrame: screenFrame)
+        let converted = coordinateSpace == .appKitGlobal
+            ? rawRect
+            : OverlayGeometry.appKitRect(accessibilityRect: rawRect, screenFrame: screenFrame)
         GeometryDebug.log("overlay-geometry rejected-outside-screen metric=\(name) raw=\(rawRect) converted=\(converted)")
         return nil
     }

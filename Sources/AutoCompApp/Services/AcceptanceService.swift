@@ -61,6 +61,12 @@ struct AcceptanceUnicodePayload {
     static func utf16Units(for text: String) -> [UniChar] {
         Array(text.utf16)
     }
+
+    static func utf16UnitsByScalar(for text: String) -> [[UniChar]] {
+        text.unicodeScalars.map { scalar in
+            Array(String(scalar).utf16)
+        }
+    }
 }
 
 protocol AcceptanceKeyboardEventPosting: AnyObject {
@@ -337,17 +343,19 @@ final class AcceptanceService: TextInserter, ShortcutLeakRepairing {
     }
 
     private func insertByKeyboardEvents(_ text: String) throws {
-        let units = AcceptanceUnicodePayload.utf16Units(for: text)
+        let scalarPayloads = AcceptanceUnicodePayload.utf16UnitsByScalar(for: text)
         var postedPairCount = 0
-        for unit in units {
-            guard keyboardEventPoster.postUnicodeString([unit]) else {
+        for payload in scalarPayloads {
+            guard keyboardEventPoster.postUnicodeString(payload) else {
                 registerSyntheticKeyboardPairs(postedPairCount)
                 throw AcceptanceError.insertionFailed
             }
             postedPairCount += 1
         }
         registerSyntheticKeyboardPairs(postedPairCount)
-        GeometryDebug.log("insertion-strategy strategy=per-character utf16Length=\(units.count)")
+        GeometryDebug.log(
+            "insertion-strategy strategy=per-character utf16Length=\(text.utf16.count) eventCount=\(scalarPayloads.count)"
+        )
     }
 
     private func insertByClipboard(_ text: String) throws {
@@ -364,8 +372,10 @@ final class AcceptanceService: TextInserter, ShortcutLeakRepairing {
             try pasteboardRecoveryStore?.save(recoverySnapshot)
             shouldUseRecoveryMarker = pasteboardRecoveryStore != nil
         } catch {
-            shouldUseRecoveryMarker = false
-            acceptanceLogger.error("pasteboard-recovery skipped reason=snapshot-save-failed")
+            // The in-memory transaction can still restore safely in this process. Keep the
+            // ownership marker so a concurrent user clipboard change remains protected.
+            shouldUseRecoveryMarker = pasteboardRecoveryStore != nil
+            acceptanceLogger.error("pasteboard-recovery degraded reason=snapshot-save-failed fallback=marker-only")
         }
 
         transaction.writeTemporaryString(text, to: pasteboard, includeRecoveryMarker: shouldUseRecoveryMarker)

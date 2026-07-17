@@ -91,6 +91,25 @@ final class SuggestionPublicationControllerTests: XCTestCase {
         XCTAssertEqual(presenter.lastMode, .mirrorWindow)
     }
 
+    func testStreamingUpdateUsesPresenterUpdateInsteadOfAnotherShow() {
+        let presenter = RecordingSuggestionPresenter()
+        let controller = SuggestionPublicationController(presenter: presenter)
+        let context = textContext(textBeforeCursor: "Hello ")
+        let suggestion = Suggestion(baseContextID: context.id, visibleText: "world", latencyMs: 8)
+
+        _ = controller.publish(
+            suggestion,
+            context: context,
+            displayMode: .inline,
+            collectionAllowed: false,
+            updateExisting: true
+        )
+
+        XCTAssertEqual(presenter.showCount, 0)
+        XCTAssertEqual(presenter.updateCount, 1)
+        XCTAssertEqual(presenter.lastSuggestion?.visibleText, "world")
+    }
+
     func testPublicationNormalizesLeadingWhitespaceAndNewlinesAfterTriggerWhitespace() {
         let presenter = RecordingSuggestionPresenter()
         let controller = SuggestionPublicationController(presenter: presenter)

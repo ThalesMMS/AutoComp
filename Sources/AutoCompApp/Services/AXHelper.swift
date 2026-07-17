@@ -100,8 +100,7 @@ struct AXHelper {
                 placeholder: stringAttribute("AXPlaceholderValue", from: element),
                 domType: stringAttribute("AXDOMType", from: element),
                 domIdentifier: stringAttribute("AXDOMIdentifier", from: element),
-                domClassList: stringListAttribute("AXDOMClassList", from: element),
-                value: stringAttribute(kAXValueAttribute, from: element)
+                domClassList: stringListAttribute("AXDOMClassList", from: element)
             )
         )
     }
@@ -109,103 +108,6 @@ struct AXHelper {
     func readableText(from element: AXUIElement) -> String? {
         stringAttribute(kAXValueAttribute, from: element)
             ?? stringAttribute(kAXSelectedTextAttribute, from: element)
-    }
-
-    func textBeforeCursor(
-        from element: AXUIElement,
-        selectedRange: NSRange?,
-        fullText: String?
-    ) -> String? {
-        guard let selectedRange,
-              selectedRange.location != NSNotFound else {
-            return fullText
-        }
-
-        if let rangedPrefix = stringForRange(
-            from: element,
-            range: prefixRange(endingAt: selectedRange.location)
-        ) {
-            return rangedPrefix
-        }
-
-        guard let fullText else {
-            return nil
-        }
-
-        let textLength = (fullText as NSString).length
-        guard selectedRange.location <= textLength else {
-            return fullText
-        }
-        return (fullText as NSString).substring(to: selectedRange.location)
-    }
-
-    func textAfterCursor(
-        from element: AXUIElement,
-        selectedRange: NSRange?,
-        fullText: String?,
-        textLength: Int
-    ) -> String? {
-        guard let selectedRange,
-              selectedRange.location != NSNotFound else {
-            return nil
-        }
-
-        let suffixStart = selectedRange.location + selectedRange.length
-        guard suffixStart >= 0 else {
-            return nil
-        }
-
-        let rangedLength = max(0, textLength - suffixStart)
-        if let rangedSuffix = stringForRange(
-            from: element,
-            range: CFRange(location: suffixStart, length: rangedLength)
-        ) {
-            return nonEmpty(rangedSuffix)
-        }
-
-        guard let fullText else {
-            return nil
-        }
-
-        let nsText = fullText as NSString
-        guard suffixStart <= nsText.length else {
-            return nil
-        }
-        return nonEmpty(nsText.substring(from: suffixStart))
-    }
-
-    func selectedText(
-        from element: AXUIElement,
-        selectedRange: NSRange?,
-        fullText: String?
-    ) -> String? {
-        guard let selectedRange,
-              selectedRange.location != NSNotFound,
-              selectedRange.length > 0 else {
-            return nil
-        }
-
-        if let rangedSelection = stringForRange(
-            from: element,
-            range: CFRange(location: selectedRange.location, length: selectedRange.length)
-        ) {
-            return nonEmpty(rangedSelection)
-        }
-
-        guard let fullText else {
-            return nil
-        }
-
-        let nsText = fullText as NSString
-        guard selectedRange.location >= 0,
-              selectedRange.location + selectedRange.length <= nsText.length else {
-            return nil
-        }
-        return nonEmpty(nsText.substring(with: selectedRange))
-    }
-
-    func prefixRange(endingAt location: Int) -> CFRange {
-        CFRange(location: 0, length: max(0, location))
     }
 
     func numberOfCharacters(from element: AXUIElement) -> Int? {
@@ -266,13 +168,12 @@ struct AXHelper {
     }
 
     func capabilityPresence(for element: AXUIElement) -> AXElementCapabilityPresence {
-        AXElementCapabilityPresence(
-            hasAXValue: supportsAttribute(kAXValueAttribute, from: element),
-            hasAXSelectedTextRange: supportsAttribute(kAXSelectedTextRangeAttribute, from: element),
-            hasAXBoundsForRange: supportsParameterizedAttribute(
-                kAXBoundsForRangeParameterizedAttribute,
-                from: element
-            )
+        let attributes = attributeNames(from: element)
+        let parameterizedAttributes = parameterizedAttributeNames(from: element)
+        return AXElementCapabilityPresence(
+            hasAXValue: attributes.contains(kAXValueAttribute),
+            hasAXSelectedTextRange: attributes.contains(kAXSelectedTextRangeAttribute),
+            hasAXBoundsForRange: parameterizedAttributes.contains(kAXBoundsForRangeParameterizedAttribute)
         )
     }
 
@@ -455,27 +356,24 @@ struct AXHelper {
         return nil
     }
 
-    private func supportsAttribute(_ attribute: String, from element: AXUIElement) -> Bool {
+    private func attributeNames(from element: AXUIElement) -> Set<String> {
         var namesRef: CFArray?
         let status = AXUIElementCopyAttributeNames(element, &namesRef)
         guard status == .success,
               let namesRef else {
-            return false
+            return []
         }
-        return (namesRef as NSArray).contains(attribute)
+        return Set((namesRef as NSArray).compactMap { $0 as? String })
     }
 
-    private func supportsParameterizedAttribute(_ attribute: String, from element: AXUIElement) -> Bool {
+    private func parameterizedAttributeNames(from element: AXUIElement) -> Set<String> {
         var namesRef: CFArray?
         let status = AXUIElementCopyParameterizedAttributeNames(element, &namesRef)
         guard status == .success,
               let namesRef else {
-            return false
+            return []
         }
-        return (namesRef as NSArray).contains(attribute)
+        return Set((namesRef as NSArray).compactMap { $0 as? String })
     }
 
-    private func nonEmpty(_ text: String) -> String? {
-        text.isEmpty ? nil : text
-    }
 }

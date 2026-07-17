@@ -2,6 +2,32 @@ import AutoCompCore
 import XCTest
 
 final class LocalLlamaCompletionProviderTests: XCTestCase {
+    func testStreamingNormalizesAccumulatedRuntimePartialsAndMarksFinal() async throws {
+        let modelURL = try makeTemporaryModelFile()
+        let backend = FakeLocalLlamaRuntimeBackend(streamTexts: ["hel", "hello"])
+        let provider = LocalLlamaCompletionProvider(
+            configuration: LocalLlamaConfiguration(modelPath: modelURL.path),
+            runtime: LocalLlamaRuntimeCore(backend: backend)
+        )
+        let context = makeContext()
+        let metadata = StreamingCompletionMetadata(
+            traceContext: CompletionTraceContext(),
+            workID: 9,
+            requestedRoute: .localLlama
+        )
+        let request = ProviderInvocation.Request(context: context)
+        var partials: [CompletionPartial] = []
+
+        for try await partial in provider.streamCompletion(request: request, metadata: metadata) {
+            partials.append(partial)
+        }
+
+        XCTAssertEqual(partials.map(\.accumulatedText), ["hel", "hello"])
+        XCTAssertEqual(partials.map(\.providerSequence), [1, 2])
+        XCTAssertEqual(partials.map(\.phase), [.partial, .final])
+        XCTAssertEqual(partials.map(\.metadata), [metadata, metadata])
+    }
+
     func testUnavailableRuntimeBackendExposesOptionalBuildDiagnostic() async throws {
         let modelURL = try makeTemporaryModelFile()
         let backend = UnavailableLocalLlamaRuntimeBackend()
@@ -334,6 +360,146 @@ final class LocalLlamaCompletionProviderTests: XCTestCase {
         XCTAssertEqual(modelChanged, .modelChanged)
     }
 
+    func testPromptCacheSignatureClassifiesEveryRuntimeCompatibilityDimension() {
+        let context = makeContext()
+        let local = LocalLlamaConfiguration(modelPath: "/tmp/model.gguf", maxTokens: 16)
+        let remote = RemoteCompletionConfiguration(
+            baseURL: "local://in-process",
+            apiKey: "local",
+            model: "local-llama",
+            maxTokens: 16,
+            stopSequences: CompletionStopSequences(continuation: ["\n"], fillInMiddle: ["<fim>"])
+        )
+        let request = CompletionRequestFactory(temperature: 0.2).makeRequest(
+            for: context,
+            configuration: remote
+        )
+        let base = LlamaPromptCache(
+            context: context,
+            configuration: local,
+            request: request,
+            tokenizerSignature: "tokenizer-a",
+            rendererVersion: "renderer-a",
+            decoderCapabilities: "decoder-a",
+            privacySettings: PrivacySettings()
+        )
+
+        func signature(
+            context nextContext: TextContext = context,
+            local nextLocal: LocalLlamaConfiguration = local,
+            request nextRequest: CompletionRequest? = request,
+            tokenizer: String? = "tokenizer-a",
+            renderer: String = "renderer-a",
+            decoder: String = "decoder-a",
+            privacy: PrivacySettings = PrivacySettings()
+        ) -> LlamaPromptCache {
+            LlamaPromptCache(
+                context: nextContext,
+                configuration: nextLocal,
+                request: nextRequest,
+                tokenizerSignature: tokenizer,
+                rendererVersion: renderer,
+                decoderCapabilities: decoder,
+                privacySettings: privacy
+            )
+        }
+
+        XCTAssertNil(signature().resetReason(comparedTo: base))
+        XCTAssertEqual(signature(tokenizer: "tokenizer-b").resetReason(comparedTo: base), .tokenizerChanged)
+        XCTAssertEqual(signature(renderer: "renderer-b").resetReason(comparedTo: base), .rendererChanged)
+        XCTAssertEqual(signature(decoder: "decoder-b").resetReason(comparedTo: base), .decoderCapabilitiesChanged)
+        XCTAssertEqual(
+            signature(privacy: PrivacySettings(clipboardContextEnabled: true)).resetReason(comparedTo: base),
+            .privacyChanged
+        )
+
+        let fimContext = makeContext(textAfterCursor: "later")
+        let fimRequest = CompletionRequestFactory(temperature: 0.2).makeRequest(
+            for: fimContext,
+            configuration: remote
+        )
+        XCTAssertEqual(
+            signature(context: fimContext, request: fimRequest).resetReason(comparedTo: base),
+            .requestModeChanged
+        )
+
+        let hotterRequest = CompletionRequestFactory(temperature: 0.7).makeRequest(
+            for: context,
+            configuration: remote
+        )
+        XCTAssertEqual(signature(request: hotterRequest).resetReason(comparedTo: base), .samplingChanged)
+
+        let changedStops = CompletionRequestFactory(temperature: 0.2).makeRequest(
+            for: context,
+            configuration: RemoteCompletionConfiguration(
+                baseURL: "local://in-process",
+                apiKey: "local",
+                model: "local-llama",
+                maxTokens: 16,
+                stopSequences: CompletionStopSequences(continuation: ["STOP"], fillInMiddle: ["<fim>"])
+            )
+        )
+        XCTAssertEqual(signature(request: changedStops).resetReason(comparedTo: base), .stopPolicyChanged)
+    }
+
+    func testPromptCacheUsesStableFieldIdentityInsteadOfVolatileElementID() {
+        let app = AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 7)
+        let stable = StableFieldIdentity(app: app, role: "AXTextArea", focusChangeSequence: 11)
+        let configuration = LocalLlamaConfiguration(modelPath: "/tmp/model.gguf")
+        let first = LlamaPromptCache(
+            context: makeContext(focusedElementID: "volatile-a", app: app, stableFieldIdentity: stable),
+            configuration: configuration
+        )
+        let sameLogicalField = LlamaPromptCache(
+            context: makeContext(focusedElementID: "volatile-b", app: app, stableFieldIdentity: stable),
+            configuration: configuration
+        )
+        let nextField = LlamaPromptCache(
+            context: makeContext(
+                focusedElementID: "volatile-c",
+                app: app,
+                stableFieldIdentity: stable.withFocusChangeSequence(12)
+            ),
+            configuration: configuration
+        )
+
+        XCTAssertNil(sameLogicalField.resetReason(comparedTo: first))
+        XCTAssertEqual(nextField.resetReason(comparedTo: sameLogicalField), .fieldChanged)
+    }
+
+    func testPromptCacheFieldEqualityIsTransitiveAndDistinguishesMissingIdentity() {
+        let app = AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 7)
+        let configuration = LocalLlamaConfiguration(modelPath: "/tmp/model.gguf")
+        let unspecifiedRole = StableFieldIdentity(app: app)
+        let textArea = StableFieldIdentity(app: app, role: "AXTextArea")
+        let textField = StableFieldIdentity(app: app, role: "AXTextField")
+        XCTAssertTrue(unspecifiedRole.matchesStableTarget(textArea))
+        XCTAssertTrue(unspecifiedRole.matchesStableTarget(textField))
+        XCTAssertFalse(textArea.matchesStableTarget(textField))
+
+        let unspecified = LlamaPromptCache(
+            context: makeContext(app: app, stableFieldIdentity: unspecifiedRole),
+            configuration: configuration
+        )
+        let area = LlamaPromptCache(
+            context: makeContext(app: app, stableFieldIdentity: textArea),
+            configuration: configuration
+        )
+        let field = LlamaPromptCache(
+            context: makeContext(app: app, stableFieldIdentity: textField),
+            configuration: configuration
+        )
+        let missing = LlamaPromptCache(
+            context: makeContext(app: app, stableFieldIdentity: nil),
+            configuration: configuration
+        )
+
+        XCTAssertEqual(area.resetReason(comparedTo: unspecified), .fieldChanged)
+        XCTAssertEqual(field.resetReason(comparedTo: unspecified), .fieldChanged)
+        XCTAssertEqual(field.resetReason(comparedTo: area), .fieldChanged)
+        XCTAssertEqual(missing.resetReason(comparedTo: unspecified), .fieldChanged)
+    }
+
     private func makeTemporaryModelFile() throws -> URL {
         let url = temporaryDirectory().appendingPathComponent("\(UUID().uuidString).gguf")
         try Data("fake model".utf8).write(to: url)
@@ -359,6 +525,7 @@ final class LocalLlamaCompletionProviderTests: XCTestCase {
 
 private actor FakeLocalLlamaRuntimeBackend: LocalLlamaRuntimeBackend {
     let rawText: String
+    nonisolated let streamTexts: [String]?
     let loadError: Error?
     let appliesStopSequences: Bool
     private(set) var loadCount = 0
@@ -369,10 +536,16 @@ private actor FakeLocalLlamaRuntimeBackend: LocalLlamaRuntimeBackend {
     private var runtimeEvents: [String] = []
     private var storedRequest: CompletionRequest?
 
-    init(rawText: String = "review this", loadError: Error? = nil, appliesStopSequences: Bool = false) {
+    init(
+        rawText: String = "review this",
+        loadError: Error? = nil,
+        appliesStopSequences: Bool = false,
+        streamTexts: [String]? = nil
+    ) {
         self.rawText = rawText
         self.loadError = loadError
         self.appliesStopSequences = appliesStopSequences
+        self.streamTexts = streamTexts
     }
 
     func loadModel(configuration: LocalLlamaConfiguration) async throws {
@@ -391,6 +564,35 @@ private actor FakeLocalLlamaRuntimeBackend: LocalLlamaRuntimeBackend {
             return CompletionStopSequenceTrimmer.trim(rawText, stopSequences: request.stopSequences)
         }
         return rawText
+    }
+
+    nonisolated func generateCompletionStream(
+        for request: CompletionRequest
+    ) -> AsyncThrowingStream<LocalLlamaRuntimePartial, Error> {
+        guard let streamTexts else {
+            return AsyncThrowingStream { continuation in
+                Task {
+                    do {
+                        let text = try await self.generateCompletion(for: request)
+                        continuation.yield(.init(rawAccumulatedText: text, providerSequence: 1, isFinal: true, latencyMs: 1))
+                        continuation.finish()
+                    } catch {
+                        continuation.finish(throwing: error)
+                    }
+                }
+            }
+        }
+        return AsyncThrowingStream { continuation in
+            for (index, text) in streamTexts.enumerated() {
+                continuation.yield(.init(
+                    rawAccumulatedText: text,
+                    providerSequence: index + 1,
+                    isFinal: index == streamTexts.count - 1,
+                    latencyMs: index + 1
+                ))
+            }
+            continuation.finish()
+        }
     }
 
     func resetPromptCache() async {

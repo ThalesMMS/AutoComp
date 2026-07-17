@@ -63,6 +63,9 @@ struct CompletionBackendSettings: Equatable {
     ///   - `stopSequences`
     ///   - `multiSuggestionEnabled`
     static let defaultMultiSuggestionEnabled = false
+    static let defaultRemoteBaseURL = CompletionBackendDefaults.remoteBaseURL
+    static let defaultRemoteModel = CompletionBackendDefaults.remoteModel
+    static let defaultLocalMaxRAMBytes = CompletionBackendDefaults.localMaxRAMBytes
 
     var engineKind: CompletionEngineKind
     var remoteBaseURL: String
@@ -79,11 +82,11 @@ struct CompletionBackendSettings: Equatable {
 
     init(
         engineKind: CompletionEngineKind = .remote,
-        remoteBaseURL: String = "http://100.98.1.45:8000",
+        remoteBaseURL: String = CompletionBackendSettings.defaultRemoteBaseURL,
         remoteAPIKey: String = "",
-        remoteModel: String = "default",
+        remoteModel: String = CompletionBackendSettings.defaultRemoteModel,
         localModelPath: String = CompletionBackendSettings.defaultLocalModelPath,
-        localMaxRAMBytes: UInt64 = 6_442_450_944,
+        localMaxRAMBytes: UInt64 = CompletionBackendSettings.defaultLocalMaxRAMBytes,
         localRuntimeState: LocalLlamaRuntimeState = .unavailableInBuild,
         localLastError: String? = nil,
         fallbackToRemoteOnLocalFailure: Bool = false,
@@ -146,8 +149,7 @@ struct CompletionBackendSettings: Equatable {
 }
 
 struct CompletionBackendConfigurationService {
-    private let defaults: UserDefaults
-    private let mirroredDefaults: [UserDefaults]
+    private let defaults: MirroredUserDefaults
     private let keychainService: String
     private let keychainAccount: String
     private let defaultsPrefix = "completionBackend."
@@ -158,8 +160,7 @@ struct CompletionBackendConfigurationService {
         keychainService: String = "com.autocomp.backend",
         keychainAccount: String = "remote-api-key"
     ) {
-        self.defaults = defaults
-        self.mirroredDefaults = mirroredDefaults ?? Self.defaultMirroredDefaults(for: defaults)
+        self.defaults = MirroredUserDefaults(primary: defaults, mirrors: mirroredDefaults)
         self.keychainService = keychainService
         self.keychainAccount = keychainAccount
     }
@@ -174,18 +175,18 @@ struct CompletionBackendConfigurationService {
             engineKind: CompletionEngineKind(rawValue: string(forKey: defaultsPrefix + "kind") ?? "") ?? .remote,
             remoteBaseURL: string(forKey: defaultsPrefix + "remoteBaseURL")
                 ?? values["AUTOCOMP_REMOTE_BASE_URL"]
-                ?? "http://100.98.1.45:8000",
+                ?? CompletionBackendSettings.defaultRemoteBaseURL,
             remoteAPIKey: loadRemoteAPIKey(defaultValue: values["AUTOCOMP_REMOTE_API_KEY"] ?? ""),
             remoteModel: string(forKey: defaultsPrefix + "remoteModel")
                 ?? values["AUTOCOMP_REMOTE_MODEL"]
-                ?? "default",
+                ?? CompletionBackendSettings.defaultRemoteModel,
             localModelPath: string(forKey: defaultsPrefix + "localModelPath")
                 ?? values["AUTOCOMP_LOCAL_MODEL_PATH"]
                 ?? CompletionBackendSettings.defaultLocalModelPath,
             localMaxRAMBytes: loadUInt64(
                 key: defaultsPrefix + "localMaxRAMBytes",
                 environmentValue: values["AUTOCOMP_LOCAL_MAX_RAM_BYTES"],
-                defaultValue: 6_442_450_944
+                defaultValue: CompletionBackendSettings.defaultLocalMaxRAMBytes
             ),
             localRuntimeState: localRuntimeState,
             localLastError: string(forKey: defaultsPrefix + "localLastError"),
@@ -315,55 +316,28 @@ struct CompletionBackendConfigurationService {
         return defaultValue
     }
 
-    private var readableDefaults: [UserDefaults] {
-        [defaults] + mirroredDefaults
-    }
-
-    private var writableDefaults: [UserDefaults] {
-        [defaults] + mirroredDefaults
-    }
-
     private func string(forKey key: String) -> String? {
-        readableDefaults.lazy.compactMap { $0.string(forKey: key) }.first
+        defaults.string(forKey: key)
     }
 
     private func object(forKey key: String) -> Any? {
-        readableDefaults.lazy.compactMap { $0.object(forKey: key) }.first
+        defaults.object(forKey: key)
     }
 
     private func bool(forKey key: String) -> Bool {
-        readableDefaults.first { $0.object(forKey: key) != nil }?.bool(forKey: key) ?? false
+        defaults.bool(forKey: key)
     }
 
     private func set(_ value: Any?, forKey key: String) {
-        for defaults in writableDefaults {
-            defaults.set(value, forKey: key)
-        }
+        defaults.set(value, forKey: key)
     }
 
     private func removeObject(forKey key: String) {
-        for defaults in writableDefaults {
-            defaults.removeObject(forKey: key)
-        }
+        defaults.removeObject(forKey: key)
     }
 
     private func synchronize() {
-        for defaults in writableDefaults {
-            defaults.synchronize()
-        }
-    }
-
-    private static func defaultMirroredDefaults(for defaults: UserDefaults) -> [UserDefaults] {
-        guard defaults === UserDefaults.standard else {
-            return []
-        }
-
-        return [
-            UserDefaults(suiteName: "com.autocomp.AutoComp"),
-            UserDefaults(suiteName: "AutoComp")
-        ]
-        .compactMap(\.self)
-        .filter { $0 !== defaults }
+        defaults.synchronize()
     }
 
     private func loadRemoteAPIKey(defaultValue: String) -> String {

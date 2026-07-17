@@ -30,7 +30,9 @@ let appSwiftSettings: [SwiftSetting] = llamaBuildFlags != nil
 
 var products: [Product] = [
     .executable(name: "AutoComp", targets: ["AutoCompApp"]),
-    .library(name: "AutoCompCore", targets: ["AutoCompCore"])
+    .executable(name: "AutoCompBench", targets: ["AutoCompBench"]),
+    .library(name: "AutoCompCore", targets: ["AutoCompCore"]),
+    .library(name: "AutoCompBenchKit", targets: ["AutoCompBenchKit"])
 ]
 
 var targets: [Target] = [
@@ -42,6 +44,14 @@ var targets: [Target] = [
     .target(
         name: "AutoCompCore",
         swiftSettings: constrainedLocalCompletionSwiftSettings
+    ),
+    .target(
+        name: "AutoCompBenchKit",
+        dependencies: ["AutoCompCore"]
+    ),
+    .executableTarget(
+        name: "AutoCompBench",
+        dependencies: ["AutoCompBenchKit", "AutoCompCore"]
     ),
     .testTarget(
         name: "AutoCompCoreTests",
@@ -58,18 +68,32 @@ var targets: [Target] = [
             .process("Fixtures")
         ],
         swiftSettings: constrainedLocalCompletionSwiftSettings
+    ),
+    .testTarget(
+        name: "AutoCompBenchTests",
+        dependencies: ["AutoCompBenchKit", "AutoCompCore"]
     )
 ]
 
 if let llamaBuildFlags {
     products += [
         .executable(name: "AutoCompLlamaLoadHarness", targets: ["AutoCompLlamaLoadHarness"]),
+        .executable(name: "AutoCompTokenProfileBuilder", targets: ["AutoCompTokenProfileBuilder"]),
+        .executable(name: "AutoCompTokenDecoderHarness", targets: ["AutoCompTokenDecoderHarness"]),
         .library(name: "AutoCompLlamaRuntime", targets: ["AutoCompLlamaRuntime"])
     ]
 
     targets += [
         .executableTarget(
             name: "AutoCompLlamaLoadHarness",
+            dependencies: ["AutoCompCore", "AutoCompLlamaRuntime"]
+        ),
+        .executableTarget(
+            name: "AutoCompTokenProfileBuilder",
+            dependencies: ["AutoCompCore", "AutoCompLlamaRuntime"]
+        ),
+        .executableTarget(
+            name: "AutoCompTokenDecoderHarness",
             dependencies: ["AutoCompCore", "AutoCompLlamaRuntime"]
         ),
         .target(

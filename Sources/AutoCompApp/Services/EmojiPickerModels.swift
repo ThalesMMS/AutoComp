@@ -80,17 +80,16 @@ struct EmojiVariantPreferences: Codable, Equatable, Sendable {
 }
 
 final class EmojiVariantPreferencesStore: @unchecked Sendable {
-    private let defaults: UserDefaults
+    private let defaults: MirroredUserDefaults
     private let key: String
 
     init(defaults: UserDefaults = .standard, key: String = "emojiVariantPreferences") {
-        self.defaults = defaults
+        self.defaults = MirroredUserDefaults(primary: defaults)
         self.key = key
     }
 
     func load() -> EmojiVariantPreferences {
-        guard let data = defaults.data(forKey: key),
-              let preferences = try? JSONDecoder().decode(EmojiVariantPreferences.self, from: data) else {
+        guard let preferences = defaults.decode(EmojiVariantPreferences.self, forKey: key) else {
             return EmojiVariantPreferences()
         }
 
@@ -98,8 +97,7 @@ final class EmojiVariantPreferencesStore: @unchecked Sendable {
     }
 
     func save(_ preferences: EmojiVariantPreferences) throws {
-        let data = try JSONEncoder().encode(preferences)
-        defaults.set(data, forKey: key)
+        try defaults.encode(preferences, forKey: key)
     }
 }
 
@@ -266,6 +264,7 @@ struct EmojiMatcher: Sendable {
 struct EmojiQueryRun: Equatable, Sendable {
     var query: String
     var hasClosingColon: Bool
+    var literal: String
     var replacementUTF16Length: Int
     var stableFieldIdentity: StableFieldIdentity?
 }
@@ -304,18 +303,28 @@ struct EmojiTriggerStateMachine: Equatable, Sendable {
 
         let boundaryLength = match.range(at: 1).length
         let triggerStart = match.range(at: 0).location + boundaryLength
+        let literalUTF16Range = NSRange(
+            location: triggerStart,
+            length: textBeforeCursor.utf16.count - triggerStart
+        )
+        guard let literalRange = Range(literalUTF16Range, in: textBeforeCursor) else {
+            return nil
+        }
         return EmojiQueryRun(
             query: String(textBeforeCursor[queryRange]).lowercased(),
             hasClosingColon: !textBeforeCursor[closingRange].isEmpty,
+            literal: String(textBeforeCursor[literalRange]),
             replacementUTF16Length: textBeforeCursor.utf16.count - triggerStart,
             stableFieldIdentity: stableFieldIdentity
         )
     }
 }
 
-enum EmojiKeyboardCommand: Equatable, Sendable {
+enum InlineCommandKeyboardCommand: Equatable, Sendable {
     case acceptSelected
     case cancel
     case selectPrevious
     case selectNext
 }
+
+typealias EmojiKeyboardCommand = InlineCommandKeyboardCommand

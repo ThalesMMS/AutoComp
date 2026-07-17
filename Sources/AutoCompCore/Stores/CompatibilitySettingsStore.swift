@@ -1,7 +1,7 @@
 import Foundation
 
 public final class CompatibilitySettingsStore: @unchecked Sendable {
-    private let defaults: UserDefaults
+    private let defaults: MirroredUserDefaults
     private let legacyEnabledKey: String
     private let modeKey: String
 
@@ -10,7 +10,7 @@ public final class CompatibilitySettingsStore: @unchecked Sendable {
         key: String = "compatibilityOverrides",
         modeKey: String = "compatibilityModeOverrides"
     ) {
-        self.defaults = defaults
+        self.defaults = MirroredUserDefaults(primary: defaults)
         self.legacyEnabledKey = key
         self.modeKey = modeKey
     }

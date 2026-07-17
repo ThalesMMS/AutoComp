@@ -2,9 +2,11 @@ import AutoCompCore
 import Foundation
 
 @MainActor
-protocol EmojiTextReplacing: AnyObject {
+protocol InlineCommandTextReplacing: AnyObject {
     func replaceTrailingText(utf16Length: Int, with text: String) throws
 }
+
+typealias EmojiTextReplacing = InlineCommandTextReplacing
 
 @MainActor
 protocol EmojiPickerPanelControlling: AnyObject {
@@ -19,14 +21,18 @@ protocol EmojiPickerPanelControlling: AnyObject {
 }
 
 @MainActor
-final class EmojiPickerController {
+final class EmojiPickerController: InlineCommandControlling {
     var onActiveChanged: ((Bool) -> Void)?
+
+    let kind = InlineCommandKind.emoji
 
     private let contextProvider: any TextContextProvider
     private let textReplacer: any EmojiTextReplacing
     private let preferencesStore: EmojiVariantPreferencesStore
     private let matcher: EmojiMatcher
     private let panelController: any EmojiPickerPanelControlling
+    private let hostPublishAwaiter: HostPublishAwaiter
+    private let diagnostics: InlineCommandDiagnostics
     private let hostPublishDelayNanoseconds: UInt64
     private var triggerState = EmojiTriggerStateMachine()
     private var matches: [EmojiMatch] = []
@@ -39,6 +45,8 @@ final class EmojiPickerController {
         preferencesStore: EmojiVariantPreferencesStore = EmojiVariantPreferencesStore(),
         matcher: EmojiMatcher = EmojiMatcher(),
         panelController: any EmojiPickerPanelControlling = EmojiPickerPanelController(),
+        hostPublishAwaiter: HostPublishAwaiter = HostPublishAwaiter(),
+        diagnostics: InlineCommandDiagnostics = InlineCommandDiagnostics(),
         hostPublishDelayNanoseconds: UInt64 = 25_000_000
     ) {
         self.contextProvider = contextProvider
@@ -46,6 +54,8 @@ final class EmojiPickerController {
         self.preferencesStore = preferencesStore
         self.matcher = matcher
         self.panelController = panelController
+        self.hostPublishAwaiter = hostPublishAwaiter
+        self.diagnostics = diagnostics
         self.hostPublishDelayNanoseconds = hostPublishDelayNanoseconds
         self.preferences = preferencesStore.load()
     }
@@ -58,10 +68,23 @@ final class EmojiPickerController {
         triggerState.activeRun?.query
     }
 
+    var captureState: InlineCommandCaptureState? {
+        guard let run = triggerState.activeRun else { return nil }
+        return InlineCommandCaptureState(
+            kind: kind,
+            queryUTF16Length: run.query.utf16.count,
+            stableFieldIdentity: run.stableFieldIdentity
+        )
+    }
+
+    var keyboardCapabilities: InlineCommandKeyboardCapabilities {
+        isActive && !matches.isEmpty ? .selectableResults : .inactive
+    }
+
     func updatePreferences(_ preferences: EmojiVariantPreferences) {
         self.preferences = preferences
         if !preferences.isEnabled {
-            cancel()
+            cancel(reason: .cancelled)
         }
     }
 
@@ -71,18 +94,18 @@ final class EmojiPickerController {
 
     func handleInputEvent(_ event: CapturedInputEvent) async -> Bool {
         guard preferences.isEnabled else {
-            cancel()
+            cancel(reason: .cancelled)
             return false
         }
 
         switch event {
         case .pointer, .shortcutMutation:
             let wasActive = isActive
-            cancel()
+            cancel(reason: .cancelled)
             return wasActive
         case .dismissal:
             let wasActive = isActive
-            cancel()
+            cancel(reason: .cancelled)
             return wasActive
         case .navigation:
             guard isActive else {
@@ -99,6 +122,12 @@ final class EmojiPickerController {
             await commitSelected()
             return true
         case .text:
+            if case .text(let keyCode, _) = event,
+               keyCode == 36 || keyCode == 76 {
+                let wasActive = isActive
+                cancel(reason: .cancelled)
+                return wasActive
+            }
             if hostPublishDelayNanoseconds > 0 {
                 try? await Task.sleep(nanoseconds: hostPublishDelayNanoseconds)
             }
@@ -106,7 +135,7 @@ final class EmojiPickerController {
         }
     }
 
-    func handleKeyboardCommand(_ command: EmojiKeyboardCommand) async {
+    func handleKeyboardCommand(_ command: InlineCommandKeyboardCommand) async {
         guard isActive else {
             return
         }
@@ -115,7 +144,7 @@ final class EmojiPickerController {
         case .acceptSelected:
             await commitSelected()
         case .cancel:
-            cancel()
+            cancel(reason: .cancelled)
         case .selectPrevious:
             select(offset: -1)
         case .selectNext:
@@ -128,7 +157,7 @@ final class EmojiPickerController {
         do {
             let context = try await contextProvider.currentContext()
             guard focusMatches(context) else {
-                cancel()
+                cancel(reason: .staleTarget)
                 return wasActive
             }
 
@@ -136,13 +165,13 @@ final class EmojiPickerController {
                 textBeforeCursor: context.textBeforeCursor,
                 stableFieldIdentity: context.stableFieldIdentity
             ) else {
-                cancel()
+                cancel(reason: .cancelled)
                 return wasActive
             }
 
             let nextMatches = matcher.matches(for: run.query)
             guard !nextMatches.isEmpty else {
-                cancel()
+                cancel(reason: .unsupported)
                 return wasActive
             }
 
@@ -169,10 +198,21 @@ final class EmojiPickerController {
                     }
                 }
             )
+            diagnostics.record(
+                kind: kind,
+                reason: wasActive ? .updated : .opened,
+                queryUTF16Length: run.query.utf16.count
+            )
             notifyActiveChangedIfNeeded(wasActive: wasActive)
             return true
+        } catch let error as AXTextContextError {
+            if error == .secureOrUnsupportedField, !wasActive {
+                diagnostics.record(kind: kind, reason: .secureField)
+            }
+            cancel(reason: error == .secureOrUnsupportedField ? .secureField : .cancelled)
+            return wasActive
         } catch {
-            cancel()
+            cancel(reason: .cancelled)
             return wasActive
         }
     }
@@ -213,30 +253,49 @@ final class EmojiPickerController {
     private func commitSelected() async {
         guard let run = triggerState.activeRun,
               matches.indices.contains(selectedIndex) else {
-            cancel()
+            cancel(reason: .unsupported)
             return
         }
 
         let match = matches[selectedIndex]
         do {
-            try textReplacer.replaceTrailingText(
-                utf16Length: run.replacementUTF16Length,
-                with: preferences.glyph(for: match.entry)
+            let baseline = try await contextProvider.currentContext()
+            let plan = InlineCommandReplacementPlan(
+                expectedLiteral: run.literal,
+                replacementText: preferences.glyph(for: match.entry),
+                stableFieldIdentity: run.stableFieldIdentity
             )
-            cancel()
-            _ = try? await contextProvider.currentContext()
+            guard plan.validates(baseline) else {
+                cancel(reason: .staleTarget)
+                return
+            }
+            try textReplacer.replaceTrailingText(
+                utf16Length: plan.replacementUTF16Length,
+                with: plan.replacementText
+            )
+            panelController.hide()
+            _ = await hostPublishAwaiter.awaitPublication(
+                after: baseline,
+                provider: contextProvider,
+                reason: "inline-command-emoji-commit"
+            )
+            cancel(reason: .committed)
         } catch {
-            GeometryDebug.log("emoji-picker commit-failed query=\(run.query) reason=\(error.localizedDescription)")
-            cancel()
+            GeometryDebug.log("emoji-picker commit-failed reason=\(error.localizedDescription)")
+            cancel(reason: .staleTarget)
         }
     }
 
-    private func cancel() {
+    func cancel(reason: InlineCommandReason) {
         let wasActive = isActive
+        let queryUTF16Length = triggerState.activeRun?.query.utf16.count
         triggerState.cancel()
         matches = []
         selectedIndex = 0
         panelController.hide()
+        if wasActive {
+            diagnostics.record(kind: kind, reason: reason, queryUTF16Length: queryUTF16Length)
+        }
         notifyActiveChangedIfNeeded(wasActive: wasActive)
     }
 
@@ -248,7 +307,7 @@ final class EmojiPickerController {
     }
 }
 
-extension AcceptanceService: EmojiTextReplacing {
+extension AcceptanceService: InlineCommandTextReplacing {
     func replaceTrailingText(utf16Length: Int, with text: String) throws {
         guard utf16Length >= 0 else {
             throw AcceptanceError.insertionFailed

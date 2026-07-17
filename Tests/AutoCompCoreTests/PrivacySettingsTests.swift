@@ -8,7 +8,6 @@ final class PrivacySettingsTests: XCTestCase {
         XCTAssertFalse(settings.allowsCollection(appBundleID: "com.apple.TextEdit", domain: nil))
         XCTAssertFalse(settings.clipboardContextEnabled)
         XCTAssertFalse(settings.screenContextEnabled)
-        XCTAssertFalse(settings.telemetryEnabled)
         XCTAssertTrue(settings.productivityMetricsEnabled)
         XCTAssertFalse(settings.localPersonalizationEnabled)
         XCTAssertFalse(settings.writingPreferences.enabled)
@@ -78,7 +77,6 @@ final class PrivacySettingsTests: XCTestCase {
             collectionEnabled: true,
             clipboardContextEnabled: true,
             screenContextEnabled: true,
-            telemetryEnabled: true,
             productivityMetricsEnabled: false,
             localPersonalizationEnabled: true,
             personalizationStrength: 0.82,
@@ -92,13 +90,32 @@ final class PrivacySettingsTests: XCTestCase {
 
         try store.save(settings)
 
-        var expectedSettings = settings
-        expectedSettings.telemetryEnabled = false
-        XCTAssertEqual(store.load(), expectedSettings)
+        XCTAssertEqual(store.load(), settings)
 
         let data = try XCTUnwrap(defaults.data(forKey: "privacy"))
-        let persistedSettings = try JSONDecoder().decode(PrivacySettings.self, from: data)
-        XCTAssertFalse(persistedSettings.telemetryEnabled)
+        let persistedObject = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertNil(persistedObject["telemetryEnabled"])
+    }
+
+    func testStoreCachesDecodedSettingsAndUpdatesCacheOnSave() throws {
+        let suiteName = "AutoCompPrivacySettings-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(ReadCountingUserDefaults(suiteName: suiteName))
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+        let initial = PrivacySettings(productivityMetricsEnabled: true)
+        defaults.set(try JSONEncoder().encode(initial), forKey: "privacy")
+        defaults.resetReadCount()
+        let store = PrivacySettingsStore(defaults: defaults, key: "privacy")
+
+        XCTAssertTrue(store.load().productivityMetricsEnabled)
+        XCTAssertTrue(store.load().productivityMetricsEnabled)
+        XCTAssertEqual(defaults.dataReadCount, 1)
+
+        try store.save(PrivacySettings(productivityMetricsEnabled: false))
+
+        XCTAssertFalse(store.load().productivityMetricsEnabled)
+        XCTAssertEqual(defaults.dataReadCount, 1)
     }
 
     func testStoreResetsWritingPreferencesForPrivacyDeleteAll() throws {
@@ -132,7 +149,6 @@ final class PrivacySettingsTests: XCTestCase {
             collectionEnabled: true,
             clipboardContextEnabled: true,
             screenContextEnabled: true,
-            telemetryEnabled: true,
             localPersonalizationEnabled: true,
             writingPreferences: WritingPreferences(enabled: true, rules: ["Write objectively"]),
             perDomainRules: ["docs.google.com": false]
@@ -144,7 +160,6 @@ final class PrivacySettingsTests: XCTestCase {
         XCTAssertTrue(loaded.collectionEnabled)
         XCTAssertTrue(loaded.clipboardContextEnabled)
         XCTAssertTrue(loaded.screenContextEnabled)
-        XCTAssertFalse(loaded.telemetryEnabled)
         XCTAssertTrue(loaded.productivityMetricsEnabled)
         XCTAssertFalse(loaded.localPersonalizationEnabled)
         XCTAssertFalse(loaded.writingPreferences.enabled)
@@ -189,6 +204,7 @@ final class PrivacySettingsTests: XCTestCase {
           "collectionEnabled": true,
           "clipboardContextEnabled": true,
           "screenContextEnabled": false,
+          "telemetryEnabled": true,
           "personalizationStrength": 0.5,
           "perAppRules": {},
           "perDomainRules": {}
@@ -199,10 +215,29 @@ final class PrivacySettingsTests: XCTestCase {
 
         XCTAssertTrue(decoded.collectionEnabled)
         XCTAssertTrue(decoded.clipboardContextEnabled)
-        XCTAssertFalse(decoded.telemetryEnabled)
         XCTAssertTrue(decoded.productivityMetricsEnabled)
         XCTAssertFalse(decoded.localPersonalizationEnabled)
         XCTAssertEqual(decoded.personalizationStrength, 0.5)
         XCTAssertEqual(decoded.writingPreferences, WritingPreferences())
+        let encoded = try JSONEncoder().encode(decoded)
+        let encodedObject = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        XCTAssertNil(encodedObject["telemetryEnabled"])
+    }
+}
+
+private final class ReadCountingUserDefaults: UserDefaults, @unchecked Sendable {
+    private var storedDataReadCount = 0
+
+    var dataReadCount: Int {
+        storedDataReadCount
+    }
+
+    override func data(forKey defaultName: String) -> Data? {
+        storedDataReadCount += 1
+        return super.data(forKey: defaultName)
+    }
+
+    func resetReadCount() {
+        storedDataReadCount = 0
     }
 }

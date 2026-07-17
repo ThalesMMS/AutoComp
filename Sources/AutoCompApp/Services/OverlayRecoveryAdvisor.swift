@@ -1,3 +1,4 @@
+import AutoCompCore
 import Combine
 import Foundation
 
@@ -28,7 +29,7 @@ final class OverlayRecoveryAdvisor: ObservableObject {
 
     @Published private(set) var advancedOverlayFailureCount: Int
 
-    private let defaults: UserDefaults
+    private let defaults: MirroredUserDefaults
     private let key: String
     private let isSafeOverlayModeEnabled: () -> Bool
 
@@ -37,6 +38,7 @@ final class OverlayRecoveryAdvisor: ObservableObject {
         key: String = "advancedOverlayFailureCount",
         isSafeOverlayModeEnabled: @escaping () -> Bool = { SafeOverlayMode.isEnabled }
     ) {
+        let defaults = MirroredUserDefaults(primary: defaults)
         self.defaults = defaults
         self.key = key
         self.isSafeOverlayModeEnabled = isSafeOverlayModeEnabled

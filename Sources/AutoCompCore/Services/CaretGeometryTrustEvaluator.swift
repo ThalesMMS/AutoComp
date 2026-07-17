@@ -54,6 +54,7 @@ public struct CaretGeometryTrustEvaluator: Sendable {
         focusedElementRect: CGRect?,
         screenBounds: CGRect?,
         quality: CaretGeometryQuality,
+        provenance: CaretGeometryProvenance = .unknown,
         previousCaretRect: CGRect? = nil
     ) -> CaretOverlaySafetyDecision {
         // No caret at all => we cannot do inline overlay; popup might still be ok.
@@ -105,7 +106,12 @@ public struct CaretGeometryTrustEvaluator: Sendable {
             }
         }
 
-        // Quality-based gating: only direct caret/glyph/line metrics can be used for inline overlay.
+        if provenance == .screenOCR || provenance == .hiddenTextLayoutEstimate {
+            return .forcePopup
+        }
+
+        // Quality and provenance remain independent: a high-looking metric from a weak
+        // producer is not silently promoted to native authority.
         switch quality {
         case .directCaret, .glyph, .lineMetric:
             return .allowInline

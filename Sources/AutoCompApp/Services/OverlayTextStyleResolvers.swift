@@ -499,18 +499,29 @@ final class OverlayTextStyleResolver {
     private struct CacheKey: Equatable {
         let bundleID: String
         let processID: Int32
+        let domain: String?
+        let stableFieldIdentity: StableFieldIdentity?
         let focusedElementID: String
-        let selectedLocation: Int
-        let selectedLength: Int
         let caretHeightBucket: Int
 
         init(context: TextContext) {
             bundleID = context.app.bundleID
             processID = context.app.processID
+            domain = context.domain
+            stableFieldIdentity = context.stableFieldIdentity
             focusedElementID = context.focusedElementID
-            selectedLocation = context.selectedRange?.location ?? NSNotFound
-            selectedLength = context.selectedRange?.length ?? 0
             caretHeightBucket = Self.caretHeightBucket(for: context)
+        }
+
+        static func == (lhs: Self, rhs: Self) -> Bool {
+            guard lhs.bundleID == rhs.bundleID,
+                  lhs.processID == rhs.processID,
+                  lhs.domain == rhs.domain,
+                  lhs.caretHeightBucket == rhs.caretHeightBucket else { return false }
+            if let lhsStable = lhs.stableFieldIdentity, let rhsStable = rhs.stableFieldIdentity {
+                return lhsStable.matchesStableTarget(rhsStable)
+            }
+            return lhs.focusedElementID == rhs.focusedElementID
         }
 
         private static func caretHeightBucket(for context: TextContext) -> Int {
@@ -519,16 +530,8 @@ final class OverlayTextStyleResolver {
         }
     }
 
-    private struct CacheEntry {
-        let key: CacheKey
-        let createdAt: Date
-        let style: ResolvedOverlayTextStyle
-    }
-
     private let axProbe: any OverlayTextStyleProbing
-    private let cacheTTL: TimeInterval
-    private let now: () -> Date
-    private var cacheEntry: CacheEntry?
+    private let cache: SessionTTLCache<CacheKey, ResolvedOverlayTextStyle>
     private var caretFontSizeResolver = GhostFontSizeResolver()
 
     init(
@@ -537,26 +540,25 @@ final class OverlayTextStyleResolver {
         now: @escaping () -> Date = Date.init
     ) {
         self.axProbe = axProbe
-        self.cacheTTL = cacheTTL
-        self.now = now
+        self.cache = SessionTTLCache(ttl: cacheTTL, now: now)
     }
 
     func style(for context: TextContext, appearance: NSAppearance? = nil) -> ResolvedOverlayTextStyle {
         let key = CacheKey(context: context)
-        let currentDate = now()
-        if let cacheEntry,
-           cacheEntry.key == key,
-           currentDate.timeIntervalSince(cacheEntry.createdAt) < cacheTTL {
-            return cacheEntry.style
+        switch cache.lookup(key) {
+        case .hit(let style):
+            return style
+        case .negativeHit, .miss:
+            break
         }
 
         let style = resolveStyle(for: context, appearance: appearance)
-        cacheEntry = CacheEntry(key: key, createdAt: currentDate, style: style)
+        cache.store(style, for: key)
         return style
     }
 
     func reset() {
-        cacheEntry = nil
+        cache.reset()
         caretFontSizeResolver.reset()
     }
 

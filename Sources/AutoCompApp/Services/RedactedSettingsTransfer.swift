@@ -321,7 +321,6 @@ enum RedactedSettingsTransfer {
         updated.localPersonalizationEnabled = imported.localPersonalizationEnabled
         updated.perDomainRules = imported.domainRules
         updated.writingPreferences = imported.writingPreferences
-        updated.telemetryEnabled = false
         return updated
     }
 

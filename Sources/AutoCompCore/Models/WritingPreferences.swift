@@ -139,18 +139,7 @@ public struct WritingPreferences: Codable, Equatable, Sendable {
     }
 
     public static func normalizedRule(_ rawRule: String) -> String {
-        let collapsed = rawRule
-            .components(separatedBy: .whitespacesAndNewlines)
-            .filter { !$0.isEmpty }
-            .joined(separator: " ")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-
-        guard collapsed.count > maxRuleCharacters else {
-            return collapsed
-        }
-
-        return String(collapsed.prefix(maxRuleCharacters))
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        TextWhitespaceNormalizer.normalize(rawRule, maxCharacters: maxRuleCharacters)
     }
 
     public static func normalizedLanguageHints(_ rawHints: [String]) -> [String] {
@@ -178,18 +167,7 @@ public struct WritingPreferences: Codable, Equatable, Sendable {
     }
 
     public static func normalizedLanguageHint(_ rawHint: String) -> String {
-        let collapsed = rawHint
-            .components(separatedBy: .whitespacesAndNewlines)
-            .filter { !$0.isEmpty }
-            .joined(separator: " ")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-
-        guard collapsed.count > maxLanguageHintCharacters else {
-            return collapsed
-        }
-
-        return String(collapsed.prefix(maxLanguageHintCharacters))
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        TextWhitespaceNormalizer.normalize(rawHint, maxCharacters: maxLanguageHintCharacters)
     }
 
     private enum CodingKeys: String, CodingKey {

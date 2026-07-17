@@ -11,6 +11,17 @@ final class WritingPreferencesTests: XCTestCase {
         XCTAssertEqual(preferences.rules, ["Write objectively", "Use short sentences"])
     }
 
+    func testRulesAndLanguageHintsShareUnicodeWhitespaceNormalization() {
+        let preferences = WritingPreferences(
+            enabled: true,
+            rules: ["\u{00A0}Write\u{2003}objectively\n"],
+            languageHints: ["\u{00A0}Portuguese\u{2003}(Brazil)\n"]
+        )
+
+        XCTAssertEqual(preferences.rules, ["Write objectively"])
+        XCTAssertEqual(preferences.languageHints, ["Portuguese (Brazil)"])
+    }
+
     func testDeduplicatesCaseInsensitively() {
         let preferences = WritingPreferences(
             enabled: true,

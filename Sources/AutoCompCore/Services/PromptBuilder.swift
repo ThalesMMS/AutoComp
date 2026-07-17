@@ -59,7 +59,16 @@ public struct PromptInputBudgets: Equatable, Sendable {
 }
 
 public struct PromptBuilder: Sendable {
+    public static let localRendererVersion = "autocomp-local-prompt-v2"
     public var budgets: PromptInputBudgets
+
+    struct PreparedContext: Equatable, Sendable {
+        let mode: CompletionRequestMode
+        let textBeforeCursor: String
+        let textAfterCursor: String?
+        let selectedText: String?
+        let fullTextWindow: String?
+    }
 
     public init(budgets: PromptInputBudgets = .default) {
         self.budgets = budgets
@@ -102,6 +111,17 @@ public struct PromptBuilder: Sendable {
 
     public func truncatedFullTextWindow(for context: TextContext) -> String? {
         truncatedOptionalText(context.fullTextWindow, characterLimit: budgets.fullTextWindowCharacters)
+    }
+
+    func prepare(_ context: TextContext) -> PreparedContext {
+        let requestMode = mode(for: context)
+        return PreparedContext(
+            mode: requestMode,
+            textBeforeCursor: truncatedTextBeforeCursor(for: context),
+            textAfterCursor: truncatedTextAfterCursor(for: context),
+            selectedText: truncatedSelectedText(for: context),
+            fullTextWindow: truncatedFullTextWindow(for: context)
+        )
     }
 
     public func truncatedVisualContext(_ visualContext: VisualContextSnapshot?) -> VisualContextSnapshot? {
@@ -151,10 +171,24 @@ public struct PromptBuilder: Sendable {
         clipboardContext: ClipboardContextSnapshot? = nil,
         personalizationSamples: [PersonalizationSample] = []
     ) -> String {
-        let requestMode = mode(for: context)
-        let trimmedContext = truncatedTextBeforeCursor(for: context)
-        let trimmedSuffix = truncatedTextAfterCursor(for: context)
-        let trimmedSelection = truncatedSelectedText(for: context)
+        prompt(
+            for: context,
+            preparedContext: prepare(context),
+            privacySettings: privacySettings,
+            visualContext: visualContext,
+            clipboardContext: clipboardContext,
+            personalizationSamples: personalizationSamples
+        )
+    }
+
+    func prompt(
+        for context: TextContext,
+        preparedContext: PreparedContext,
+        privacySettings: PrivacySettings,
+        visualContext: VisualContextSnapshot?,
+        clipboardContext: ClipboardContextSnapshot?,
+        personalizationSamples: [PersonalizationSample]
+    ) -> String {
         let allowedContextSources = context.captureSources
             .filter { source in
                 switch source {
@@ -184,12 +218,12 @@ public struct PromptBuilder: Sendable {
             .sorted()
             .joined(separator: ", ")
 
-        if requestMode == .fillInMiddle {
+        if preparedContext.mode == .fillInMiddle {
             return fillInMiddlePrompt(
                 context: context,
-                trimmedContext: trimmedContext,
-                trimmedSuffix: trimmedSuffix,
-                trimmedSelection: trimmedSelection,
+                trimmedContext: preparedContext.textBeforeCursor,
+                trimmedSuffix: preparedContext.textAfterCursor,
+                trimmedSelection: preparedContext.selectedText,
                 sourceDescription: sourceDescription,
                 visualContext: allowedVisualContext,
                 clipboardContext: allowedClipboardContext,
@@ -209,7 +243,7 @@ public struct PromptBuilder: Sendable {
             \(personalizationSamples)
             \(visualContextBlock(allowedVisualContext))\(clipboardBlock(allowedClipboardContext))
             Text before cursor:
-            \(trimmedContext)
+            \(preparedContext.textBeforeCursor)
             Completion:
             """
         }
@@ -224,7 +258,7 @@ public struct PromptBuilder: Sendable {
         \(personalizationSamples)
         \(clipboardBlock(allowedClipboardContext))
         Text before cursor:
-        \(trimmedContext)
+        \(preparedContext.textBeforeCursor)
         Completion:
         """
     }
@@ -296,8 +330,10 @@ public struct PromptBuilder: Sendable {
         let excerpts = samples
             .prefix(sampleCount)
             .map { sample in
-                String(sample.excerpt.prefix(nonNegativeLimit(budgets.personalizationSampleCharacters)))
-                    .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+                let excerpt = String(sample.excerpt.prefix(
+                    nonNegativeLimit(budgets.personalizationSampleCharacters)
+                ))
+                return TextWhitespaceNormalizer.collapse(excerpt)
                     .trimmingCharacters(in: .whitespacesAndNewlines)
             }
             .filter { !$0.isEmpty }

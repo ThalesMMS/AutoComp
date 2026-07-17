@@ -513,17 +513,16 @@ private extension KeyboardShortcutModifiers {
 }
 
 final class KeyboardShortcutSettingsStore: @unchecked Sendable {
-    private let defaults: UserDefaults
+    private let defaults: MirroredUserDefaults
     private let key: String
 
     init(defaults: UserDefaults = .standard, key: String = "keyboardShortcuts") {
-        self.defaults = defaults
+        self.defaults = MirroredUserDefaults(primary: defaults)
         self.key = key
     }
 
     func load() -> KeyboardShortcutSettings {
-        guard let data = defaults.data(forKey: key),
-              let settings = try? JSONDecoder().decode(KeyboardShortcutSettings.self, from: data) else {
+        guard let settings = defaults.decode(KeyboardShortcutSettings.self, forKey: key) else {
             return .defaults
         }
 
@@ -533,9 +532,6 @@ final class KeyboardShortcutSettingsStore: @unchecked Sendable {
     }
 
     func save(_ settings: KeyboardShortcutSettings) {
-        guard let data = try? JSONEncoder().encode(settings) else {
-            return
-        }
-        defaults.set(data, forKey: key)
+        try? defaults.encode(settings, forKey: key)
     }
 }

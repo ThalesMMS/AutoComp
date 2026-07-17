@@ -5,6 +5,69 @@ import XCTest
 
 @MainActor
 final class LocalPrivacyDataResetServiceTests: XCTestCase {
+    func testDeleteContinuesAfterFailureAndThrowsOnlyAfterRemainingStoresAreReset() throws {
+        let defaultsName = "LocalPrivacyDataResetServiceTests.failure.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: defaultsName))
+        defaults.removePersistentDomain(forName: defaultsName)
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("autocomp-privacy-reset-failure-\(UUID().uuidString)", isDirectory: true)
+        let debugDirectory = root.appendingPathComponent("DebugArtifacts", isDirectory: true)
+        let traceDirectory = root.appendingPathComponent("CompletionTraces", isDirectory: true)
+        let pasteboardDirectory = root.appendingPathComponent("PasteboardRecovery", isDirectory: true)
+        let keychainService = "com.autocomp.tests.personalization.failure.\(UUID().uuidString)"
+        defer {
+            defaults.removePersistentDomain(forName: defaultsName)
+            try? FileManager.default.removeItem(at: root)
+            deleteKeychainItem(service: keychainService, account: "local-profile-key")
+        }
+
+        try FileManager.default.createDirectory(at: debugDirectory, withIntermediateDirectories: true)
+        try Data("debug".utf8).write(to: debugDirectory.appendingPathComponent("artifact.txt"))
+        let privacySettingsStore = PrivacySettingsStore(defaults: defaults, key: "privacy")
+        let metricsStore = LocalProductivityMetricsStore(
+            defaults: defaults,
+            key: "metrics",
+            privacyStore: privacySettingsStore,
+            calendar: utcCalendar()
+        )
+        let traceStore = CompletionTraceStore(directory: traceDirectory, isEnabled: true)
+        traceStore.record(CompletionTraceEvent(
+            context: CompletionTraceContext(),
+            event: .published,
+            outcome: .published
+        ))
+        traceStore.flush()
+        let pasteboardStore = PasteboardInsertionRecoveryStore(directory: pasteboardDirectory)
+        try pasteboardStore.save(PasteboardInsertionRecoverySnapshot(
+            id: "continued-reset",
+            createdAt: Date(),
+            previousItems: nil
+        ))
+
+        let service = LocalPrivacyDataResetService(
+            personalizationStore: SecurePersonalizationStore(
+                directory: root.appendingPathComponent("Personalization", isDirectory: true),
+                service: keychainService,
+                account: "local-profile-key"
+            ),
+            privacySettingsStore: privacySettingsStore,
+            productivityMetricsStore: metricsStore,
+            remoteCompletionConsentStore: RemoteCompletionConsentStore(defaults: defaults, key: "consent"),
+            debugOptionsStore: AutoCompDebugOptionsStore(defaults: defaults, key: "debug"),
+            debugArtifactStore: DebugArtifactStore(
+                directory: debugDirectory,
+                fileManager: FailingRemoveFileManager()
+            ),
+            completionTraceStore: traceStore,
+            pasteboardRecoveryStore: pasteboardStore
+        )
+
+        XCTAssertThrowsError(try service.deleteAllLocalPrivacyData())
+        XCTAssertTrue(FileManager.default.fileExists(atPath: debugDirectory.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: traceDirectory.path))
+        XCTAssertFalse(pasteboardStore.hasPendingSnapshot())
+    }
+
     func testDeleteAllLocalPrivacyDataRemovesSensitiveStateAndPreservesOperationalConfiguration() throws {
         let defaultsName = "LocalPrivacyDataResetServiceTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: defaultsName))
@@ -30,7 +93,6 @@ final class LocalPrivacyDataResetServiceTests: XCTestCase {
             collectionEnabled: true,
             clipboardContextEnabled: true,
             screenContextEnabled: true,
-            telemetryEnabled: true,
             productivityMetricsEnabled: true,
             localPersonalizationEnabled: true,
             writingPreferences: WritingPreferences(
@@ -66,20 +128,22 @@ final class LocalPrivacyDataResetServiceTests: XCTestCase {
         productivityMetricsStore.recordDismissedSuggestion()
         productivityMetricsStore.recordCompletionLatency(CompletionLatencyReport(backendMs: 41, totalMs: 90))
 
-        let telemetrySink = PrivacyResetRecordingTelemetrySink()
-        let telemetryClient = RedactingTelemetryClient(enabled: true, sink: telemetrySink)
-        telemetryClient.capture(TelemetryEventInput(
-            name: "privacy-reset-test",
-            appVersion: "1.0",
-            buildNumber: "1",
-            backendKind: .remote,
-            prompt: "SECRET prompt"
-        ))
         let remoteConsentStore = RemoteCompletionConsentStore(defaults: defaults, key: "remoteConsent")
 
         let debugOptionsStore = AutoCompDebugOptionsStore(defaults: defaults, key: "debug")
         debugOptionsStore.save(AutoCompDebugOptions(localDebugOptIn: true))
         let debugArtifactStore = DebugArtifactStore(directory: debugDirectory)
+        let completionTraceDirectory = supportDirectory.appendingPathComponent("CompletionTraces", isDirectory: true)
+        let completionTraceStore = CompletionTraceStore(
+            directory: completionTraceDirectory,
+            isEnabled: true
+        )
+        completionTraceStore.record(CompletionTraceEvent(
+            context: CompletionTraceContext(),
+            event: .published,
+            outcome: .published
+        ))
+        completionTraceStore.flush()
         try debugArtifactStore.saveSensitiveArtifact(
             named: "seed",
             contents: "SECRET debug artifact",
@@ -122,9 +186,9 @@ final class LocalPrivacyDataResetServiceTests: XCTestCase {
 
         XCTAssertEqual(personalizationStore.recordCount(), 1)
         XCTAssertGreaterThan(productivityMetricsStore.snapshot.wordsAcceptedTotal, 0)
-        XCTAssertEqual(telemetrySink.events().count, 1)
         XCTAssertTrue(remoteConsentStore.hasConsent(for: .remoteBackend, remoteBaseURL: backendSettings.remoteBaseURL))
         XCTAssertEqual(debugArtifactStore.artifactCount(), 1)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: completionTraceDirectory.path))
         XCTAssertTrue(pasteboardRecoveryStore.hasPendingSnapshot())
         XCTAssertTrue(debugOptionsStore.load().allowsSensitiveDebug)
         XCTAssertEqual(backendSettingsStore.load(localRuntimeState: .unavailableInBuild).remoteAPIKey, "backend-api-key-material")
@@ -134,10 +198,10 @@ final class LocalPrivacyDataResetServiceTests: XCTestCase {
             personalizationStore: personalizationStore,
             privacySettingsStore: privacySettingsStore,
             productivityMetricsStore: productivityMetricsStore,
-            telemetryClient: telemetryClient,
             remoteCompletionConsentStore: remoteConsentStore,
             debugOptionsStore: debugOptionsStore,
             debugArtifactStore: debugArtifactStore,
+            completionTraceStore: completionTraceStore,
             pasteboardRecoveryStore: pasteboardRecoveryStore
         )
 
@@ -153,11 +217,10 @@ final class LocalPrivacyDataResetServiceTests: XCTestCase {
         XCTAssertEqual(productivityMetricsStore.snapshot.suggestionsDismissed, 0)
         XCTAssertNil(productivityMetricsStore.snapshot.averageBackendLatencyMs)
         XCTAssertNil(productivityMetricsStore.snapshot.lastLatencyReport)
-        XCTAssertTrue(telemetrySink.events().isEmpty)
-        XCTAssertGreaterThanOrEqual(telemetrySink.deleteAllCallCount(), 1)
         XCTAssertFalse(remoteConsentStore.hasConsent(for: .remoteBackend, remoteBaseURL: backendSettings.remoteBaseURL))
         XCTAssertEqual(debugArtifactStore.artifactCount(), 0)
         XCTAssertFalse(FileManager.default.fileExists(atPath: debugDirectory.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: completionTraceDirectory.path))
         XCTAssertFalse(pasteboardRecoveryStore.hasPendingSnapshot())
         XCTAssertEqual(debugOptionsStore.load(), .normal)
 
@@ -166,7 +229,6 @@ final class LocalPrivacyDataResetServiceTests: XCTestCase {
         XCTAssertTrue(privacySettings.screenContextEnabled)
         XCTAssertTrue(privacySettings.productivityMetricsEnabled)
         XCTAssertFalse(privacySettings.localPersonalizationEnabled)
-        XCTAssertFalse(privacySettings.telemetryEnabled)
         XCTAssertEqual(privacySettings.perAppRules["com.apple.TextEdit"], false)
         XCTAssertEqual(privacySettings.perDomainRules["docs.google.com"], false)
         XCTAssertEqual(compatibilitySettingsStore.loadModeOverrides()["com.apple.TextEdit"], .manualOnly)
@@ -200,37 +262,8 @@ final class LocalPrivacyDataResetServiceTests: XCTestCase {
     }
 }
 
-private final class PrivacyResetRecordingTelemetrySink: TelemetryEventSink, @unchecked Sendable {
-    private let lock = NSLock()
-    private var storedEvents: [TelemetryEvent] = []
-    private var storedDeleteAllCallCount = 0
-
-    func send(_ event: TelemetryEvent) {
-        lock.lock()
-        storedEvents.append(event)
-        lock.unlock()
-    }
-
-    func deleteAll() {
-        lock.lock()
-        storedEvents.removeAll()
-        storedDeleteAllCallCount += 1
-        lock.unlock()
-    }
-
-    func events() -> [TelemetryEvent] {
-        lock.lock()
-        defer {
-            lock.unlock()
-        }
-        return storedEvents
-    }
-
-    func deleteAllCallCount() -> Int {
-        lock.lock()
-        defer {
-            lock.unlock()
-        }
-        return storedDeleteAllCallCount
+private final class FailingRemoveFileManager: FileManager, @unchecked Sendable {
+    override func removeItem(at URL: URL) throws {
+        throw CocoaError(.fileWriteUnknown)
     }
 }

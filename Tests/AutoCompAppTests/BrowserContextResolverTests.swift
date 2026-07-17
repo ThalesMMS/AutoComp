@@ -3,6 +3,52 @@ import AutoCompCore
 import XCTest
 
 final class BrowserContextResolverTests: XCTestCase {
+    func testResolutionCacheUsesTTLAndExplicitInvalidation() {
+        var now = Date(timeIntervalSince1970: 1_000)
+        var executionCount = 0
+        var nextURL = "https://first.example/path"
+        let resolver = BrowserContextResolver(
+            scriptRunner: { _ in
+                executionCount += 1
+                return .success(nextURL)
+            },
+            cacheTTL: 1,
+            now: { now }
+        )
+
+        XCTAssertEqual(resolver.activeDomain(for: "com.google.Chrome"), "first.example")
+        nextURL = "https://second.example/path"
+        XCTAssertEqual(resolver.activeDomain(for: "com.google.Chrome"), "first.example")
+        XCTAssertEqual(executionCount, 1)
+
+        now.addTimeInterval(1.1)
+        XCTAssertEqual(resolver.activeDomain(for: "com.google.Chrome"), "second.example")
+        resolver.invalidate(bundleID: "com.google.Chrome")
+        XCTAssertEqual(resolver.activeDomain(for: "com.google.Chrome"), "second.example")
+        XCTAssertEqual(executionCount, 3)
+        XCTAssertEqual(
+            resolver.diagnostics,
+            BrowserContextResolverDiagnostics(cacheHits: 1, scriptExecutions: 3)
+        )
+    }
+
+    func testCompiledRunnerCompilesSourceOnceAcrossExecutions() {
+        var compilationCount = 0
+        var executionCount = 0
+        let runner = CompiledBrowserScriptRunner { _ in
+            compilationCount += 1
+            return {
+                executionCount += 1
+                return .success("https://example.com")
+            }
+        }
+
+        XCTAssertEqual(runner.run("script"), .success("https://example.com"))
+        XCTAssertEqual(runner.run("script"), .success("https://example.com"))
+        XCTAssertEqual(compilationCount, 1)
+        XCTAssertEqual(executionCount, 2)
+    }
+
     func testKnownBrowserDomainNormalizesWorkspacePathsWithoutFullURL() {
         for (url, expectedDomain) in [
             ("https://docs.google.com/spreadsheets/d/private-sheet?gid=0", "docs.google.com/spreadsheets"),

@@ -16,7 +16,6 @@ struct AXFocusSnapshot {
     let isGoogleDocsElement: Bool
     let isCodexComposerElement: Bool
     let selectedRange: NSRange?
-    let fullText: String?
     let textLength: Int
     let textBeforeCursor: String?
     let textAfterCursor: String?
@@ -55,16 +54,16 @@ struct FocusSnapshotTextWindow: Equatable {
         )
     }
 
-    private static func limitedPrefix(_ text: String?, maxCharacters: Int) -> String? {
+    static func limitedPrefix(_ text: String?, maxCharacters: Int) -> String? {
         guard let text, !text.isEmpty, maxCharacters > 0 else {
             return nil
         }
 
-        let nsText = text as NSString
-        guard nsText.length > maxCharacters else {
+        guard (text as NSString).length > maxCharacters else {
             return text
         }
-        return nsText.substring(to: maxCharacters)
+        let prefix = UTF16TextRange.prefix(text, endingAt: maxCharacters)
+        return prefix.isEmpty ? nil : prefix
     }
 
     private static func textWindow(
@@ -86,7 +85,127 @@ struct FocusSnapshotTextWindow: Equatable {
         let anchor = min(max(0, rawAnchor), textLength)
         let preferredStart = max(0, anchor - (maxCharacters / 2))
         let start = min(preferredStart, max(0, textLength - maxCharacters))
-        return nsText.substring(with: NSRange(location: start, length: maxCharacters))
+        let window = UTF16TextRange.substring(
+            fullText,
+            enclosedBy: NSRange(location: start, length: maxCharacters)
+        )
+        return window?.isEmpty == false ? window : nil
+    }
+}
+
+struct FocusSnapshotTextCapture: Equatable {
+    let textLength: Int
+    let textBeforeCursor: String?
+    let textAfterCursor: String?
+    let selectedText: String?
+    let fullTextWindow: String?
+
+    static func resolve(
+        selectedRange: NSRange?,
+        textLength: Int?,
+        readRange: (CFRange) -> String?,
+        readFullText: () -> String?,
+        maxTextAfterCursorCharacters: Int = 1_500,
+        maxSelectedTextCharacters: Int = 1_500,
+        maxFullTextWindowCharacters: Int = 3_000
+    ) -> FocusSnapshotTextCapture {
+        let validSelection = selectedRange.flatMap { range -> NSRange? in
+            guard range.location != NSNotFound, range.location >= 0, range.length >= 0 else { return nil }
+            return range
+        }
+        let provisionalLength = max(
+            0,
+            textLength ?? validSelection.map { $0.location + $0.length } ?? 0
+        )
+        let prefixRange = validSelection.map {
+            CFRange(location: 0, length: $0.location)
+        }
+        let suffixRange = validSelection.map { range in
+            let start = min(provisionalLength, range.location + range.length)
+            return CFRange(
+                location: start,
+                length: min(max(0, provisionalLength - start), max(0, maxTextAfterCursorCharacters))
+            )
+        }
+        let selectionRange = validSelection.map {
+            CFRange(location: $0.location, length: min($0.length, max(0, maxSelectedTextCharacters)))
+        }
+        let windowRange = textWindowRange(
+            textLength: provisionalLength,
+            selectedRange: validSelection,
+            maxCharacters: maxFullTextWindowCharacters
+        )
+
+        let rangedPrefix = prefixRange.flatMap(readRange)
+        let rangedSuffix = suffixRange.flatMap { $0.length > 0 ? readRange($0) : "" }
+        let rangedSelection = selectionRange.flatMap { $0.length > 0 ? readRange($0) : "" }
+        let rangedWindow = windowRange.flatMap(readRange)
+        let needsFullText = validSelection == nil
+            || textLength == nil
+            || rangedPrefix == nil
+            || (suffixRange?.length ?? 0) > 0 && rangedSuffix == nil
+            || (selectionRange?.length ?? 0) > 0 && rangedSelection == nil
+        let fullText = needsFullText ? readFullText() : nil
+        let effectiveLength = fullText.map { ($0 as NSString).length } ?? provisionalLength
+        let fallbackWindow = FocusSnapshotTextWindow.resolve(
+            textAfterCursor: fullText.flatMap { suffix(of: $0, selectedRange: validSelection) },
+            selectedText: fullText.flatMap { selection(in: $0, selectedRange: validSelection) },
+            fullText: fullText,
+            selectedRange: validSelection,
+            maxTextAfterCursorCharacters: maxTextAfterCursorCharacters,
+            maxSelectedTextCharacters: maxSelectedTextCharacters,
+            maxFullTextWindowCharacters: maxFullTextWindowCharacters
+        )
+
+        return FocusSnapshotTextCapture(
+            textLength: effectiveLength,
+            textBeforeCursor: rangedPrefix ?? fullText.flatMap { prefix(of: $0, selectedRange: validSelection) },
+            textAfterCursor: FocusSnapshotTextWindow.limitedPrefix(
+                rangedSuffix,
+                maxCharacters: maxTextAfterCursorCharacters
+            ) ?? fallbackWindow.textAfterCursor,
+            selectedText: FocusSnapshotTextWindow.limitedPrefix(
+                rangedSelection,
+                maxCharacters: maxSelectedTextCharacters
+            ) ?? fallbackWindow.selectedText,
+            fullTextWindow: FocusSnapshotTextWindow.limitedPrefix(
+                rangedWindow,
+                maxCharacters: maxFullTextWindowCharacters
+            ) ?? fallbackWindow.fullTextWindow
+        )
+    }
+
+    private static func textWindowRange(
+        textLength: Int,
+        selectedRange: NSRange?,
+        maxCharacters: Int
+    ) -> CFRange? {
+        guard textLength > 0, maxCharacters > 0 else { return nil }
+        let length = min(textLength, maxCharacters)
+        let rawAnchor = selectedRange.map { $0.location + ($0.length / 2) } ?? textLength
+        let anchor = min(max(0, rawAnchor), textLength)
+        let preferredStart = max(0, anchor - (length / 2))
+        let start = min(preferredStart, max(0, textLength - length))
+        return CFRange(location: start, length: length)
+    }
+
+    private static func prefix(of fullText: String, selectedRange: NSRange?) -> String? {
+        guard let selectedRange else { return fullText }
+        let length = (fullText as NSString).length
+        guard selectedRange.location <= length else { return fullText }
+        return UTF16TextRange.prefix(fullText, endingAt: selectedRange.location)
+    }
+
+    private static func suffix(of fullText: String, selectedRange: NSRange?) -> String? {
+        guard let selectedRange else { return nil }
+        let start = selectedRange.location + selectedRange.length
+        guard start <= (fullText as NSString).length else { return nil }
+        return UTF16TextRange.suffix(fullText, startingAt: start)
+    }
+
+    private static func selection(in fullText: String, selectedRange: NSRange?) -> String? {
+        guard let selectedRange, selectedRange.length > 0 else { return nil }
+        return UTF16TextRange.substring(fullText, enclosedBy: selectedRange)
     }
 }
 
@@ -141,31 +260,19 @@ struct FocusSnapshotResolver {
             isGoogleDocsElement: isGoogleDocsElement
         )
         let selectedRange = axHelper.selectedRange(from: focusedElement)
-        let fullText = axHelper.readableText(from: focusedElement)
-        let textLength = axHelper.numberOfCharacters(from: focusedElement)
-            ?? fullText.map { ($0 as NSString).length }
-            ?? selectedRange.map { $0.location + $0.length }
-            ?? 0
-        let textBeforeCursor = axHelper.textBeforeCursor(
-            from: focusedElement,
+        let textCapture = FocusSnapshotTextCapture.resolve(
             selectedRange: selectedRange,
-            fullText: fullText
+            textLength: axHelper.numberOfCharacters(from: focusedElement),
+            readRange: { range in
+                axHelper.stringForRange(from: focusedElement, range: range)
+            },
+            readFullText: {
+                axHelper.readableText(from: focusedElement)
+            }
         )
-        let textWindow = FocusSnapshotTextWindow.resolve(
-            textAfterCursor: axHelper.textAfterCursor(
-                from: focusedElement,
-                selectedRange: selectedRange,
-                fullText: fullText,
-                textLength: textLength
-            ),
-            selectedText: axHelper.selectedText(
-                from: focusedElement,
-                selectedRange: selectedRange,
-                fullText: fullText
-            ),
-            fullText: fullText,
-            selectedRange: selectedRange
-        )
+        guard !Self.isMaskedSecureText(textCapture) else {
+            throw AXTextContextError.secureOrUnsupportedField
+        }
 
         return AXFocusSnapshot(
             app: AppIdentity(
@@ -184,13 +291,20 @@ struct FocusSnapshotResolver {
             isGoogleDocsElement: isGoogleDocsElement,
             isCodexComposerElement: isCodexComposerElement,
             selectedRange: selectedRange,
-            fullText: fullText,
-            textLength: textLength,
-            textBeforeCursor: textBeforeCursor,
-            textAfterCursor: textWindow.textAfterCursor,
-            selectedText: textWindow.selectedText,
-            fullTextWindow: textWindow.fullTextWindow
+            textLength: textCapture.textLength,
+            textBeforeCursor: textCapture.textBeforeCursor,
+            textAfterCursor: textCapture.textAfterCursor,
+            selectedText: textCapture.selectedText,
+            fullTextWindow: textCapture.fullTextWindow
         )
+    }
+
+    private static func isMaskedSecureText(_ capture: FocusSnapshotTextCapture) -> Bool {
+        guard capture.textLength <= 128 else { return false }
+        let value = [capture.textBeforeCursor, capture.selectedText, capture.textAfterCursor]
+            .compactMap { $0 }
+            .joined()
+        return SecureFieldClassifier.isSecure(SecureFieldMetadata(value: value))
     }
 
     private func resolvedTextElement(
@@ -256,14 +370,14 @@ struct FocusSnapshotResolver {
     }
 
     private func isTextReadable(from element: AXUIElement) -> Bool {
-        if axHelper.readableText(from: element) != nil {
-            return true
-        }
         if let numberOfCharacters = axHelper.numberOfCharacters(from: element),
-           numberOfCharacters > 0 {
+           numberOfCharacters >= 0 {
             return true
         }
-        return axHelper.selectedRange(from: element) != nil
+        if axHelper.selectedRange(from: element) != nil {
+            return true
+        }
+        return axHelper.readableText(from: element) != nil
     }
 
     private func hasGoogleDocsDocumentAncestor(_ element: AXUIElement) -> Bool {

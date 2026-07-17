@@ -100,6 +100,38 @@ final class SuggestionDiagnosticsTests: XCTestCase {
         )
     }
 
+    func testPromptReuseDiagnosticsExposeOnlyNumericMetricsAndReason() {
+        var diagnostics = SuggestionDiagnostics()
+
+        diagnostics.recordPromptCache(
+            LlamaPromptCacheStats(
+                hits: 4,
+                misses: 1,
+                resets: 1,
+                retainedPromptTokens: 60,
+                contextTokens: 512,
+                reuse: LocalPromptReuseMetrics(
+                    promptTokens: 61,
+                    commonPrefixTokens: 50,
+                    reusedTokens: 49,
+                    prefillTokens: 12,
+                    tokenizationMilliseconds: 0.12,
+                    prefillMilliseconds: 0.38,
+                    decodeMilliseconds: 0.27,
+                    cacheRebuilds: 0
+                ),
+                lastResetReason: .sideContextChanged
+            )
+        )
+
+        let summary = diagnostics.menuRows.first(where: { $0.id == "promptCache" })?.value ?? ""
+        XCTAssertTrue(summary.contains("last common/reused/prefill 50/49/12"))
+        XCTAssertTrue(summary.contains("tokenize/prefill/decode 0.1/0.4/0.3 ms"))
+        XCTAssertTrue(summary.contains("reason sideContextChanged"))
+        XCTAssertFalse(summary.contains("prompt text"))
+        XCTAssertFalse(summary.contains("token ID"))
+    }
+
     func testMenuRowsExposeLatencyStagesAndRedactedReport() throws {
         var diagnostics = SuggestionDiagnostics()
 
@@ -199,12 +231,16 @@ final class SuggestionDiagnosticsTests: XCTestCase {
                 focusedElementID: "docs-field",
                 textBeforeCursor: "private draft",
                 caretGeometryQuality: .screenOCR,
+                caretGeometryProvenance: .screenOCR,
+                caretGeometryCoordinateSpace: .accessibilityGlobal,
                 captureSources: [.accessibility, .screenOCR]
             )
         )
 
         XCTAssertEqual(diagnostics.focus?.contextSource, "Accessibility, OCR geometry")
         XCTAssertEqual(diagnostics.focus?.geometryQuality, "OCR")
+        XCTAssertEqual(diagnostics.focus?.geometryProvenance, "screenOCR")
+        XCTAssertEqual(diagnostics.focus?.geometryCoordinateSpace, "accessibilityGlobal")
         XCTAssertEqual(diagnostics.focus?.contextTrust, "standard")
         XCTAssertNil(diagnostics.focus?.contextWarning)
         XCTAssertFalse(diagnostics.menuRows.contains { $0.value.contains("private draft") })

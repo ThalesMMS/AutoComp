@@ -107,7 +107,8 @@ struct SuggestionPresentationPolicy: Sendable {
             caretRect: context.caretRect,
             focusedElementRect: context.focusedElementRect,
             screenBounds: nil,
-            quality: context.caretGeometryQuality
+            quality: context.caretGeometryQuality,
+            provenance: context.caretGeometryProvenance ?? .unknown
         )
 
         switch safety {

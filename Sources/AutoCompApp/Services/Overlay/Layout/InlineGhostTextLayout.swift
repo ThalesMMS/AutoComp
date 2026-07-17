@@ -93,14 +93,14 @@ internal struct InlineGhostTextLayout: Equatable {
             reason = .rightToLeft
         }
 
-        let clampedOrigin = CGPoint(
-            x: min(max(desiredOrigin.x, visibleFrame.minX), max(visibleFrame.minX, visibleFrame.maxX - measuredWidth)),
-            y: min(max(desiredOrigin.y, visibleFrame.minY), max(visibleFrame.minY, visibleFrame.maxY - panelHeight))
+        let clampResult = visibleFrame.clampingOrigin(
+            desiredOrigin,
+            panelSize: CGSize(width: measuredWidth, height: panelHeight)
         )
-        let placementReason: PlacementReason = clampedOrigin == desiredOrigin ? reason : .clampedToVisibleFrame
+        let placementReason = clampResult.wasClamped ? PlacementReason.clampedToVisibleFrame : reason
         let panelFrame = NSRect(
-            x: clampedOrigin.x,
-            y: clampedOrigin.y,
+            x: clampResult.origin.x,
+            y: clampResult.origin.y,
             width: measuredWidth,
             height: panelHeight
         )

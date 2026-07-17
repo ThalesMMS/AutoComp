@@ -18,6 +18,8 @@ final class DeveloperDiagnosticsSurfaceTests: XCTestCase {
             "FocusDebugOverlayOptions().isEnabled",
             "GeometryDebug.isEnabled",
             "RefreshDiagnostics.isEnabled",
+            "SuggestionPipelineLog.isEnabled",
+            "AUTOCOMP_PIPELINE_DEBUG=1",
             "SafeOverlayMode.isEnabled",
             "AUTOCOMP_CAPTURE_AX_CAPABILITY_SNAPSHOT",
             "engine.diagnostics.output.rawPreview",
@@ -35,6 +37,9 @@ final class DeveloperDiagnosticsSurfaceTests: XCTestCase {
 
         XCTAssertTrue(developerSource.contains(".confirmationDialog(\n            \"Delete Debug Artifacts?\""))
         XCTAssertTrue(developerSource.contains("isConfirmingDebugArtifactDeletion = true"))
+        XCTAssertTrue(developerSource.contains(
+            "This removes local debug bundles, completion traces, and prompt previews from this Mac."
+        ))
         XCTAssertTrue(developerSource.contains(".confirmationDialog(\n            \"Apply Redacted Settings Import?\""))
         XCTAssertTrue(developerSource.contains("isConfirmingSettingsImport = true"))
 

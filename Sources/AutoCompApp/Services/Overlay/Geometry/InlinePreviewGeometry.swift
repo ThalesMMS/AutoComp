@@ -68,6 +68,13 @@ enum InlinePreviewGeometry {
         let nextGlyphRect = validation.nextGlyphRect
 
         guard caretRect != nil || previousGlyphRect != nil || nextGlyphRect != nil else {
+            let authority = authorityDecision(
+                context: context,
+                candidateProvenance: .hiddenTextLayoutEstimate
+            )
+            guard authority == .useCandidate else {
+                return InlinePreviewResolution(rejectionReason: "geometry-authority-\(authority.rawValue)")
+            }
             return estimatedTextBoxLayout(
                 context: context,
                 focusedElementRect: focusedElementRect,
@@ -81,12 +88,21 @@ enum InlinePreviewGeometry {
            focusedElementRect != nil,
            previousGlyphRect == nil,
            !hasReliableFineCaret(caretRect) {
-            return estimatedTextBoxLayout(
+            let authority = authorityDecision(
                 context: context,
-                focusedElementRect: focusedElementRect,
-                contentSize: contentSize,
-                visibleFrame: visibleFrame,
-                fallbackReason: "web-missing-glyph-reference"
+                candidateProvenance: .hiddenTextLayoutEstimate
+            )
+            if authority == .useCandidate {
+                return estimatedTextBoxLayout(
+                    context: context,
+                    focusedElementRect: focusedElementRect,
+                    contentSize: contentSize,
+                    visibleFrame: visibleFrame,
+                    fallbackReason: "web-missing-glyph-reference"
+                )
+            }
+            GeometryDebug.log(
+                "geometry-authority decision=\(authority.rawValue) existing=\((context.caretGeometryProvenance ?? .unknown).rawValue) candidate=hiddenTextLayoutEstimate"
             )
         }
 
@@ -227,6 +243,22 @@ enum InlinePreviewGeometry {
         return OverlayGeometry.isFineCaret(caretRect)
     }
 
+    private static func authorityDecision(
+        context: TextContext,
+        candidateProvenance: CaretGeometryProvenance
+    ) -> CaretGeometryAuthorityDecision {
+        let decision = CaretGeometryAuthorityPolicy().decision(
+            existingQuality: context.caretGeometryQuality,
+            existingProvenance: context.caretGeometryProvenance ?? .unknown,
+            candidateProvenance: candidateProvenance,
+            hostBundleID: context.app.bundleID
+        )
+        GeometryDebug.log(
+            "geometry-authority decision=\(decision.rawValue) existing=\((context.caretGeometryProvenance ?? .unknown).rawValue) candidate=\(candidateProvenance.rawValue)"
+        )
+        return decision
+    }
+
     private static func lineReferenceRect(
         caretRect: CGRect?,
         previousGlyphRect: CGRect?,
@@ -273,7 +305,7 @@ enum InlinePreviewGeometry {
         }
 
         let maxTextLineWidth = max(1, rightLimit - leftLimit - caretGap)
-        let lineEstimate = estimatedVisibleLine(
+        let lineEstimate = VisibleTextLineEstimator.estimate(
             in: context.textBeforeCursor,
             font: font,
             maxLineWidth: maxTextLineWidth
@@ -354,35 +386,6 @@ enum InlinePreviewGeometry {
         return max(CGFloat(4), min(CGFloat(10), visibleFocus.height * 0.16))
     }
 
-    private static func estimatedVisibleLine(in text: String, font: NSFont, maxLineWidth: CGFloat) -> (width: CGFloat, lineIndex: Int) {
-        let lineText = lastLine(in: text)
-        var currentLine = ""
-        var currentWidth: CGFloat = 0
-        var visualLineCount = 1
-        let attributes: [NSAttributedString.Key: Any] = [.font: font]
-
-        for character in lineText {
-            let candidate = currentLine + String(character)
-            let candidateWidth = ceil((candidate as NSString).size(withAttributes: attributes).width)
-            if !currentLine.isEmpty, candidateWidth > maxLineWidth {
-                visualLineCount += 1
-                currentLine = String(character)
-                currentWidth = ceil((currentLine as NSString).size(withAttributes: attributes).width)
-            } else {
-                currentLine = candidate
-                currentWidth = candidateWidth
-            }
-        }
-
-        return (width: min(currentWidth, maxLineWidth), lineIndex: visualLineCount - 1)
-    }
-
-    private static func lastLine(in text: String) -> String {
-        if let lastNewline = text.lastIndex(where: { $0 == "\n" || $0 == "\r" }) {
-            return String(text[text.index(after: lastNewline)...])
-        }
-        return text
-    }
 }
 
 extension InlinePreviewLayout {

@@ -1,30 +1,39 @@
 import Foundation
 
 public final class PrivacySettingsStore: @unchecked Sendable {
-    private let defaults: UserDefaults
+    private let defaults: MirroredUserDefaults
     private let key: String
+    private let lock = NSLock()
+    private var cachedSettings: PrivacySettings?
 
     public init(defaults: UserDefaults = .standard, key: String = "privacySettings") {
-        self.defaults = defaults
+        self.defaults = MirroredUserDefaults(primary: defaults)
         self.key = key
     }
 
     public func load() -> PrivacySettings {
-        guard let data = defaults.data(forKey: key),
-              let settings = try? JSONDecoder().decode(PrivacySettings.self, from: data) else {
-            return PrivacySettings()
+        lock.lock()
+        defer { lock.unlock() }
+
+        if let cachedSettings {
+            return cachedSettings
         }
 
-        var migratedSettings = settings
-        migratedSettings.telemetryEnabled = false
-        return migratedSettings
+        guard let settings = defaults.decode(PrivacySettings.self, forKey: key) else {
+            let settings = PrivacySettings()
+            cachedSettings = settings
+            return settings
+        }
+
+        cachedSettings = settings
+        return settings
     }
 
     public func save(_ settings: PrivacySettings) throws {
-        var storedSettings = settings
-        storedSettings.telemetryEnabled = false
-        let data = try JSONEncoder().encode(storedSettings)
-        defaults.set(data, forKey: key)
+        lock.lock()
+        defer { lock.unlock() }
+        try defaults.encode(settings, forKey: key)
+        cachedSettings = settings
     }
 
     public func resetWritingPreferences() throws {
@@ -35,7 +44,6 @@ public final class PrivacySettingsStore: @unchecked Sendable {
 
     public func resetLocalPrivacyDataState() throws {
         var settings = load()
-        settings.telemetryEnabled = false
         settings.localPersonalizationEnabled = false
         settings.writingPreferences = WritingPreferences()
         try save(settings)

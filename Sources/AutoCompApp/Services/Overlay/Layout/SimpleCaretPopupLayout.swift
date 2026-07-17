@@ -69,16 +69,16 @@ internal struct SimpleCaretPopupLayout: Equatable {
             ? belowY
             : anchor.maxY + 6
         let desiredOrigin = CGPoint(x: desiredX, y: desiredY)
-        let clampedOrigin = CGPoint(
-            x: min(max(desiredOrigin.x, visibleFrame.minX), max(visibleFrame.minX, visibleFrame.maxX - panelWidth)),
-            y: min(max(desiredOrigin.y, visibleFrame.minY), max(visibleFrame.minY, visibleFrame.maxY - panelHeight))
+        let clampResult = visibleFrame.clampingOrigin(
+            desiredOrigin,
+            panelSize: CGSize(width: panelWidth, height: panelHeight)
         )
-        let placementReason = clampedOrigin == desiredOrigin ? reason : .clampedToVisibleFrame
+        let placementReason = clampResult.wasClamped ? PlacementReason.clampedToVisibleFrame : reason
 
         return SimpleCaretPopupLayout(
             panelFrame: NSRect(
-                x: clampedOrigin.x,
-                y: clampedOrigin.y,
+                x: clampResult.origin.x,
+                y: clampResult.origin.y,
                 width: panelWidth,
                 height: panelHeight
             ),

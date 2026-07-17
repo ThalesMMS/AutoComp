@@ -168,7 +168,7 @@ public struct SystemAppleFoundationModelBackend: AppleFoundationModelBackend {
         }
 
         let session = LanguageModelSession(
-            instructions: "You are AutoComp, a low-latency autocomplete engine. Return only the user's likely next words. Do not explain."
+            instructions: CompletionSystemPrompts.continuation
         )
         let response = try await session.respond(to: prompt)
         return response.content

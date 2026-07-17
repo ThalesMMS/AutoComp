@@ -8,11 +8,26 @@ enum AXTextMarkerFallbackGate: Equatable {
     case rejected(reason: String)
 }
 
-struct AXTextMarkerGeometryFallback {
-    let isEnabled: Bool
+final class AXTextMarkerGeometryFallback {
+    private struct CacheKey: Equatable {
+        let bundleID: String
+        let processID: Int32
+        let domain: String?
+        let focusedElementID: String
+        let selectedRange: NSRange?
+        let focusedElementRect: CGRect?
+    }
 
-    init(isEnabled: Bool = AXTextMarkerGeometryFallback.defaultEnabled) {
+    let isEnabled: Bool
+    private let cache: SessionTTLCache<CacheKey, CGRect>
+
+    init(
+        isEnabled: Bool = AXTextMarkerGeometryFallback.defaultEnabled,
+        cacheTTL: TimeInterval = 0.2,
+        now: @escaping () -> Date = Date.init
+    ) {
         self.isEnabled = isEnabled
+        self.cache = SessionTTLCache(ttl: cacheTTL, now: now)
     }
 
     static var defaultEnabled: Bool {
@@ -91,6 +106,31 @@ struct AXTextMarkerGeometryFallback {
             return nil
         }
 
+        let cacheKey = CacheKey(
+            bundleID: snapshot.bundleID,
+            processID: snapshot.app.processID,
+            domain: snapshot.domain,
+            focusedElementID: snapshot.focusedElementID,
+            selectedRange: snapshot.selectedRange,
+            focusedElementRect: geometry.focusedElementRect
+        )
+        switch cache.lookup(cacheKey) {
+        case .hit(let rect):
+            GeometryDebug.log("ax-text-marker cache=hit bundle=\(snapshot.bundleID)")
+            return rect
+        case .negativeHit:
+            GeometryDebug.log("ax-text-marker cache=negative-hit bundle=\(snapshot.bundleID)")
+            return nil
+        case .miss:
+            break
+        }
+
+        let resolved = resolveUncached(snapshot: snapshot)
+        cache.store(resolved, for: cacheKey)
+        return resolved
+    }
+
+    private func resolveUncached(snapshot: AXFocusSnapshot) -> CGRect? {
         guard let markerRange = selectedTextMarkerRange(from: snapshot.focusedElement) else {
             GeometryDebug.log("ax-text-marker failed bundle=\(snapshot.bundleID) reason=missing-selected-marker-range")
             return nil
@@ -108,6 +148,14 @@ struct AXTextMarkerGeometryFallback {
 
         GeometryDebug.log("ax-text-marker used bundle=\(snapshot.bundleID) rect=\(rect)")
         return rect
+    }
+
+    var cacheStats: SessionTTLCacheStats {
+        cache.stats
+    }
+
+    func resetCache() {
+        cache.reset()
     }
 
     private func selectedTextMarkerRange(from element: AXUIElement) -> CFTypeRef? {

@@ -23,7 +23,16 @@ struct OverlayPresenterGeometry {
             return nil
         }
 
-        let screen = OverlayGeometry.screen(containingAccessibilityRect: anchorRect)
+        let coordinateSpace = context.caretGeometryCoordinateSpace ?? .accessibilityGlobal
+        let screen: NSScreen
+        switch coordinateSpace {
+        case .accessibilityGlobal:
+            screen = OverlayGeometry.screen(containingAccessibilityRect: anchorRect)
+        case .appKitGlobal:
+            screen = OverlayGeometry.screen(containingAppKitRect: anchorRect)
+        case .screenLocal, .unknown:
+            return nil
+        }
         return ScreenContext(
             anchorRect: anchorRect,
             visibleFrame: screen.visibleFrame,
@@ -95,11 +104,13 @@ enum OverlayPresenterLog {
         context: TextContext,
         reason: String? = nil
     ) {
+        guard GeometryDebug.isEnabled else { return }
         let reasonText = reason.map { " reason=\($0)" } ?? ""
         GeometryDebug.log("tier=\(tier) rejected app=\(context.app.displayName) bundle=\(context.app.bundleID)\(reasonText) context=\(context.geometryDebugDescription)")
     }
 
     static func hide(tier: String, hasPanel: Bool) {
+        guard GeometryDebug.isEnabled else { return }
         GeometryDebug.log("tier=\(tier) hide hasPanel=\(hasPanel)")
     }
 }

@@ -23,6 +23,7 @@ final class HostPublishAwaiterTests: XCTestCase {
 
         XCTAssertEqual(result.outcome, .ready)
         XCTAssertEqual(result.observedContext?.textBeforeCursor, "Please ")
+        XCTAssertGreaterThanOrEqual(result.pollCount, 1)
     }
 
     func testFocusedElementAndSelectionChangesReturnReady() async throws {
@@ -87,6 +88,7 @@ final class HostPublishAwaiterTests: XCTestCase {
 
         XCTAssertEqual(result.outcome, .timeout)
         XCTAssertEqual(result.observedContext?.textBeforeCursor, "Please")
+        XCTAssertGreaterThan(result.pollCount, 1)
     }
 
     func testNewGenerationCancelsOlderAwait() async throws {
@@ -112,6 +114,7 @@ final class HostPublishAwaiterTests: XCTestCase {
 
         XCTAssertEqual(newerResult.outcome, .ready)
         XCTAssertEqual(olderResult.outcome, .cancelled)
+        XCTAssertGreaterThanOrEqual(newerResult.pollCount, 1)
     }
 
     private func testContext(

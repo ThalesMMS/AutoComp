@@ -58,6 +58,8 @@ struct AXCapabilitySnapshot: Codable, Equatable {
     let geometry: Geometry
     let captureSources: [String]
     let caretQuality: String
+    let caretProvenance: String?
+    let coordinateSpace: String?
 
     static func make(
         focusSnapshot: AXFocusSnapshot,
@@ -66,7 +68,7 @@ struct AXCapabilitySnapshot: Codable, Equatable {
         capabilityPresence: AXElementCapabilityPresence
     ) -> AXCapabilitySnapshot {
         AXCapabilitySnapshot(
-            schemaVersion: 1,
+            schemaVersion: 2,
             bundleID: focusSnapshot.bundleID,
             normalizedDomain: focusSnapshot.domain,
             role: focusSnapshot.role,
@@ -81,7 +83,9 @@ struct AXCapabilitySnapshot: Codable, Equatable {
                 observedCharacterWidth: geometry.observedCharacterWidth.map { SanitizedRect.rounded($0) }
             ),
             captureSources: captureSources.map(\.rawValue).sorted(),
-            caretQuality: geometry.caretGeometryQuality.rawValue
+            caretQuality: geometry.caretGeometryQuality.rawValue,
+            caretProvenance: geometry.caretGeometryProvenance.rawValue,
+            coordinateSpace: geometry.coordinateSpace.rawValue
         )
     }
 
@@ -95,6 +99,8 @@ struct AXCapabilitySnapshot: Codable, Equatable {
             geometry: geometry,
             captureSources: captureSources,
             caretQuality: caretQuality,
+            caretProvenance: caretProvenance,
+            coordinateSpace: coordinateSpace,
             textBeforeCursor: AXCapabilitySnapshotFixtureSeed.syntheticText
         )
     }
@@ -106,6 +112,8 @@ struct AXCapabilitySnapshot: Codable, Equatable {
             role ?? "none",
             subrole ?? "none",
             caretQuality,
+            caretProvenance ?? "unknown",
+            coordinateSpace ?? "unknown",
             captureSources.joined(separator: ",")
         ].joined(separator: "|")
         let digest = SHA256.hash(data: Data(source.utf8))
@@ -134,10 +142,14 @@ struct AXCapabilitySnapshotFixtureSeed: Codable, Equatable {
     let geometry: AXCapabilitySnapshot.Geometry
     let captureSources: [String]
     let caretQuality: String
+    let caretProvenance: String?
+    let coordinateSpace: String?
     let textBeforeCursor: String
 }
 
 protocol AXCapabilitySnapshotRecording {
+    var isEnabled: Bool { get }
+
     func record(
         focusSnapshot: AXFocusSnapshot,
         geometry: AXTextGeometrySnapshot,
@@ -147,21 +159,28 @@ protocol AXCapabilitySnapshotRecording {
 }
 
 struct AXCapabilitySnapshotRecorder: AXCapabilitySnapshotRecording {
+    private static let defaultIsEnabled =
+        ProcessInfo.processInfo.environment["AUTOCOMP_CAPTURE_AX_CAPABILITY_SNAPSHOT"] == "1"
+
     private let artifactStore: DebugArtifactStore
-    private let isEnabled: () -> Bool
+    private let enabledProvider: () -> Bool
     private let now: () -> Date
     private let logger = AutoCompLogger(category: "ax-capability-snapshot")
 
     init(
         artifactStore: DebugArtifactStore = DebugArtifactStore(),
         isEnabled: @escaping () -> Bool = {
-            ProcessInfo.processInfo.environment["AUTOCOMP_CAPTURE_AX_CAPABILITY_SNAPSHOT"] == "1"
+            AXCapabilitySnapshotRecorder.defaultIsEnabled
         },
         now: @escaping () -> Date = Date.init
     ) {
         self.artifactStore = artifactStore
-        self.isEnabled = isEnabled
+        self.enabledProvider = isEnabled
         self.now = now
+    }
+
+    var isEnabled: Bool {
+        enabledProvider()
     }
 
     func record(
@@ -170,7 +189,7 @@ struct AXCapabilitySnapshotRecorder: AXCapabilitySnapshotRecording {
         captureSources: Set<TextCaptureSource>,
         capabilityPresence: AXElementCapabilityPresence
     ) {
-        guard isEnabled() else {
+        guard isEnabled else {
             return
         }
 

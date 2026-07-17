@@ -27,6 +27,7 @@ struct HostPublishAwaitResult: Equatable, Sendable {
     let outcome: HostPublishAwaitOutcome
     let observedContext: TextContext?
     let elapsedMs: Int
+    let pollCount: Int
 }
 
 @MainActor
@@ -63,12 +64,19 @@ final class HostPublishAwaiter {
         }
 
         var lastObservedContext: TextContext?
+        var pollCount = 0
         while true {
             guard latestGeneration == generation, !Task.isCancelled else {
-                return cancelledResult(generation: generation, reason: reason, startedAt: startedAt)
+                return cancelledResult(
+                    generation: generation,
+                    reason: reason,
+                    startedAt: startedAt,
+                    pollCount: pollCount
+                )
             }
 
             do {
+                pollCount += 1
                 let context = try await provider.currentContext()
                 lastObservedContext = context
                 if Self.hasPublishedChange(from: baseline, to: context) {
@@ -77,7 +85,8 @@ final class HostPublishAwaiter {
                     return HostPublishAwaitResult(
                         outcome: .ready,
                         observedContext: context,
-                        elapsedMs: elapsedMs
+                        elapsedMs: elapsedMs,
+                        pollCount: pollCount
                     )
                 }
             } catch {
@@ -90,14 +99,20 @@ final class HostPublishAwaiter {
                 return HostPublishAwaitResult(
                     outcome: .timeout,
                     observedContext: lastObservedContext,
-                    elapsedMs: elapsedMs
+                    elapsedMs: elapsedMs,
+                    pollCount: pollCount
                 )
             }
 
             do {
                 try await Task.sleep(nanoseconds: configuration.pollIntervalNanoseconds)
             } catch {
-                return cancelledResult(generation: generation, reason: reason, startedAt: startedAt)
+                return cancelledResult(
+                    generation: generation,
+                    reason: reason,
+                    startedAt: startedAt,
+                    pollCount: pollCount
+                )
             }
         }
     }
@@ -105,14 +120,16 @@ final class HostPublishAwaiter {
     private func cancelledResult(
         generation: Int,
         reason: String,
-        startedAt: ContinuousClock.Instant
+        startedAt: ContinuousClock.Instant,
+        pollCount: Int = 0
     ) -> HostPublishAwaitResult {
         let elapsedMs = elapsedMs(since: startedAt)
         logger.info("host-publish-await cancelled generation=\(generation) reason=\(reason) elapsedMs=\(elapsedMs)")
         return HostPublishAwaitResult(
             outcome: .cancelled,
             observedContext: nil,
-            elapsedMs: elapsedMs
+            elapsedMs: elapsedMs,
+            pollCount: pollCount
         )
     }
 

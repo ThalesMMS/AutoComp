@@ -138,8 +138,7 @@ public final class PersonalizationSampleRecorder: @unchecked Sendable {
         maxCharacters: Int,
         minimumCharacters: Int
     ) -> String? {
-        let collapsed = text
-            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+        let collapsed = TextWhitespaceNormalizer.collapse(text)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let excerpt = String(collapsed.suffix(max(0, maxCharacters)))
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -150,8 +149,9 @@ public final class PersonalizationSampleRecorder: @unchecked Sendable {
     }
 
     public static func containsSensitivePattern(_ text: String) -> Bool {
-        sensitivePatterns.contains { pattern in
-            text.range(of: pattern, options: [.regularExpression]) != nil
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        return sensitiveExpressions.contains { expression in
+            expression.firstMatch(in: text, range: range) != nil
         }
     }
 
@@ -166,4 +166,8 @@ public final class PersonalizationSampleRecorder: @unchecked Sendable {
         #"(?i)\b(phone|tel|mobile|cell)\b\s*[:=]?\s*(\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}\b"#,
         #"\b(\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]\d{3}[\s.-]\d{4}\b"#
     ]
+
+    private static let sensitiveExpressions = sensitivePatterns.compactMap {
+        try? NSRegularExpression(pattern: $0)
+    }
 }

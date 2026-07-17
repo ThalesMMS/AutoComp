@@ -144,6 +144,35 @@ final class SuggestionEngineAcceptanceTests: XCTestCase {
         engine.stop()
     }
 
+    func testIMECompositionCancelsSchedulingBeforeProviderCall() async throws {
+        let context = TextContext(
+            app: AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1),
+            focusedElementID: "textedit-field",
+            textBeforeCursor: "Composing "
+        )
+        let completionProvider = CountingCompletionProvider(
+            suggestion: Suggestion(baseContextID: context.id, visibleText: "text", latencyMs: 1)
+        )
+        let engine = SuggestionEngine(
+            contextProvider: MutableContextProvider(context: context),
+            completionProvider: completionProvider,
+            presenter: RecordingSuggestionPresenter(),
+            inputMethodStateProvider: {
+                InputMethodState(isASCIICompatible: false, isComposingText: true)
+            },
+            hostPublishAwaiter: HostPublishAwaiter(configuration: .slowTimeoutTest)
+        )
+
+        engine.recordCapturedInputEvent(.text(keyCode: 0, isSuggestionTrigger: false))
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        let callCount = await completionProvider.getCallCount()
+        XCTAssertEqual(callCount, 0)
+        XCTAssertNil(engine.currentSuggestion)
+        XCTAssertEqual(engine.statusMessage, "IME composition active")
+        engine.stop()
+    }
+
     func testNonPublishingShortcutMutationsDoNotCancelPendingTextPublish() async throws {
         let app = AppIdentity(bundleID: "com.google.Chrome", displayName: "Google Chrome", processID: 1)
         let baselineContext = TextContext(
@@ -891,6 +920,264 @@ final class SuggestionEngineAcceptanceTests: XCTestCase {
         XCTAssertEqual(inserter.insertedText, " first option")
         XCTAssertNil(engine.currentSuggestion)
         XCTAssertNil(presenter.lastSuggestion)
+        engine.stop()
+    }
+
+    func testTypedPrefixPromotesSecondPublishedAlternativeWithoutProviderCall() async throws {
+        let app = AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1)
+        let initialContext = TextContext(
+            app: app,
+            focusedElementID: "textedit-field",
+            textBeforeCursor: "Please"
+        )
+        let contextProvider = MutableContextProvider(context: initialContext)
+        let completionProvider = RecordingMultipleCompletionProvider(visibleTexts: [
+            " first option",
+            " second branch",
+            " third option"
+        ])
+        let engine = SuggestionEngine(
+            contextProvider: contextProvider,
+            completionProvider: completionProvider,
+            presenter: RecordingSuggestionPresenter(),
+            multiSuggestionEnabled: true,
+            hostPublishAwaiter: HostPublishAwaiter(configuration: .fastTest)
+        )
+
+        await engine.triggerManualSuggestion()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        await contextProvider.updateContext(TextContext(
+            app: app,
+            focusedElementID: "textedit-field",
+            textBeforeCursor: "Please sec"
+        ))
+        engine.recordCapturedInputEvent(.text(keyCode: 0, isSuggestionTrigger: false))
+        try await Task.sleep(nanoseconds: 250_000_000)
+
+        let requestedCounts = await completionProvider.recordedSuggestionCounts()
+        XCTAssertEqual(engine.currentSuggestion?.visibleText, "ond branch")
+        XCTAssertEqual(requestedCounts, [3])
+        engine.stop()
+    }
+
+    func testShortBackspaceRestoresCandidateWithoutProviderCall() async throws {
+        let app = AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1)
+        let initialContext = TextContext(
+            app: app,
+            focusedElementID: "textedit-field",
+            textBeforeCursor: "Please"
+        )
+        let contextProvider = MutableContextProvider(context: initialContext)
+        let completionProvider = RecordingMultipleCompletionProvider(visibleTexts: [
+            " first option",
+            " second branch",
+            " third option"
+        ])
+        let engine = SuggestionEngine(
+            contextProvider: contextProvider,
+            completionProvider: completionProvider,
+            presenter: RecordingSuggestionPresenter(),
+            multiSuggestionEnabled: true,
+            hostPublishAwaiter: HostPublishAwaiter(configuration: .fastTest)
+        )
+
+        await engine.triggerManualSuggestion()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        await contextProvider.updateContext(TextContext(
+            app: app,
+            focusedElementID: "textedit-field",
+            textBeforeCursor: "Please sez"
+        ))
+        engine.recordCapturedInputEvent(.text(keyCode: 0, isSuggestionTrigger: false))
+        try await Task.sleep(nanoseconds: 200_000_000)
+        await contextProvider.updateContext(TextContext(
+            app: app,
+            focusedElementID: "textedit-field",
+            textBeforeCursor: "Please se"
+        ))
+        engine.recordCapturedInputEvent(.text(
+            keyCode: CapturedInputEventAdapter.deleteKeyCode,
+            isSuggestionTrigger: false
+        ))
+        try await Task.sleep(nanoseconds: 250_000_000)
+
+        let requestedCounts = await completionProvider.recordedSuggestionCounts()
+        XCTAssertEqual(engine.currentSuggestion?.visibleText, "cond branch")
+        XCTAssertEqual(requestedCounts, [3])
+        engine.stop()
+    }
+
+    func testLocalPostAcceptanceSpeculationPublishesOnlyAfterHostMatchesOptimisticContext() async throws {
+        let app = AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1)
+        let initialContext = TextContext(app: app, focusedElementID: "field", textBeforeCursor: "Hello ")
+        let contextProvider = MutableContextProvider(context: initialContext)
+        let provider = SequencedRoutingCompletionProvider(
+            outputs: ["world", " again"],
+            delaysNanoseconds: [0, 180_000_000]
+        )
+        let engine = SuggestionEngine(
+            contextProvider: contextProvider,
+            completionProvider: provider,
+            presenter: RecordingSuggestionPresenter(),
+            postAcceptanceSpeculationPolicy: PostAcceptanceSpeculationPolicy(
+                configuration: .init(enabled: true, commandWindow: 0.8)
+            )
+        )
+
+        await engine.triggerManualSuggestion()
+        try await Task.sleep(nanoseconds: 80_000_000)
+        let initialCallCount = await provider.callCount()
+        XCTAssertEqual(initialCallCount, 1)
+
+        let outcome = await engine.acceptAll(using: RecordingTextInserter())
+        XCTAssertEqual(outcome, .accepted)
+        await contextProvider.updateContext(TextContext(
+            app: app,
+            focusedElementID: "field",
+            textBeforeCursor: "Hello world"
+        ))
+        try await Task.sleep(nanoseconds: 350_000_000)
+
+        let finalCallCount = await provider.callCount()
+        XCTAssertEqual(finalCallCount, 2)
+        XCTAssertEqual(engine.currentSuggestion?.visibleText, " again")
+        engine.stop()
+    }
+
+    func testPostAcceptanceSpeculationDiscardsWhenHostDiverges() async throws {
+        let app = AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1)
+        let initialContext = TextContext(app: app, focusedElementID: "field", textBeforeCursor: "Hello ")
+        let contextProvider = MutableContextProvider(context: initialContext)
+        let provider = SequencedRoutingCompletionProvider(
+            outputs: ["world", " speculative"],
+            delaysNanoseconds: [0, 180_000_000]
+        )
+        let engine = SuggestionEngine(
+            contextProvider: contextProvider,
+            completionProvider: provider,
+            presenter: RecordingSuggestionPresenter(),
+            postAcceptanceSpeculationPolicy: PostAcceptanceSpeculationPolicy(
+                configuration: .init(enabled: true, commandWindow: 0.5)
+            )
+        )
+
+        await engine.triggerManualSuggestion()
+        try await Task.sleep(nanoseconds: 80_000_000)
+        let firstAcceptance = await engine.acceptAll(using: RecordingTextInserter())
+        XCTAssertEqual(firstAcceptance, .accepted)
+        await contextProvider.updateContext(TextContext(
+            app: app,
+            focusedElementID: "field",
+            textBeforeCursor: "Hello altered"
+        ))
+        try await Task.sleep(nanoseconds: 350_000_000)
+
+        let callCount = await provider.callCount()
+        XCTAssertEqual(callCount, 2)
+        XCTAssertNil(engine.currentSuggestion)
+        engine.stop()
+    }
+
+    func testNavigationDuringPostAcceptanceSpeculationCancelsLateResult() async throws {
+        let app = AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1)
+        let initialContext = TextContext(app: app, focusedElementID: "field", textBeforeCursor: "Hello ")
+        let contextProvider = MutableContextProvider(context: initialContext)
+        let provider = SequencedRoutingCompletionProvider(
+            outputs: ["world", " late"],
+            delaysNanoseconds: [0, 500_000_000]
+        )
+        let engine = SuggestionEngine(
+            contextProvider: contextProvider,
+            completionProvider: provider,
+            presenter: RecordingSuggestionPresenter(),
+            postAcceptanceSpeculationPolicy: PostAcceptanceSpeculationPolicy(
+                configuration: .init(enabled: true, commandWindow: 0.8)
+            )
+        )
+
+        await engine.triggerManualSuggestion()
+        try await Task.sleep(nanoseconds: 80_000_000)
+        let firstAcceptance = await engine.acceptAll(using: RecordingTextInserter())
+        XCTAssertEqual(firstAcceptance, .accepted)
+        engine.recordCapturedInputEvent(.navigation(keyCode: 123))
+        await contextProvider.updateContext(TextContext(
+            app: app,
+            focusedElementID: "field",
+            textBeforeCursor: "Hello world"
+        ))
+        try await Task.sleep(nanoseconds: 600_000_000)
+
+        XCTAssertNil(engine.currentSuggestion)
+        engine.stop()
+    }
+
+    func testBufferedPostAcceptanceTabConsumesNextValidatedSuggestionOnce() async throws {
+        let app = AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1)
+        let initialContext = TextContext(app: app, focusedElementID: "field", textBeforeCursor: "Hello ")
+        let contextProvider = MutableContextProvider(context: initialContext)
+        let provider = SequencedRoutingCompletionProvider(
+            outputs: ["world", " again soon"],
+            delaysNanoseconds: [0, 180_000_000]
+        )
+        let engine = SuggestionEngine(
+            contextProvider: contextProvider,
+            completionProvider: provider,
+            presenter: RecordingSuggestionPresenter(),
+            postAcceptanceSpeculationPolicy: PostAcceptanceSpeculationPolicy(
+                configuration: .init(enabled: true, commandWindow: 0.8)
+            )
+        )
+
+        await engine.triggerManualSuggestion()
+        try await Task.sleep(nanoseconds: 80_000_000)
+        let firstAcceptance = await engine.acceptAll(using: RecordingTextInserter())
+        XCTAssertEqual(firstAcceptance, .accepted)
+
+        let bufferedInserter = RecordingTextInserter()
+        let bufferedTask = Task { @MainActor in
+            await engine.acceptNextWord(using: bufferedInserter)
+        }
+        await contextProvider.updateContext(TextContext(
+            app: app,
+            focusedElementID: "field",
+            textBeforeCursor: "Hello world"
+        ))
+        let bufferedOutcome = await bufferedTask.value
+
+        XCTAssertEqual(bufferedOutcome, .accepted)
+        XCTAssertEqual(bufferedInserter.insertedText, " again ")
+        let callCount = await provider.callCount()
+        XCTAssertEqual(callCount, 2)
+        engine.stop()
+    }
+
+    func testBufferedPostAcceptanceTabTimesOutFailOpen() async throws {
+        let app = AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1)
+        let initialContext = TextContext(app: app, focusedElementID: "field", textBeforeCursor: "Hello ")
+        let contextProvider = MutableContextProvider(context: initialContext)
+        let provider = SequencedRoutingCompletionProvider(
+            outputs: ["world", " late"],
+            delaysNanoseconds: [0, 800_000_000]
+        )
+        let engine = SuggestionEngine(
+            contextProvider: contextProvider,
+            completionProvider: provider,
+            presenter: RecordingSuggestionPresenter(),
+            postAcceptanceSpeculationPolicy: PostAcceptanceSpeculationPolicy(
+                configuration: .init(enabled: true, commandWindow: 0.12)
+            )
+        )
+
+        await engine.triggerManualSuggestion()
+        try await Task.sleep(nanoseconds: 80_000_000)
+        let firstAcceptance = await engine.acceptAll(using: RecordingTextInserter())
+        XCTAssertEqual(firstAcceptance, .accepted)
+
+        let bufferedInserter = RecordingTextInserter()
+        let outcome = await engine.acceptNextWord(using: bufferedInserter)
+
+        XCTAssertEqual(outcome, .passedThrough)
+        XCTAssertEqual(bufferedInserter.insertedText, "")
         engine.stop()
     }
 
@@ -3908,6 +4195,35 @@ private actor RecordingMultipleCompletionProvider: MultipleCompletionProvider {
             visibleText: visibleText,
             rawText: "raw:\(visibleText)",
             latencyMs: 12
+        )
+    }
+}
+
+private actor SequencedRoutingCompletionProvider: CompletionProvider, CompletionRoutingProviding {
+    nonisolated let routingPolicy = CompletionRoutingPolicy(activeKind: .localLlama, fallbackKind: nil)
+    private let outputs: [String]
+    private let delaysNanoseconds: [UInt64]
+    private var contexts: [TextContext] = []
+
+    init(outputs: [String], delaysNanoseconds: [UInt64]) {
+        self.outputs = outputs
+        self.delaysNanoseconds = delaysNanoseconds
+    }
+
+    func callCount() -> Int { contexts.count }
+
+    func complete(context: TextContext) async throws -> Suggestion {
+        let index = contexts.count
+        contexts.append(context)
+        let delay = delaysNanoseconds[min(index, delaysNanoseconds.count - 1)]
+        if delay > 0 {
+            try await Task.sleep(nanoseconds: delay)
+        }
+        return Suggestion(
+            baseContextID: context.id,
+            visibleText: outputs[min(index, outputs.count - 1)],
+            completionRoute: CompletionRoute(requestedKind: .localLlama, deliveredKind: .localLlama),
+            latencyMs: Int(delay / 1_000_000)
         )
     }
 }

@@ -14,23 +14,25 @@ enum PreviewPresentationTier: Equatable {
 }
 
 enum GeometryDebug {
-    private static let logger = AutoCompLogger(category: "geometry")
+    private static let environment = ProcessInfo.processInfo.environment
+    private static let artifactPath = environment["AUTOCOMP_GEOMETRY_DEBUG_LOG_FILE"]
+    private static let channel = DebugChannel(
+        category: "geometry",
+        prefix: "AutoCompGeometry",
+        isEnabled: DebugChannel.flagEnabled(
+            argument: "--geometry-debug",
+            environmentVariable: "AUTOCOMP_GEOMETRY_DEBUG",
+            environment: environment
+        ),
+        privacy: .redactWholeMessage,
+        writesToStandardError: true,
+        unredactedSink: writeUnredactedDebugArtifact
+    )
 
-    static var isEnabled: Bool {
-        ProcessInfo.processInfo.arguments.contains("--geometry-debug")
-            || ProcessInfo.processInfo.environment["AUTOCOMP_GEOMETRY_DEBUG"] == "1"
-    }
+    static let isEnabled = channel.isEnabled
 
     static func log(_ message: @autoclosure () -> String) {
-        guard isEnabled else {
-            return
-        }
-        let resolvedMessage = message()
-        logger.info("AutoCompGeometry \(AutoCompLogger.redactedSummary(for: resolvedMessage))")
-        if let data = "AutoCompGeometry \(AutoCompLogger.redactedSummary(for: resolvedMessage))\n".data(using: .utf8) {
-            FileHandle.standardError.write(data)
-        }
-        writeUnredactedDebugArtifact(resolvedMessage)
+        channel.log(message())
     }
 
     /// Writes an intentionally unredacted geometry artifact for controlled developer and CI smoke runs.
@@ -38,7 +40,7 @@ enum GeometryDebug {
     /// Unified log and stderr output stay redacted above; this file path is opt-in because UI geometry
     /// smoke tests need exact fields such as tier, panel frame, and suffix length.
     private static func writeUnredactedDebugArtifact(_ resolvedMessage: String) {
-        if let path = ProcessInfo.processInfo.environment["AUTOCOMP_GEOMETRY_DEBUG_LOG_FILE"],
+        if let path = artifactPath,
            !path.isEmpty,
            let data = "AutoCompGeometry \(resolvedMessage)\n".data(using: .utf8) {
             if !FileManager.default.fileExists(atPath: path) {
@@ -54,22 +56,21 @@ enum GeometryDebug {
 }
 
 enum RefreshDiagnostics {
-    private static let logger = AutoCompLogger(category: "refresh")
+    private static let channel = DebugChannel(
+        category: "refresh",
+        prefix: "AutoCompRefresh",
+        isEnabled: DebugChannel.flagEnabled(
+            argument: "--refresh-debug",
+            environmentVariable: "AUTOCOMP_REFRESH_DEBUG"
+        ),
+        privacy: .redactWholeMessage,
+        writesToStandardError: true
+    )
 
-    static var isEnabled: Bool {
-        ProcessInfo.processInfo.arguments.contains("--refresh-debug")
-            || ProcessInfo.processInfo.environment["AUTOCOMP_REFRESH_DEBUG"] == "1"
-    }
+    static let isEnabled = channel.isEnabled
 
     static func log(_ message: @autoclosure () -> String) {
-        guard isEnabled else {
-            return
-        }
-        let resolvedMessage = message()
-        logger.info("AutoCompRefresh \(AutoCompLogger.redactedSummary(for: resolvedMessage))")
-        if let data = "AutoCompRefresh \(AutoCompLogger.redactedSummary(for: resolvedMessage))\n".data(using: .utf8) {
-            FileHandle.standardError.write(data)
-        }
+        channel.log(message())
     }
 }
 

@@ -24,11 +24,36 @@ final class VisualInlineOverlayPresenterTests: XCTestCase {
         XCTAssertFalse(presenter.canPresent(suggestion(), for: context))
     }
 
-    private func presenter() -> VisualInlineOverlayPresenter {
+    func testCanPresentRejectsMissingScreenContext() {
+        let presenter = presenter(screenContextProvider: { _ in nil })
+        let context = textContext(
+            caretRect: CGRect(x: 100, y: 110, width: 2, height: 18),
+            focusedElementRect: CGRect(x: 80, y: 90, width: 420, height: 56)
+        )
+
+        XCTAssertFalse(presenter.canPresent(suggestion(), for: context))
+    }
+
+    func testCanPresentRejectsUnsupportedCoordinateSpaces() {
+        let presenter = presenter()
+        for coordinateSpace in [CaretGeometryCoordinateSpace.screenLocal, .unknown] {
+            let context = textContext(
+                caretRect: CGRect(x: 10_050, y: 110, width: 2, height: 18),
+                focusedElementRect: CGRect(x: 10_020, y: 90, width: 420, height: 56),
+                coordinateSpace: coordinateSpace
+            )
+
+            XCTAssertFalse(presenter.canPresent(suggestion(), for: context))
+        }
+    }
+
+    private func presenter(
+        screenContextProvider: (@MainActor (TextContext) -> OverlayPresenterGeometry.ScreenContext?)? = nil
+    ) -> VisualInlineOverlayPresenter {
         VisualInlineOverlayPresenter(
             shortcutSettingsStore: KeyboardShortcutSettingsStore(),
             hintsProvider: OverlayShortcutHintsProvider(),
-            screenContextProvider: { context in
+            screenContextProvider: screenContextProvider ?? { context in
                 let primary = CGRect(x: 0, y: 0, width: 1_000, height: 1_000)
                 let secondary = CGRect(x: 10_000, y: 0, width: 900, height: 1_000)
                 return OverlayPresenterGeometry.ScreenContext(
@@ -47,7 +72,8 @@ final class VisualInlineOverlayPresenterTests: XCTestCase {
 
     private func textContext(
         caretRect: CGRect,
-        focusedElementRect: CGRect
+        focusedElementRect: CGRect,
+        coordinateSpace: CaretGeometryCoordinateSpace? = nil
     ) -> TextContext {
         TextContext(
             app: AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1),
@@ -57,6 +83,7 @@ final class VisualInlineOverlayPresenterTests: XCTestCase {
             caretRect: caretRect,
             focusedElementRect: focusedElementRect,
             caretGeometryQuality: .directCaret,
+            caretGeometryCoordinateSpace: coordinateSpace,
             observedCharacterWidth: 7
         )
     }

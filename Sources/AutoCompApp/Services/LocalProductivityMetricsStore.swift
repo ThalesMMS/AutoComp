@@ -1,4 +1,5 @@
 import AutoCompCore
+@preconcurrency import AppKit
 import Combine
 import Foundation
 
@@ -96,21 +97,23 @@ protocol ProductivityMetricsRecording: AnyObject {
 }
 
 @MainActor
-protocol CompletionTelemetryMetricsRecording: ProductivityMetricsRecording {
+protocol CompletionMetricsRecording: ProductivityMetricsRecording {
     func recordGeneratedSuggestion()
     func recordShownSuggestion()
     func recordSuppressedSuggestion(reason: String)
 }
 
 @MainActor
-final class LocalProductivityMetricsStore: ObservableObject, CompletionTelemetryMetricsRecording {
+final class LocalProductivityMetricsStore: ObservableObject, CompletionMetricsRecording {
     @Published private(set) var snapshot: ProductivityMetricsSnapshot
 
-    private let defaults: UserDefaults
-    private let key: String
     private let privacyStore: PrivacySettingsStore
     private let calendar: Calendar
     private let now: () -> Date
+    private let persistence: CoalescingProductivityMetricsPersistence
+    private var storedMetrics: StoredProductivityMetrics
+    private var isMetricsEnabled: Bool
+    private var terminationObserver: NotificationObserverToken?
 
     init(
         defaults: UserDefaults = .standard,
@@ -119,128 +122,112 @@ final class LocalProductivityMetricsStore: ObservableObject, CompletionTelemetry
         calendar: Calendar = .current,
         now: @escaping () -> Date = Date.init
     ) {
-        self.defaults = defaults
-        self.key = key
         self.privacyStore = privacyStore
         self.calendar = calendar
         self.now = now
 
+        let defaults = MirroredUserDefaults(primary: defaults)
         let today = Self.dayKey(for: now(), calendar: calendar)
         let stored = Self.normalized(Self.load(defaults: defaults, key: key, today: today), today: today)
-        Self.save(stored, defaults: defaults, key: key)
+        let isMetricsEnabled = privacyStore.load().productivityMetricsEnabled
+        let persistence = CoalescingProductivityMetricsPersistence(defaults: defaults, key: key)
+        self.persistence = persistence
+        self.storedMetrics = stored
+        self.isMetricsEnabled = isMetricsEnabled
         self.snapshot = Self.makeSnapshot(
             from: stored,
-            isEnabled: privacyStore.load().productivityMetricsEnabled
+            isEnabled: isMetricsEnabled
         )
+        let terminationObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification,
+            object: nil,
+            queue: nil
+        ) { [persistence] _ in
+            persistence.flush()
+        }
+        self.terminationObserver = NotificationObserverToken(
+            center: .default,
+            token: terminationObserver
+        )
+        persistence.schedule(stored)
     }
 
     func reload() {
-        publish(loadNormalizedStoredMetrics())
+        isMetricsEnabled = privacyStore.load().productivityMetricsEnabled
+        normalizeStoredMetricsForToday()
+        publish()
     }
 
     func recordAcceptedText(_ text: String) {
-        guard privacyStore.load().productivityMetricsEnabled else {
-            reload()
-            return
+        updateMetrics { stored in
+            stored.suggestionsAccepted += 1
+            let acceptedWords = Self.acceptedWordCount(in: text)
+            stored.wordsAcceptedToday += acceptedWords
+            stored.wordsAcceptedTotal += acceptedWords
         }
-
-        var stored = loadNormalizedStoredMetrics()
-        stored.suggestionsAccepted += 1
-        let acceptedWords = Self.acceptedWordCount(in: text)
-        stored.wordsAcceptedToday += acceptedWords
-        stored.wordsAcceptedTotal += acceptedWords
-        saveAndPublish(stored)
     }
 
     func recordGeneratedSuggestion() {
-        guard privacyStore.load().productivityMetricsEnabled else {
-            reload()
-            return
+        updateMetrics { stored in
+            stored.suggestionsGenerated += 1
         }
-
-        var stored = loadNormalizedStoredMetrics()
-        stored.suggestionsGenerated += 1
-        saveAndPublish(stored)
     }
 
     func recordShownSuggestion() {
-        guard privacyStore.load().productivityMetricsEnabled else {
-            reload()
-            return
+        updateMetrics { stored in
+            stored.suggestionsShown += 1
         }
-
-        var stored = loadNormalizedStoredMetrics()
-        stored.suggestionsShown += 1
-        saveAndPublish(stored)
     }
 
     func recordSuppressedSuggestion(reason: String) {
-        guard privacyStore.load().productivityMetricsEnabled else {
-            reload()
-            return
+        updateMetrics { stored in
+            let reason = Self.sanitizedSuppressionReason(reason)
+            stored.suppressedReasonCounts[reason, default: 0] += 1
         }
-
-        let reason = Self.sanitizedSuppressionReason(reason)
-        var stored = loadNormalizedStoredMetrics()
-        stored.suppressedReasonCounts[reason, default: 0] += 1
-        saveAndPublish(stored)
     }
 
     func recordDismissedSuggestion() {
-        guard privacyStore.load().productivityMetricsEnabled else {
-            reload()
-            return
+        updateMetrics { stored in
+            stored.suggestionsDismissed += 1
         }
-
-        var stored = loadNormalizedStoredMetrics()
-        stored.suggestionsDismissed += 1
-        saveAndPublish(stored)
     }
 
     func recordBackendLatency(_ latencyMs: Int) {
-        guard privacyStore.load().productivityMetricsEnabled,
-              latencyMs >= 0 else {
-            reload()
-            return
-        }
+        guard latencyMs >= 0 else { return }
 
-        var stored = loadNormalizedStoredMetrics()
-        stored.recordBackendLatencySample(latencyMs)
-        stored.lastLatencyReport = CompletionLatencyReport(backendMs: latencyMs)
-        saveAndPublish(stored)
+        updateMetrics { stored in
+            stored.recordBackendLatencySample(latencyMs)
+            stored.lastLatencyReport = CompletionLatencyReport(backendMs: latencyMs)
+        }
     }
 
     func recordCompletionLatency(_ report: CompletionLatencyReport) {
-        guard privacyStore.load().productivityMetricsEnabled,
-              !report.isEmpty else {
-            reload()
-            return
-        }
+        guard !report.isEmpty else { return }
 
-        var stored = loadNormalizedStoredMetrics()
-        if let backendMs = report.backendMs, backendMs >= 0 {
-            stored.recordBackendLatencySample(backendMs)
+        updateMetrics { stored in
+            if let backendMs = report.backendMs, backendMs >= 0 {
+                stored.recordBackendLatencySample(backendMs)
+            }
+            stored.lastLatencyReport = report
         }
-        stored.lastLatencyReport = report
-        saveAndPublish(stored)
     }
 
     func recordInsertionLatency(_ latencyMs: Int) {
-        guard privacyStore.load().productivityMetricsEnabled,
-              latencyMs >= 0 else {
-            reload()
-            return
-        }
+        guard latencyMs >= 0 else { return }
 
-        var stored = loadNormalizedStoredMetrics()
-        stored.lastLatencyReport = (stored.lastLatencyReport ?? CompletionLatencyReport())
-            .withInsertionLatency(latencyMs)
-        saveAndPublish(stored)
+        updateMetrics { stored in
+            stored.lastLatencyReport = (stored.lastLatencyReport ?? CompletionLatencyReport())
+                .withInsertionLatency(latencyMs)
+        }
     }
 
     func reset() {
-        let stored = StoredProductivityMetrics(dayKey: Self.dayKey(for: now(), calendar: calendar))
-        saveAndPublish(stored)
+        storedMetrics = StoredProductivityMetrics(dayKey: Self.dayKey(for: now(), calendar: calendar))
+        saveAndPublish()
+    }
+
+    func flushPendingPersistence() {
+        persistence.flush()
     }
 
     static func acceptedWordCount(in text: String) -> Int {
@@ -264,22 +251,32 @@ final class LocalProductivityMetricsStore: ObservableObject, CompletionTelemetry
         return count
     }
 
-    private func loadNormalizedStoredMetrics() -> StoredProductivityMetrics {
+    private func updateMetrics(_ update: (inout StoredProductivityMetrics) -> Void) {
+        isMetricsEnabled = privacyStore.load().productivityMetricsEnabled
+        guard isMetricsEnabled else {
+            publish()
+            return
+        }
+
+        normalizeStoredMetricsForToday()
+        update(&storedMetrics)
+        saveAndPublish()
+    }
+
+    private func normalizeStoredMetricsForToday() {
         let today = Self.dayKey(for: now(), calendar: calendar)
-        let stored = Self.normalized(Self.load(defaults: defaults, key: key, today: today), today: today)
-        Self.save(stored, defaults: defaults, key: key)
-        return stored
+        storedMetrics = Self.normalized(storedMetrics, today: today)
     }
 
-    private func saveAndPublish(_ stored: StoredProductivityMetrics) {
-        Self.save(stored, defaults: defaults, key: key)
-        publish(stored)
+    private func saveAndPublish() {
+        persistence.schedule(storedMetrics)
+        publish()
     }
 
-    private func publish(_ stored: StoredProductivityMetrics) {
+    private func publish() {
         snapshot = Self.makeSnapshot(
-            from: stored,
-            isEnabled: privacyStore.load().productivityMetricsEnabled
+            from: storedMetrics,
+            isEnabled: isMetricsEnabled
         )
     }
 
@@ -319,12 +316,11 @@ final class LocalProductivityMetricsStore: ObservableObject, CompletionTelemetry
     }
 
     private static func load(
-        defaults: UserDefaults,
+        defaults: MirroredUserDefaults,
         key: String,
         today: String
     ) -> StoredProductivityMetrics {
-        guard let data = defaults.data(forKey: key),
-              let stored = try? JSONDecoder().decode(StoredProductivityMetrics.self, from: data) else {
+        guard let stored = defaults.decode(StoredProductivityMetrics.self, forKey: key) else {
             return StoredProductivityMetrics(dayKey: today)
         }
 
@@ -345,17 +341,6 @@ final class LocalProductivityMetricsStore: ObservableObject, CompletionTelemetry
         return updated
     }
 
-    private static func save(
-        _ stored: StoredProductivityMetrics,
-        defaults: UserDefaults,
-        key: String
-    ) {
-        guard let data = try? JSONEncoder().encode(stored) else {
-            return
-        }
-        defaults.set(data, forKey: key)
-    }
-
     private static func dayKey(for date: Date, calendar: Calendar) -> String {
         let components = calendar.dateComponents([.year, .month, .day], from: date)
         return String(
@@ -367,7 +352,7 @@ final class LocalProductivityMetricsStore: ObservableObject, CompletionTelemetry
     }
 }
 
-private struct StoredProductivityMetrics: Codable, Equatable {
+private struct StoredProductivityMetrics: Codable, Equatable, Sendable {
     private static let maxLatencySamples = 200
 
     var dayKey: String
@@ -491,5 +476,91 @@ private struct StoredProductivityMetrics: Codable, Equatable {
         let clamped = min(100, max(0, percentile))
         let rank = (Double(clamped) / 100.0) * Double(sorted.count - 1)
         return sorted[Int(rank.rounded(.up))]
+    }
+}
+
+private final class CoalescingProductivityMetricsPersistence: @unchecked Sendable {
+    private let defaults: MirroredUserDefaults
+    private let key: String
+    private let queue = DispatchQueue(label: "com.autocomp.productivity-metrics-persistence")
+    private let lock = NSLock()
+    private let debounceInterval: DispatchTimeInterval
+    private var pendingMetrics: StoredProductivityMetrics?
+    private var scheduledWorkItem: DispatchWorkItem?
+    private var generation = 0
+
+    init(
+        defaults: MirroredUserDefaults,
+        key: String,
+        debounceInterval: DispatchTimeInterval = .milliseconds(100)
+    ) {
+        self.defaults = defaults
+        self.key = key
+        self.debounceInterval = debounceInterval
+    }
+
+    func schedule(_ metrics: StoredProductivityMetrics) {
+        lock.lock()
+        generation += 1
+        let scheduledGeneration = generation
+        pendingMetrics = metrics
+        scheduledWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.persistPendingMetrics(for: scheduledGeneration)
+        }
+        scheduledWorkItem = workItem
+        lock.unlock()
+
+        queue.asyncAfter(deadline: .now() + debounceInterval, execute: workItem)
+    }
+
+    func flush() {
+        lock.lock()
+        generation += 1
+        scheduledWorkItem?.cancel()
+        scheduledWorkItem = nil
+        let metrics = pendingMetrics
+        pendingMetrics = nil
+        lock.unlock()
+
+        queue.sync {
+            if let metrics {
+                persist(metrics)
+            }
+        }
+    }
+
+    private func persistPendingMetrics(for scheduledGeneration: Int) {
+        lock.lock()
+        guard generation == scheduledGeneration else {
+            lock.unlock()
+            return
+        }
+        let metrics = pendingMetrics
+        pendingMetrics = nil
+        scheduledWorkItem = nil
+        lock.unlock()
+
+        if let metrics {
+            persist(metrics)
+        }
+    }
+
+    private func persist(_ metrics: StoredProductivityMetrics) {
+        try? defaults.encode(metrics, forKey: key)
+    }
+}
+
+private final class NotificationObserverToken: @unchecked Sendable {
+    private let center: NotificationCenter
+    private let token: NSObjectProtocol
+
+    init(center: NotificationCenter, token: NSObjectProtocol) {
+        self.center = center
+        self.token = token
+    }
+
+    deinit {
+        center.removeObserver(token)
     }
 }

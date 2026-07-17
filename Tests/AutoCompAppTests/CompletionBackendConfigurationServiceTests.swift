@@ -4,6 +4,33 @@ import Security
 import XCTest
 
 final class CompletionBackendConfigurationServiceTests: XCTestCase {
+    func testFreshInstallUsesSharedDefaultsAndRequiresRemoteEndpointConfiguration() {
+        let defaultsName = "CompletionBackendConfigurationServiceTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: defaultsName)!
+        defer {
+            defaults.removePersistentDomain(forName: defaultsName)
+        }
+        let service = CompletionBackendConfigurationService(
+            defaults: defaults,
+            mirroredDefaults: [],
+            keychainService: "com.autocomp.tests.\(UUID().uuidString)",
+            keychainAccount: "remote-api-key"
+        )
+
+        let settings = service.load(localRuntimeState: .unavailableInBuild, values: [:])
+
+        XCTAssertEqual(settings.remoteBaseURL, CompletionBackendDefaults.remoteBaseURL)
+        XCTAssertEqual(settings.remoteModel, CompletionBackendDefaults.remoteModel)
+        XCTAssertEqual(settings.localMaxRAMBytes, CompletionBackendDefaults.localMaxRAMBytes)
+        XCTAssertEqual(CompletionBackendSettings().remoteBaseURL, "")
+        XCTAssertEqual(CompletionBackendSettings().remoteModel, settings.remoteModel)
+        XCTAssertEqual(CompletionBackendSettings().localMaxRAMBytes, settings.localMaxRAMBytes)
+        XCTAssertEqual(
+            BackendConfigurationHealthCheck(settings: settings).evaluate().status,
+            .fail
+        )
+    }
+
     func testRemoteSettingsSaveAndLoadWithoutVisibleMigration() {
         let defaultsName = "CompletionBackendConfigurationServiceTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: defaultsName)!

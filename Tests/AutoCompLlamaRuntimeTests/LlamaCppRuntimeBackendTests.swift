@@ -67,6 +67,21 @@ final class LlamaCppRuntimeBackendTests: XCTestCase {
         }
     }
 
+    func testStreamingWithoutLoadedModelFailsClearly() async {
+        let backend = LlamaCppRuntimeBackend(loadVocabularyOnly: true)
+
+        do {
+            for try await _ in backend.generateCompletionStream(for: makeRequest()) {
+                XCTFail("Expected no streamed partial")
+            }
+            XCTFail("Expected generation error")
+        } catch let error as LocalLlamaError {
+            XCTAssertEqual(error, .runtimeUnavailable)
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
     func testTokenizerProfileWithoutLoadedModelFailsClearly() async {
         let backend = LlamaCppRuntimeBackend(loadVocabularyOnly: true)
 
@@ -174,11 +189,95 @@ final class LlamaCppRuntimeBackendTests: XCTestCase {
         XCTAssertEqual(backend.cacheStats(), .empty)
     }
 
-    private func makeRequest() -> CompletionRequest {
+    func testBridgeCacheMissEventsMapToSpecificSafeResetReasons() {
+        XCTAssertNil(LlamaCppRuntimeBackend.cacheResetReason(event: 0))
+        XCTAssertEqual(LlamaCppRuntimeBackend.cacheResetReason(event: 1), .coldStart)
+        XCTAssertEqual(LlamaCppRuntimeBackend.cacheResetReason(event: 2), .noCommonPrefix)
+        XCTAssertEqual(LlamaCppRuntimeBackend.cacheResetReason(event: 3), .contextSizeChanged)
+        XCTAssertEqual(LlamaCppRuntimeBackend.cacheResetReason(event: 4), .samplingChanged)
+        XCTAssertEqual(LlamaCppRuntimeBackend.cacheResetReason(event: 5), .runtimeInconsistency)
+        XCTAssertNil(LlamaCppRuntimeBackend.cacheResetReason(event: 999))
+    }
+
+    func testLiveGGUFAppendReportsActualKVReuseWhenFixtureIsProvided() async throws {
+        guard let modelPath = ProcessInfo.processInfo.environment["AUTOCOMP_TEST_GGUF_PATH"] else {
+            throw XCTSkip("Set AUTOCOMP_TEST_GGUF_PATH for live prompt-reuse validation.")
+        }
+        let backend = LlamaCppRuntimeBackend()
+        try await backend.loadModel(configuration: LocalLlamaConfiguration(
+            modelPath: modelPath,
+            modelName: "live-prompt-reuse",
+            maxTokens: 2,
+            maxRAMBytes: 512 * 1_024 * 1_024
+        ))
+        addTeardownBlock {
+            await backend.shutdown()
+        }
+
+        _ = try await backend.generateCompletion(for: makeRequest(textBeforeCursor: "Once upon a time"))
+        let cold = backend.cacheStats()
+        _ = try await backend.generateCompletion(for: makeRequest(textBeforeCursor: "Once upon a time in"))
+        let appended = backend.cacheStats()
+
+        XCTAssertEqual(cold.lastResetReason, .coldStart)
+        XCTAssertGreaterThan(appended.hits, 0)
+        XCTAssertGreaterThan(appended.reuse.commonPrefixTokens, 0)
+        XCTAssertGreaterThan(appended.reuse.reusedTokens, 0)
+        XCTAssertLessThan(appended.reuse.prefillTokens, appended.reuse.promptTokens)
+        XCTAssertNil(appended.lastResetReason)
+        XCTAssertGreaterThanOrEqual(appended.reuse.tokenizationMilliseconds, 0)
+        XCTAssertGreaterThanOrEqual(appended.reuse.prefillMilliseconds, 0)
+        XCTAssertGreaterThanOrEqual(appended.reuse.decodeMilliseconds, 0)
+    }
+
+    func testLiveGGUFProfileAndMultiBranchScoringWhenFixtureIsProvided() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard let modelPath = environment["AUTOCOMP_TEST_GGUF_PATH"],
+              let profilePath = environment["AUTOCOMP_TEST_TOKEN_PROFILE_PATH"] else {
+            throw XCTSkip("Set AUTOCOMP_TEST_GGUF_PATH and AUTOCOMP_TEST_TOKEN_PROFILE_PATH for live validation.")
+        }
+        let backend = LlamaCppRuntimeBackend()
+        let runtime = LocalLlamaRuntimeCore(backend: backend)
+        try await runtime.load(configuration: LocalLlamaConfiguration(
+            modelPath: modelPath,
+            modelName: "live-validation",
+            maxTokens: 4,
+            maxRAMBytes: 512 * 1_024 * 1_024
+        ))
+        let profile = try AutoCompTokenProfileCodec.load(from: URL(fileURLWithPath: profilePath))
+        let actual = try await runtime.experimentalTokenProfile(modelFamily: profile.modelFamily)
+        try AutoCompTokenProfileCodec.validate(
+            profile,
+            tokenizerDigest: actual.tokenizerDigest,
+            vocabularySize: actual.vocabularySize
+        )
+
+        let result = try await AutoCompMultiBranchDecoder().decode(
+            prompt: "Continue this sentence with a short phrase: Once upon a time",
+            profile: profile,
+            policy: AutoCompMultiBranchDecodePolicy(
+                maximumTokens: 2,
+                maximumDisplayWidth: 40,
+                frontierWidth: 2,
+                candidateCount: 2,
+                candidatePoolSize: 64,
+                minimumProbability: 0,
+                relativeProbabilityCutoff: 0
+            ),
+            runtime: runtime
+        )
+        await runtime.shutdown()
+
+        XCTAssertFalse(result.candidates.isEmpty)
+        XCTAssertTrue(result.candidates.allSatisfy { !$0.text.isEmpty && $0.tokenIDs.count <= 2 })
+        XCTAssertGreaterThan(result.metrics.scoredTokens, 0)
+    }
+
+    private func makeRequest(textBeforeCursor: String = "Can you ") -> CompletionRequest {
         let context = TextContext(
             app: AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1),
             focusedElementID: "field",
-            textBeforeCursor: "Can you "
+            textBeforeCursor: textBeforeCursor
         )
         return CompletionRequestFactory().makeRequest(
             for: context,

@@ -38,9 +38,11 @@ final class EmojiKeyboardShortcutServiceTests: XCTestCase {
 
         let downArrow = try keyDown(125)
         let text = try keyDown(0)
+        let escape = try keyDown(CapturedInputEventAdapter.escapeKeyCode)
 
         XCTAssertNotNil(service.handle(type: .keyDown, event: downArrow))
         XCTAssertNotNil(service.handle(type: .keyDown, event: text))
+        XCTAssertNotNil(service.handle(type: .keyDown, event: escape))
 
         RunLoop.main.run(until: Date().addingTimeInterval(0.05))
         XCTAssertTrue(emojiCommands.isEmpty)
@@ -66,6 +68,22 @@ final class EmojiKeyboardShortcutServiceTests: XCTestCase {
 
         RunLoop.main.run(until: Date().addingTimeInterval(0.05))
         XCTAssertEqual(inputEvents, [.text(keyCode: 0, isSuggestionTrigger: false)])
+    }
+
+    func testSingleResultMacroConsumesTabButCancelsAndPassesArrowThrough() throws {
+        let service = KeyboardShortcutService()
+        var commands: [EmojiKeyboardCommand] = []
+        service.configureHandlers(onCommand: { _ in }, onEmojiCommand: { commands.append($0) })
+        service.setInlineCommandState(active: true, capabilities: .singleResult)
+
+        XCTAssertNil(service.handle(type: .keyDown, event: try keyDown(CapturedInputEventAdapter.tabKeyCode)))
+        RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+        XCTAssertEqual(commands, [.acceptSelected])
+
+        service.setInlineCommandState(active: true, capabilities: .singleResult)
+        XCTAssertNotNil(service.handle(type: .keyDown, event: try keyDown(125)))
+        RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+        XCTAssertEqual(commands, [.acceptSelected, .cancel])
     }
 
     private func keyDown(_ keyCode: UInt16, flags: CGEventFlags = []) throws -> CGEvent {

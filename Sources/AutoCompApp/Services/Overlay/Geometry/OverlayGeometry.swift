@@ -25,6 +25,12 @@ enum OverlayGeometry {
         } ?? NSScreen.main ?? NSScreen.screens[0]
     }
 
+    static func screen(containingAppKitRect rect: CGRect) -> NSScreen {
+        NSScreen.screens.first { $0.frame.intersects(rect) || $0.frame.contains(CGPoint(x: rect.midX, y: rect.midY)) }
+            ?? NSScreen.main
+            ?? NSScreen.screens[0]
+    }
+
     static func insertionPointX(for caretRect: CGRect) -> CGFloat {
         isFineCaret(caretRect) ? caretRect.maxX : caretRect.minX
     }

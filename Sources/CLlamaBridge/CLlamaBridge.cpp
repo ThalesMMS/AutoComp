@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <chrono>
 #include <exception>
 
 typedef struct AutoCompLlamaSamplingSignature {
@@ -28,7 +29,36 @@ struct AutoCompLlamaModel {
     uint64_t cache_hits;
     uint64_t cache_misses;
     uint64_t cache_resets;
+    int32_t last_prompt_tokens;
+    int32_t last_common_prefix_tokens;
+    int32_t last_reused_tokens;
+    int32_t last_prefill_tokens;
+    uint64_t last_tokenization_microseconds;
+    uint64_t last_prefill_microseconds;
+    uint64_t last_decode_microseconds;
+    uint64_t cache_rebuilds;
+    int32_t last_cache_miss_reason;
+    struct llama_context *scoring_ctx;
+    llama_token *scoring_tokens;
+    int32_t scoring_token_count;
+    uint32_t scoring_context_tokens;
 };
+
+enum AutoCompLlamaCacheMissReason {
+    AUTOCOMP_LLAMA_CACHE_MISS_NONE = 0,
+    AUTOCOMP_LLAMA_CACHE_MISS_COLD_START = 1,
+    AUTOCOMP_LLAMA_CACHE_MISS_NO_COMMON_PREFIX = 2,
+    AUTOCOMP_LLAMA_CACHE_MISS_CONTEXT_SIZE_CHANGED = 3,
+    AUTOCOMP_LLAMA_CACHE_MISS_SAMPLING_CHANGED = 4,
+    AUTOCOMP_LLAMA_CACHE_MISS_RUNTIME_INCONSISTENCY = 5,
+};
+
+static uint64_t autocomp_llama_elapsed_microseconds(
+    std::chrono::steady_clock::time_point start,
+    std::chrono::steady_clock::time_point end
+) {
+    return (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+}
 
 static const int32_t autocomp_llama_top_k = 40;
 static const float autocomp_llama_top_p = 0.95f;
@@ -142,6 +172,20 @@ static void autocomp_llama_clear_cache(AutoCompLlamaModel *model, bool count_res
     if (count_reset && had_cache) {
         model->cache_resets += 1;
     }
+}
+
+static void autocomp_llama_clear_scoring_cache(AutoCompLlamaModel *model) {
+    if (model == NULL) {
+        return;
+    }
+    if (model->scoring_ctx != NULL) {
+        llama_free(model->scoring_ctx);
+        model->scoring_ctx = NULL;
+    }
+    free(model->scoring_tokens);
+    model->scoring_tokens = NULL;
+    model->scoring_token_count = 0;
+    model->scoring_context_tokens = 0;
 }
 
 static struct llama_context *autocomp_llama_create_context(
@@ -632,6 +676,279 @@ bool autocomp_llama_model_tokenizer_profile(
     return true;
 }
 
+bool autocomp_llama_model_token_metadata(
+    const AutoCompLlamaModel *model,
+    int32_t token,
+    char *bytes,
+    int32_t byte_capacity,
+    AutoCompLlamaTokenMetadata *metadata,
+    AutoCompLlamaError *error
+) {
+    if (model == NULL || model->raw == NULL || metadata == NULL) {
+        autocomp_llama_set_error(error, 28, "Model or token metadata output is unavailable.");
+        return false;
+    }
+    const struct llama_vocab *vocab = llama_model_get_vocab(model->raw);
+    const int32_t vocabulary_size = vocab == NULL ? 0 : llama_vocab_n_tokens(vocab);
+    if (vocab == NULL || token < 0 || token >= vocabulary_size) {
+        autocomp_llama_set_error(error, 28, "Token id is outside the model vocabulary.");
+        return false;
+    }
+
+    int32_t piece_result = llama_token_to_piece(vocab, token, bytes, byte_capacity, 0, true);
+    int32_t piece_length = piece_result < 0 ? -piece_result : piece_result;
+    if (piece_length < 0 || (bytes != NULL && piece_length > byte_capacity)) {
+        autocomp_llama_set_error(error, 28, "Token piece buffer is too small.");
+        return false;
+    }
+    metadata->byte_count = piece_length;
+    metadata->flags = 0;
+    if (llama_vocab_is_control(vocab, token)) metadata->flags |= (1u << 0);
+    if (llama_vocab_is_eog(vocab, token)) {
+        metadata->flags |= (1u << 2);
+        metadata->flags |= (1u << 3);
+    }
+    const bool known_special = token == llama_vocab_bos(vocab)
+        || token == llama_vocab_eos(vocab)
+        || token == llama_vocab_eot(vocab)
+        || token == llama_vocab_fim_pre(vocab)
+        || token == llama_vocab_fim_suf(vocab)
+        || token == llama_vocab_fim_mid(vocab);
+    if (known_special) metadata->flags |= (1u << 1);
+
+    uint16_t display_width = 0;
+    bool whitespace_only = piece_length > 0;
+    bool printable = false;
+    if (bytes != NULL) {
+        for (int32_t index = 0; index < piece_length; index++) {
+            const uint8_t value = (uint8_t)bytes[index];
+            const bool whitespace = value == ' ' || value == '\t' || value == '\n' || value == '\r';
+            whitespace_only = whitespace_only && whitespace;
+            if (value == '\t') {
+                display_width = (uint16_t)(display_width + 4);
+            } else if (value >= 32 && value != 127 && (value < 128 || value >= 192)) {
+                display_width = (uint16_t)(display_width + 1);
+                printable = true;
+            }
+        }
+    }
+    if (whitespace_only) metadata->flags |= (1u << 4);
+    if (printable) metadata->flags |= (1u << 5);
+    metadata->approximate_display_width = display_width;
+    autocomp_llama_set_error(error, 0, "");
+    return true;
+}
+
+static bool autocomp_llama_token_is_allowed(
+    int32_t token,
+    const int32_t *allowed_tokens,
+    int32_t allowed_token_count
+) {
+    if (allowed_tokens == NULL || allowed_token_count <= 0) return true;
+    for (int32_t index = 0; index < allowed_token_count; index++) {
+        if (allowed_tokens[index] == token) return true;
+    }
+    return false;
+}
+
+int32_t autocomp_llama_model_top_tokens(
+    AutoCompLlamaModel *model,
+    const char *prompt,
+    const int32_t *generated_tokens,
+    int32_t generated_token_count,
+    const int32_t *allowed_tokens,
+    int32_t allowed_token_count,
+    int32_t limit,
+    int32_t *result_tokens,
+    float *result_log_probabilities,
+    AutoCompLlamaError *error
+) {
+    if (model == NULL || model->raw == NULL || prompt == NULL || prompt[0] == '\0'
+        || generated_token_count < 0 || limit <= 0 || result_tokens == NULL
+        || result_log_probabilities == NULL) {
+        autocomp_llama_set_error(error, 29, "Invalid multi-branch scoring arguments.");
+        return -1;
+    }
+    const struct llama_vocab *vocab = llama_model_get_vocab(model->raw);
+    if (vocab == NULL) {
+        autocomp_llama_set_error(error, 29, "Model vocabulary is unavailable.");
+        return -1;
+    }
+    bool prompt_format_failed = false;
+    char *formatted_prompt = autocomp_llama_format_chat_prompt(
+        model->raw,
+        prompt,
+        &prompt_format_failed,
+        error
+    );
+    if (prompt_format_failed) return -1;
+    const char *prompt_to_tokenize = formatted_prompt != NULL ? formatted_prompt : prompt;
+    int32_t prompt_count = 0;
+    if (!autocomp_llama_tokenize(
+        vocab,
+        prompt_to_tokenize,
+        (int32_t)strlen(prompt_to_tokenize),
+        NULL,
+        0,
+        true,
+        true,
+        &prompt_count,
+        error,
+        29
+    )) {
+        free(formatted_prompt);
+        return -1;
+    }
+    if (prompt_count < 0) prompt_count = -prompt_count;
+    if (prompt_count <= 0 || prompt_count > INT32_MAX - generated_token_count) {
+        free(formatted_prompt);
+        autocomp_llama_set_error(error, 29, "Prompt tokenization produced an invalid size.");
+        return -1;
+    }
+    const int32_t total_count = prompt_count + generated_token_count;
+    llama_token *tokens = (llama_token *)malloc((size_t)total_count * sizeof(llama_token));
+    if (tokens == NULL) {
+        free(formatted_prompt);
+        autocomp_llama_set_error(error, 29, "Could not allocate multi-branch scoring tokens.");
+        return -1;
+    }
+    int32_t tokenized = 0;
+    if (!autocomp_llama_tokenize(
+        vocab,
+        prompt_to_tokenize,
+        (int32_t)strlen(prompt_to_tokenize),
+        tokens,
+        prompt_count,
+        true,
+        true,
+        &tokenized,
+        error,
+        29
+    ) || tokenized != prompt_count) {
+        free(formatted_prompt);
+        free(tokens);
+        return -1;
+    }
+    free(formatted_prompt);
+    if (generated_token_count > 0) {
+        memcpy(tokens + prompt_count, generated_tokens, (size_t)generated_token_count * sizeof(int32_t));
+    }
+
+    uint32_t context_tokens = 512;
+    while (context_tokens < 4096 && total_count + 8 >= (int32_t)context_tokens) {
+        context_tokens *= 2;
+    }
+    if (context_tokens > 4096 || total_count >= (int32_t)context_tokens) {
+        free(tokens);
+        autocomp_llama_set_error(error, 29, "Prompt and branch exceed the experimental decoder context.");
+        return -1;
+    }
+
+    if (model->scoring_ctx == NULL || model->scoring_context_tokens != context_tokens) {
+        autocomp_llama_clear_scoring_cache(model);
+        model->scoring_ctx = autocomp_llama_create_context(model->raw, context_tokens, error);
+        if (model->scoring_ctx == NULL) {
+            free(tokens);
+            return -1;
+        }
+        model->scoring_context_tokens = context_tokens;
+    }
+
+    int32_t decode_start = 0;
+    if (model->scoring_tokens != NULL && model->scoring_token_count > 0) {
+        const int32_t common_prefix = autocomp_llama_common_prefix_count(
+            model->scoring_tokens,
+            model->scoring_token_count,
+            tokens,
+            total_count
+        );
+        const bool identical = common_prefix == model->scoring_token_count
+            && common_prefix == total_count;
+        decode_start = common_prefix;
+        if (!identical && decode_start == total_count && decode_start > 0) {
+            decode_start -= 1;
+        }
+        if (decode_start < model->scoring_token_count) {
+            llama_memory_t memory = llama_get_memory(model->scoring_ctx);
+            if (!llama_memory_seq_rm(memory, 0, decode_start, -1)) {
+                autocomp_llama_clear_scoring_cache(model);
+                model->scoring_ctx = autocomp_llama_create_context(model->raw, context_tokens, error);
+                if (model->scoring_ctx == NULL) {
+                    free(tokens);
+                    return -1;
+                }
+                model->scoring_context_tokens = context_tokens;
+                decode_start = 0;
+            }
+        }
+    }
+
+    if (decode_start < total_count) {
+        struct llama_batch batch = llama_batch_get_one(
+            tokens + decode_start,
+            total_count - decode_start
+        );
+        int32_t decode_result = 0;
+        const bool decoded = autocomp_llama_decode(
+            model->scoring_ctx,
+            batch,
+            &decode_result,
+            error,
+            29
+        );
+        if (!decoded || decode_result != 0) {
+            free(tokens);
+            autocomp_llama_clear_scoring_cache(model);
+            if (decoded) autocomp_llama_set_error(error, 29, "llama_decode failed during multi-branch scoring.");
+            return -1;
+        }
+    }
+
+    free(model->scoring_tokens);
+    model->scoring_tokens = tokens;
+    model->scoring_token_count = total_count;
+    tokens = NULL;
+
+    float *logits = llama_get_logits(model->scoring_ctx);
+    if (logits == NULL) {
+        autocomp_llama_clear_scoring_cache(model);
+        autocomp_llama_set_error(error, 29, "llama.cpp returned no logits for multi-branch scoring.");
+        return -1;
+    }
+    const int32_t vocabulary_size = llama_vocab_n_tokens(vocab);
+    float maximum_logit = -INFINITY;
+    for (int32_t token = 0; token < vocabulary_size; token++) {
+        if (logits[token] > maximum_logit) maximum_logit = logits[token];
+    }
+    double probability_sum = 0.0;
+    for (int32_t token = 0; token < vocabulary_size; token++) {
+        probability_sum += exp((double)logits[token] - (double)maximum_logit);
+    }
+    const float log_denominator = maximum_logit + (float)log(probability_sum);
+    int32_t result_count = 0;
+    for (int32_t token = 0; token < vocabulary_size; token++) {
+        if (!autocomp_llama_token_is_allowed(token, allowed_tokens, allowed_token_count)) continue;
+        const float log_probability = logits[token] - log_denominator;
+        int32_t insertion = result_count;
+        while (insertion > 0 && (result_log_probabilities[insertion - 1] < log_probability
+            || (result_log_probabilities[insertion - 1] == log_probability
+                && result_tokens[insertion - 1] > token))) {
+            insertion -= 1;
+        }
+        if (insertion >= limit) continue;
+        const int32_t upper = result_count < limit ? result_count : limit - 1;
+        for (int32_t move = upper; move > insertion; move--) {
+            result_tokens[move] = result_tokens[move - 1];
+            result_log_probabilities[move] = result_log_probabilities[move - 1];
+        }
+        result_tokens[insertion] = token;
+        result_log_probabilities[insertion] = log_probability;
+        if (result_count < limit) result_count += 1;
+    }
+    autocomp_llama_set_error(error, 0, "");
+    return result_count;
+}
+
 void autocomp_llama_backend_init(void) {
     llama_log_set(autocomp_llama_discard_log, NULL);
     llama_backend_init();
@@ -684,17 +1001,32 @@ AutoCompLlamaModel *autocomp_llama_model_load(
     model->cache_hits = 0;
     model->cache_misses = 0;
     model->cache_resets = 0;
+    model->last_prompt_tokens = 0;
+    model->last_common_prefix_tokens = 0;
+    model->last_reused_tokens = 0;
+    model->last_prefill_tokens = 0;
+    model->last_tokenization_microseconds = 0;
+    model->last_prefill_microseconds = 0;
+    model->last_decode_microseconds = 0;
+    model->cache_rebuilds = 0;
+    model->last_cache_miss_reason = AUTOCOMP_LLAMA_CACHE_MISS_NONE;
+    model->scoring_ctx = NULL;
+    model->scoring_tokens = NULL;
+    model->scoring_token_count = 0;
+    model->scoring_context_tokens = 0;
     autocomp_llama_set_error(error, 0, "");
     return model;
 }
 
-char *autocomp_llama_model_generate(
+char *autocomp_llama_model_generate_stream(
     AutoCompLlamaModel *model,
     const char *prompt,
     int32_t max_tokens,
     float temperature,
     const char * const *stop_sequences,
     int32_t stop_sequence_count,
+    AutoCompLlamaStreamCallback callback,
+    void *callback_context,
     AutoCompLlamaError *error
 ) {
     if (model == NULL || model->raw == NULL) {
@@ -710,6 +1042,15 @@ char *autocomp_llama_model_generate(
         return NULL;
     }
 
+    model->last_prompt_tokens = 0;
+    model->last_common_prefix_tokens = 0;
+    model->last_reused_tokens = 0;
+    model->last_prefill_tokens = 0;
+    model->last_tokenization_microseconds = 0;
+    model->last_prefill_microseconds = 0;
+    model->last_decode_microseconds = 0;
+    model->last_cache_miss_reason = AUTOCOMP_LLAMA_CACHE_MISS_NONE;
+    const auto tokenization_started_at = std::chrono::steady_clock::now();
     AutoCompLlamaSamplingSignature sampling = autocomp_llama_sampling_signature(max_tokens, temperature);
     const struct llama_vocab *vocab = llama_model_get_vocab(model->raw);
     if (vocab == NULL) {
@@ -789,6 +1130,11 @@ char *autocomp_llama_model_generate(
         return NULL;
     }
     prompt_token_count = tokenized;
+    model->last_prompt_tokens = prompt_token_count;
+    model->last_tokenization_microseconds = autocomp_llama_elapsed_microseconds(
+        tokenization_started_at,
+        std::chrono::steady_clock::now()
+    );
 
     uint32_t context_tokens = (uint32_t)(prompt_token_count + max_tokens + 8);
     if (context_tokens < 512) {
@@ -805,25 +1151,35 @@ char *autocomp_llama_model_generate(
 
     bool can_reuse_cache = false;
     int32_t decode_start = 0;
-    if (model->cached_ctx != NULL
+    const bool has_cached_prompt = model->cached_ctx != NULL
         && model->cached_prompt_tokens != NULL
-        && model->cached_prompt_count > 0
-        && model->cached_context_tokens == context_tokens
-        && autocomp_llama_sampling_signature_equal(model->cached_sampling, sampling)) {
+        && model->cached_prompt_count > 0;
+    if (!has_cached_prompt) {
+        model->last_cache_miss_reason = AUTOCOMP_LLAMA_CACHE_MISS_COLD_START;
+    } else if (model->cached_context_tokens != context_tokens) {
+        model->last_cache_miss_reason = AUTOCOMP_LLAMA_CACHE_MISS_CONTEXT_SIZE_CHANGED;
+    } else if (!autocomp_llama_sampling_signature_equal(model->cached_sampling, sampling)) {
+        model->last_cache_miss_reason = AUTOCOMP_LLAMA_CACHE_MISS_SAMPLING_CHANGED;
+    } else {
         int32_t common_prefix = autocomp_llama_common_prefix_count(
             model->cached_prompt_tokens,
             model->cached_prompt_count,
             prompt_tokens,
             prompt_token_count
         );
+        model->last_common_prefix_tokens = common_prefix;
         if (common_prefix > 0) {
             decode_start = common_prefix - 1;
             llama_memory_t memory = llama_get_memory(model->cached_ctx);
             can_reuse_cache = llama_memory_seq_rm(memory, 0, decode_start, -1);
             if (!can_reuse_cache) {
+                model->cache_rebuilds += 1;
+                model->last_cache_miss_reason = AUTOCOMP_LLAMA_CACHE_MISS_RUNTIME_INCONSISTENCY;
                 autocomp_llama_clear_cache(model, true);
                 decode_start = 0;
             }
+        } else {
+            model->last_cache_miss_reason = AUTOCOMP_LLAMA_CACHE_MISS_NO_COMMON_PREFIX;
         }
     }
 
@@ -847,16 +1203,24 @@ char *autocomp_llama_model_generate(
         model->cached_sampling = sampling;
     }
 
+    model->last_reused_tokens = can_reuse_cache ? decode_start : 0;
+    model->last_prefill_tokens = prompt_token_count - model->last_reused_tokens;
+
     struct llama_batch prompt_batch = llama_batch_get_one(
         prompt_tokens + decode_start,
         prompt_token_count - decode_start
     );
     int32_t decode_result = 0;
+    const auto prefill_started_at = std::chrono::steady_clock::now();
     if (!autocomp_llama_decode(ctx, prompt_batch, &decode_result, error, 14)) {
         free(prompt_tokens);
         autocomp_llama_clear_cache(model, true);
         return NULL;
     }
+    model->last_prefill_microseconds = autocomp_llama_elapsed_microseconds(
+        prefill_started_at,
+        std::chrono::steady_clock::now()
+    );
     if (decode_result != 0) {
         free(prompt_tokens);
         autocomp_llama_clear_cache(model, true);
@@ -952,11 +1316,16 @@ char *autocomp_llama_model_generate(
             break;
         }
 
+        if (callback != NULL && !callback(incremental_text, generated_count, callback_context)) {
+            break;
+        }
+
         if (i == max_tokens - 1) {
             break;
         }
 
         struct llama_batch next_batch = llama_batch_get_one(&token, 1);
+        const auto decode_started_at = std::chrono::steady_clock::now();
         if (!autocomp_llama_decode(ctx, next_batch, &decode_result, error, 17)) {
             free(incremental_text);
             free(generated_tokens);
@@ -964,6 +1333,10 @@ char *autocomp_llama_model_generate(
             autocomp_llama_clear_cache(model, true);
             return NULL;
         }
+        model->last_decode_microseconds += autocomp_llama_elapsed_microseconds(
+            decode_started_at,
+            std::chrono::steady_clock::now()
+        );
         if (decode_result != 0) {
             free(incremental_text);
             free(generated_tokens);
@@ -1008,8 +1381,31 @@ char *autocomp_llama_model_generate(
     return text;
 }
 
+char *autocomp_llama_model_generate(
+    AutoCompLlamaModel *model,
+    const char *prompt,
+    int32_t max_tokens,
+    float temperature,
+    const char * const *stop_sequences,
+    int32_t stop_sequence_count,
+    AutoCompLlamaError *error
+) {
+    return autocomp_llama_model_generate_stream(
+        model,
+        prompt,
+        max_tokens,
+        temperature,
+        stop_sequences,
+        stop_sequence_count,
+        NULL,
+        NULL,
+        error
+    );
+}
+
 void autocomp_llama_model_reset_cache(AutoCompLlamaModel *model) {
     autocomp_llama_clear_cache(model, true);
+    autocomp_llama_clear_scoring_cache(model);
 }
 
 AutoCompLlamaCacheStats autocomp_llama_model_cache_stats(const AutoCompLlamaModel *model) {
@@ -1019,6 +1415,15 @@ AutoCompLlamaCacheStats autocomp_llama_model_cache_stats(const AutoCompLlamaMode
     stats.resets = 0;
     stats.retained_prompt_tokens = 0;
     stats.context_tokens = 0;
+    stats.last_prompt_tokens = 0;
+    stats.last_common_prefix_tokens = 0;
+    stats.last_reused_tokens = 0;
+    stats.last_prefill_tokens = 0;
+    stats.last_tokenization_microseconds = 0;
+    stats.last_prefill_microseconds = 0;
+    stats.last_decode_microseconds = 0;
+    stats.cache_rebuilds = 0;
+    stats.last_cache_miss_reason = AUTOCOMP_LLAMA_CACHE_MISS_NONE;
     if (model == NULL) {
         return stats;
     }
@@ -1028,6 +1433,15 @@ AutoCompLlamaCacheStats autocomp_llama_model_cache_stats(const AutoCompLlamaMode
     stats.resets = model->cache_resets;
     stats.retained_prompt_tokens = model->cached_prompt_count;
     stats.context_tokens = model->cached_context_tokens;
+    stats.last_prompt_tokens = model->last_prompt_tokens;
+    stats.last_common_prefix_tokens = model->last_common_prefix_tokens;
+    stats.last_reused_tokens = model->last_reused_tokens;
+    stats.last_prefill_tokens = model->last_prefill_tokens;
+    stats.last_tokenization_microseconds = model->last_tokenization_microseconds;
+    stats.last_prefill_microseconds = model->last_prefill_microseconds;
+    stats.last_decode_microseconds = model->last_decode_microseconds;
+    stats.cache_rebuilds = model->cache_rebuilds;
+    stats.last_cache_miss_reason = model->last_cache_miss_reason;
     return stats;
 }
 
@@ -1037,6 +1451,7 @@ void autocomp_llama_model_free(AutoCompLlamaModel *model) {
     }
 
     autocomp_llama_clear_cache(model, false);
+    autocomp_llama_clear_scoring_cache(model);
     if (model->raw != NULL) {
         llama_model_free(model->raw);
     }

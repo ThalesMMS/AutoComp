@@ -149,6 +149,50 @@ final class FocusTrackingModelTests: XCTestCase {
         }
     }
 
+    func testTransientUnreadableCapabilityIsSuppressedOnceThenApplied() async throws {
+        let resolver = StubFocusSnapshotResolver(results: [
+            .success(focusSnapshot(focusedElementID: "field-a", textBeforeCursor: "Please ")),
+            .success(focusSnapshot(focusedElementID: "field-a", textBeforeCursor: nil)),
+            .success(focusSnapshot(focusedElementID: "field-a", textBeforeCursor: nil))
+        ])
+        let model = FocusTrackingModel(
+            focusSnapshotResolver: resolver,
+            textGeometryResolver: StubGeometryResolver()
+        )
+
+        let readable = try await model.currentContext()
+        let preserved = try await model.currentContext()
+
+        XCTAssertEqual(preserved, readable)
+        XCTAssertEqual(model.capability, .readableText)
+        XCTAssertEqual(model.capabilityFlickerStats.suppressedReads, 1)
+        XCTAssertEqual(model.capabilityFlickerStats.lastReason, "same-field-transient-capability")
+
+        do {
+            _ = try await model.currentContext()
+            XCTFail("Expected the second consecutive unreadable read to apply")
+        } catch {
+            XCTAssertEqual(error as? AXTextContextError, .noReadableText)
+        }
+        XCTAssertEqual(model.capability, .unreadableText)
+        XCTAssertNil(model.snapshot)
+        XCTAssertEqual(model.capabilityFlickerStats.appliedReads, 1)
+        XCTAssertEqual(model.capabilityFlickerStats.lastReason, "consecutive-transient-threshold")
+    }
+
+    func testCapabilityFlickerGateNeverDelaysSecureOrFocusChange() {
+        var gate = FocusCapabilityFlickerGate()
+
+        XCTAssertEqual(
+            gate.evaluate(capability: .secureOrUnsupported, sameStableField: true),
+            .apply(reason: "secure-or-unsupported-immediate")
+        )
+        XCTAssertEqual(
+            gate.evaluate(capability: .unavailable, sameStableField: false),
+            .apply(reason: "focus-identity-changed")
+        )
+    }
+
     func testSecureFieldPublishesReadableRejection() async {
         let resolver = StubFocusSnapshotResolver(
             results: [
@@ -359,6 +403,90 @@ final class FocusTrackingModelTests: XCTestCase {
         XCTAssertEqual(window.fullTextWindow, "3456789a")
     }
 
+    func testFocusSnapshotTextWindowNeverSplitsComposedCharacters() {
+        let window = FocusSnapshotTextWindow.resolve(
+            textAfterCursor: "😀abc",
+            selectedText: "e\u{301}x",
+            fullText: "A😀BCDEF",
+            selectedRange: NSRange(location: 4, length: 0),
+            maxTextAfterCursorCharacters: 1,
+            maxSelectedTextCharacters: 1,
+            maxFullTextWindowCharacters: 4
+        )
+
+        XCTAssertNil(window.textAfterCursor)
+        XCTAssertNil(window.selectedText)
+        XCTAssertEqual(window.fullTextWindow, "BCD")
+        XCTAssertFalse(window.fullTextWindow?.contains("�") == true)
+        XCTAssertEqual(UTF16TextRange.prefix("A😀B", endingAt: 2), "A")
+        XCTAssertEqual(UTF16TextRange.suffix("A😀B", startingAt: 2), "B")
+        XCTAssertEqual(
+            UTF16TextRange.substring("A😀B", enclosedBy: NSRange(location: 1, length: 1)),
+            ""
+        )
+    }
+
+    func testFocusSnapshotTextCaptureUsesRangedReadsWithoutLoadingFullValue() {
+        let source = "0123456789ABCDEFGHIJ"
+        var requestedRanges: [CFRange] = []
+        var fullTextReadCount = 0
+
+        let capture = FocusSnapshotTextCapture.resolve(
+            selectedRange: NSRange(location: 10, length: 0),
+            textLength: (source as NSString).length,
+            readRange: { range in
+                requestedRanges.append(range)
+                return UTF16TextRange.substring(source, enclosedBy: NSRange(
+                    location: range.location,
+                    length: range.length
+                ))
+            },
+            readFullText: {
+                fullTextReadCount += 1
+                return source
+            },
+            maxTextAfterCursorCharacters: 4,
+            maxSelectedTextCharacters: 4,
+            maxFullTextWindowCharacters: 8
+        )
+
+        XCTAssertEqual(fullTextReadCount, 0)
+        XCTAssertEqual(capture.textBeforeCursor, "0123456789")
+        XCTAssertEqual(capture.textAfterCursor, "ABCD")
+        XCTAssertNil(capture.selectedText)
+        XCTAssertEqual(capture.fullTextWindow, "6789ABCD")
+        XCTAssertTrue(requestedRanges.contains { $0.location == 0 && $0.length == 10 })
+        XCTAssertTrue(requestedRanges.contains { $0.location == 10 && $0.length == 4 })
+    }
+
+    func testFocusSnapshotTextCaptureFallsBackOnceWhenRequiredRangeFails() {
+        let source = "0123456789"
+        var fullTextReadCount = 0
+
+        let capture = FocusSnapshotTextCapture.resolve(
+            selectedRange: NSRange(location: 5, length: 0),
+            textLength: (source as NSString).length,
+            readRange: { range in
+                if range.location == 0, range.length == 5 {
+                    return nil
+                }
+                return UTF16TextRange.substring(source, enclosedBy: NSRange(
+                    location: range.location,
+                    length: range.length
+                ))
+            },
+            readFullText: {
+                fullTextReadCount += 1
+                return source
+            }
+        )
+
+        XCTAssertEqual(fullTextReadCount, 1)
+        XCTAssertEqual(capture.textBeforeCursor, "01234")
+        XCTAssertEqual(capture.textAfterCursor, "56789")
+        XCTAssertEqual(capture.textLength, 10)
+    }
+
     private func focusSnapshot(
         app: AppIdentity = AppIdentity(bundleID: "com.apple.TextEdit", displayName: "TextEdit", processID: 1),
         focusedElementID: String,
@@ -384,7 +512,6 @@ final class FocusTrackingModelTests: XCTestCase {
             isGoogleDocsElement: false,
             isCodexComposerElement: false,
             selectedRange: selectedRange,
-            fullText: textBeforeCursor,
             textLength: textBeforeCursor.map { ($0 as NSString).length } ?? 0,
             textBeforeCursor: textBeforeCursor,
             textAfterCursor: textAfterCursor,

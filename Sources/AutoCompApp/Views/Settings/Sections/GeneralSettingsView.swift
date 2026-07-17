@@ -6,6 +6,7 @@ struct GeneralSettingsView: View {
     @EnvironmentObject private var permissions: PermissionService
     @EnvironmentObject private var engine: SuggestionEngine
     @State private var emojiPreferences = EmojiVariantPreferences()
+    @State private var macroPreferences = MacroPreferences()
 
     var body: some View {
         SettingsPaneForm(title: "General") {
@@ -50,6 +51,16 @@ struct GeneralSettingsView: View {
                 SectionFooterNote(text: "Scoped keyboard handling keeps the picker separate from autocomplete.")
             }
 
+            Section("Local macros") {
+                Toggle("Enable deterministic inline macros", isOn: macroEnabledBinding)
+                LabeledContent("Trigger", value: ";;")
+                LabeledContent("Accept key", value: controller.emojiPickerAcceptKeyLabel)
+                Text("Arithmetic")
+                Text("Relative dates: today, tomorrow, yesterday, date+N")
+                Text("Units: length, mass, and temperature")
+                SectionFooterNote(text: "Runs locally without AI or network access. Type ;; at a word boundary, then a supported expression.")
+            }
+
             Section("Quick actions") {
                 Button("Open Setup") {
                     controller.selectedSettingsSection = .setup
@@ -64,6 +75,7 @@ struct GeneralSettingsView: View {
         }
         .onAppear {
             emojiPreferences = controller.emojiVariantPreferences()
+            macroPreferences = controller.macroPreferences()
         }
     }
 
@@ -92,6 +104,16 @@ struct GeneralSettingsView: View {
             var updated = emojiPreferences
             updated.skinTone = tone
             saveEmojiPreferences(updated)
+        }
+    }
+
+    private var macroEnabledBinding: Binding<Bool> {
+        Binding {
+            macroPreferences.isEnabled
+        } set: { enabled in
+            let updated = MacroPreferences(isEnabled: enabled)
+            macroPreferences = updated
+            controller.saveMacroPreferences(updated)
         }
     }
 

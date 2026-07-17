@@ -1,6 +1,6 @@
 import Foundation
 
-public enum CompletionEngineKind: String, Codable, CaseIterable, Sendable {
+public enum CompletionEngineKind: String, Codable, CaseIterable, Hashable, Sendable {
     case remote
     case localLlama
     case appleIntelligence
@@ -360,5 +360,25 @@ public struct CompletionProviderRouter: MultiplePersonalizationContextAwareCompl
                 personalizationSamples: personalizationSamples
             )
         ]
+    }
+}
+
+extension CompletionProviderRouter: StreamingCompletionProvider {
+    public var streamingCompletionCapability: StreamingCompletionCapability? {
+        (provider() as? any StreamingCompletionProvider)?.streamingCompletionCapability
+    }
+
+    public func streamCompletion(
+        request: ProviderInvocation.Request,
+        metadata: StreamingCompletionMetadata
+    ) -> AsyncThrowingStream<CompletionPartial, Error> {
+        guard let provider = provider() as? any StreamingCompletionProvider,
+              let capability = provider.streamingCompletionCapability,
+              capability.route == activeKind else {
+            return AsyncThrowingStream { continuation in
+                continuation.finish(throwing: CompletionProviderRouterError.unavailable(activeKind))
+            }
+        }
+        return provider.streamCompletion(request: request, metadata: metadata)
     }
 }
